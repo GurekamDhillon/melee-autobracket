@@ -37,7 +37,9 @@ impl IntoResponse for ApiError {
 }
 
 impl From<sqlx::Error> for ApiError {
-    fn from(_: sqlx::Error) -> Self {
+    /// Logs the cause; the client only sees a generic 500.
+    fn from(e: sqlx::Error) -> Self {
+        eprintln!("database error: {e}");
         ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, "internal error")
     }
 }

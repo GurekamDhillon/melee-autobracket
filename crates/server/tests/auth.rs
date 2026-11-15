@@ -297,3 +297,53 @@ async fn extractors_enforce_roles() {
         StatusCode::UNAUTHORIZED
     );
 }
+
+/// Concurrent read-then-write registrations must not trip over SQLite's write lock.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn concurrent_registrations_all_succeed() {
+    let app = TestApp::spawn(|_| {}).await;
+    let sends = (0..20)
+        .map(|i| signed_register(&app, &new_key(), now(), &reg(&format!("p{i}"), None)).send());
+    let results = spawn_all(sends).await;
+    for res in results {
+        assert_eq!(res.unwrap().status(), StatusCode::CREATED);
+    }
+    let n: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM players")
+        .fetch_one(&app.state.db)
+        .await
+        .unwrap();
+    assert_eq!(n, 20);
+}
+
+async fn spawn_all<F: std::future::Future + Send + 'static>(
+    futs: impl Iterator<Item = F>,
+) -> Vec<F::Output>
+where
+    F::Output: Send + 'static,
+{
+    let handles: Vec<_> = futs.map(tokio::spawn).collect();
+    let mut out = Vec::new();
+    for h in handles {
+        out.push(h.await.unwrap());
+    }
+    out
+}
+
+/// Under `Router::nest` the signature still covers the full path the client sent.
+#[tokio::test]
+async fn signature_covers_full_path_when_nested() {
+    let app = TestApp::spawn(|_| {}).await;
+    let inner = Router::new().route("/t", post(|t: To| async move { t.body.len().to_string() }));
+    let router = Router::new()
+        .nest("/v1/nested", inner)
+        .with_state(app.state.clone());
+    let h = sign_request(&app.to, "POST", "/v1/nested/t?x=1", now(), b"abc");
+    let req = Request::post("/v1/nested/t?x=1")
+        .header("x-ab-key", h.key)
+        .header("x-ab-time", h.time)
+        .header("x-ab-nonce", h.nonce)
+        .header("x-ab-sig", h.sig)
+        .body(Body::from("abc"))
+        .unwrap();
+    assert_eq!(router.oneshot(req).await.unwrap().status(), StatusCode::OK);
+}
