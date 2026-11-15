@@ -16,6 +16,8 @@ testkit = ["dep:reqwest", "dep:tempfile"]
 
 [dependencies]
 proto.workspace = true
+bracket.workspace = true
+thiserror.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 anyhow.workspace = true

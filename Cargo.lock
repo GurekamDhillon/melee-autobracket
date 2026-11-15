@@ -98,6 +98,7 @@ dependencies = [
  "async-trait",
  "autobracket-server",
  "axum",
+ "bracket",
  "bytes",
  "clap",
  "hex",
@@ -109,6 +110,7 @@ dependencies = [
  "serde_json",
  "sqlx",
  "tempfile",
+ "thiserror 2.0.21",
  "tokio",
  "toml",
  "tower",
@@ -1443,7 +1445,7 @@ dependencies = [
 name = "replay"
 version = "0.1.0"
 dependencies = [
- "thiserror",
+ "thiserror 2.0.21",
 ]
 
 [[package]]
