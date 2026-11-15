@@ -3,4 +3,13 @@ name = "replay"
 edition.workspace = true
 version.workspace = true
 
+[features]
+# Exposes `testkit::SlpBuilder` so other crates can fabricate replays in their tests.
+testkit = []
+
 [dependencies]
+thiserror.workspace = true
+
+[[test]]
+name = "parse"
+required-features = ["testkit"]
