@@ -1,0 +1,5 @@
+target/
+*.sqlite*
+replays/
+*.iso
+.superpowers/
