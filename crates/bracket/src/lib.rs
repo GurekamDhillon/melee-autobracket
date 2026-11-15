@@ -64,6 +64,7 @@ pub enum BracketError {
     BadSlot,
 }
 
+mod double;
 mod seed;
 mod single;
 
@@ -76,14 +77,18 @@ pub fn build(format: Format, entrants: u32) -> Result<Bracket, BracketError> {
     }
     match format {
         Format::SingleElim => Ok(single::build(entrants)),
-        Format::DoubleElim => todo!("double elimination arrives in Task 2"),
+        Format::DoubleElim => Ok(double::build(entrants)),
     }
 }
 
 impl Bracket {
     /// Records that `winner_slot` won `set`. Returns the sets that became Ready as a result.
     pub fn report(&mut self, set: SetId, winner_slot: u8) -> Result<Vec<SetId>, BracketError> {
-        let state = self.sets.get(set as usize).ok_or(BracketError::UnknownSet)?.state;
+        let state = self
+            .sets
+            .get(set as usize)
+            .ok_or(BracketError::UnknownSet)?
+            .state;
         if winner_slot > 1 {
             return Err(BracketError::BadSlot);
         }
@@ -96,7 +101,11 @@ impl Bracket {
     }
 
     pub fn ready_sets(&self) -> Vec<SetId> {
-        self.sets.iter().filter(|s| s.state == SetState::Ready).map(|s| s.id).collect()
+        self.sets
+            .iter()
+            .filter(|s| s.state == SetState::Ready)
+            .map(|s| s.id)
+            .collect()
     }
 
     /// True once every set is resolved (Done or Skipped).
@@ -106,18 +115,22 @@ impl Bracket {
             .all(|s| matches!(s.state, SetState::Done { .. } | SetState::Skipped))
     }
 
-    /// Winner of the final set, once the bracket is complete.
+    /// Winner of the final set, once the bracket is complete. In double elimination that is
+    /// the reset when it was played, otherwise grand final 1 (both have no `winner_to`).
     pub fn champion(&self) -> Option<EntrantId> {
         if !self.is_complete() {
             return None;
         }
-        self.sets.iter().rev().find_map(|s| match (s.winner_to, s.state) {
-            (None, SetState::Done { winner }) => match s.slots[winner as usize] {
-                Slot::Entrant(e) => Some(e),
+        self.sets
+            .iter()
+            .rev()
+            .find_map(|s| match (s.winner_to, s.state) {
+                (None, SetState::Done { winner }) => match s.slots[winner as usize] {
+                    Slot::Entrant(e) => Some(e),
+                    _ => None,
+                },
                 _ => None,
-            },
-            _ => None,
-        })
+            })
     }
 
     /// True if `set` was actually played: Done with an entrant in both slots.
@@ -157,8 +170,30 @@ impl Bracket {
         set.state = SetState::Done { winner };
         let (won, lost) = (set.slots[winner as usize], set.slots[1 - winner as usize]);
         let (winner_to, loser_to) = (set.winner_to, set.loser_to);
+        if set.side == Side::GrandFinal && set.round == 1 {
+            let slots = set.slots;
+            self.settle_reset(slots, winner, newly_ready);
+        }
         self.forward(winner_to, won, newly_ready);
         self.forward(loser_to, lost, newly_ready);
+    }
+
+    /// After grand final 1: the reset is skipped if the winners-side entrant (slot 0) won,
+    /// otherwise it is played between the same two entrants in the same slots.
+    fn settle_reset(&mut self, gf: [Slot; 2], gf_winner: u8, newly_ready: &mut Vec<SetId>) {
+        let reset = self
+            .sets
+            .iter()
+            .position(|s| s.side == Side::GrandFinal && s.round == 2);
+        let Some(reset) = reset.map(|i| i as SetId) else {
+            return;
+        };
+        if gf_winner == 0 {
+            self.sets[reset as usize].state = SetState::Skipped;
+        } else {
+            self.fill((reset, 0), gf[0], newly_ready);
+            self.fill((reset, 1), gf[1], newly_ready);
+        }
     }
 
     fn forward(&mut self, to: Option<(SetId, u8)>, slot: Slot, newly_ready: &mut Vec<SetId>) {
