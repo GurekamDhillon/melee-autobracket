@@ -1,0 +1,17 @@
+[Unit]
+Description=autobracket Melee tournament bracket server
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+ExecStart=/usr/local/bin/autobracket serve --config /etc/autobracket/autobracket.toml
+Restart=always
+RestartSec=2
+DynamicUser=yes
+StateDirectory=autobracket
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+
+[Install]
+WantedBy=multi-user.target

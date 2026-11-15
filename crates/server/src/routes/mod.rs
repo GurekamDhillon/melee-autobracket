@@ -9,9 +9,11 @@ use proto::EventSummary;
 use crate::state::AppState;
 
 mod players;
+mod view;
 
 pub fn router() -> Router<AppState> {
     Router::new()
+        .route("/", get(view::page))
         .route("/v1/players", post(players::register))
         .route("/v1/events", get(list_events))
 }
