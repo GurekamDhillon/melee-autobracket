@@ -11,6 +11,7 @@ use tower_governor::GovernorLayer;
 pub mod auth;
 pub mod config;
 pub mod db;
+pub mod judge;
 pub mod resim;
 pub mod routes;
 pub mod state;

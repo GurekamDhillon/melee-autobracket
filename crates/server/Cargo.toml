@@ -16,6 +16,7 @@ testkit = ["dep:reqwest", "dep:tempfile"]
 
 [dependencies]
 proto.workspace = true
+replay.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 anyhow.workspace = true
@@ -34,6 +35,7 @@ reqwest = { workspace = true, optional = true }
 tempfile = { workspace = true, optional = true }
 
 [dev-dependencies]
+replay = { workspace = true, features = ["testkit"] }
 autobracket-server = { path = ".", features = ["testkit"] }
 reqwest.workspace = true
 tower.workspace = true
