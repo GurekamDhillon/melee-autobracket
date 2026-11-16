@@ -18,6 +18,10 @@ use crate::config::IdentityConfig;
 
 /// How long a fetched key set is used before it is fetched again.
 const CACHE_TTL: Duration = Duration::from_secs(3600);
+/// Longest time cached keys are used without a successful fetch confirming them. ID tokens
+/// live at most 12 h, so this outlasts an identity-provider outage of a whole token lifetime;
+/// beyond it a key rotated out (perhaps compromised) is not trusted forever.
+const MAX_STALE: Duration = Duration::from_secs(24 * 3600);
 /// Least time between two re-fetches caused by an unknown `kid`.
 const UNKNOWN_KID_REFETCH: Duration = Duration::from_secs(60);
 /// Least time between two attempts after a failed fetch.
@@ -128,7 +132,9 @@ impl Jwks {
         // Fast path: a cached key, refreshed in the background once stale.
         {
             let cache = self.inner.lock_cache();
-            if let (Some(fetched_at), Some(key)) = (cache.fetched_at, cache.keys.get(kid)) {
+            if let (Some(fetched_at), true, Some(key)) =
+                (cache.fetched_at, cache.usable(), cache.keys.get(kid))
+            {
                 let key = key.clone();
                 let due = fetched_at.elapsed() >= CACHE_TTL && cache.may_retry();
                 drop(cache);
@@ -139,15 +145,16 @@ impl Jwks {
             }
         }
 
-        // Slow path: no keys yet, or an unknown kid. One fetch at a time; look again once it
-        // is our turn, since the fetch before ours may have brought the key.
+        // Slow path: no usable keys (none fetched yet, or none confirmed within MAX_STALE),
+        // or an unknown kid. One fetch at a time; look again once it is our turn, since the
+        // fetch before ours may have brought the key.
         let _turn = self.inner.fetch.lock().await;
         let fetch = {
             let mut cache = self.inner.lock_cache();
-            if let Some(key) = cache.keys.get(kid) {
+            if let (true, Some(key)) = (cache.usable(), cache.keys.get(kid)) {
                 return Ok(key.clone());
             }
-            if cache.fetched_at.is_none() {
+            if !cache.usable() {
                 cache.may_retry()
             } else if cache
                 .refetched_at
@@ -163,11 +170,10 @@ impl Jwks {
             self.inner.refresh(&url).await;
         }
         let cache = self.inner.lock_cache();
-        match cache.keys.get(kid) {
-            Some(key) => Ok(key.clone()),
-            None if cache.fetched_at.is_none() => Err(TokenError::Unavailable),
-            None => Err(TokenError::Invalid),
+        if !cache.usable() {
+            return Err(TokenError::Unavailable);
         }
+        cache.keys.get(kid).cloned().ok_or(TokenError::Invalid)
     }
 
     /// Starts a refresh of the key set unless one is already running.
@@ -175,18 +181,29 @@ impl Jwks {
         if self.inner.refreshing.swap(true, Ordering::SeqCst) {
             return;
         }
-        let inner = self.inner.clone();
-        tokio::spawn(async move {
-            {
-                let _turn = inner.fetch.lock().await;
-                inner.refresh(&url).await;
+        /// Clears `refreshing` however the task ends (finished, cancelled or panicked), so
+        /// background refresh never stops for good.
+        struct Done(Arc<Inner>);
+        impl Drop for Done {
+            fn drop(&mut self) {
+                self.0.refreshing.store(false, Ordering::SeqCst);
             }
-            inner.refreshing.store(false, Ordering::SeqCst);
+        }
+        let done = Done(self.inner.clone());
+        tokio::spawn(async move {
+            let inner = &done.0;
+            let _turn = inner.fetch.lock().await;
+            inner.refresh(&url).await;
         });
     }
 }
 
 impl Cache {
+    /// Whether the cached keys may be used: fetched, and confirmed within [`MAX_STALE`].
+    fn usable(&self) -> bool {
+        self.fetched_at.is_some_and(|t| t.elapsed() < MAX_STALE)
+    }
+
     /// Whether a fetch may be tried: none failed in the last [`RETRY_AFTER_FAILURE`].
     fn may_retry(&self) -> bool {
         self.failed_at
@@ -453,7 +470,8 @@ mod tests {
 
     // --- Fetching: a local JWKS server with one Ed25519 key, `kid "e1"` ---
 
-    use std::sync::atomic::AtomicUsize;
+    use std::sync::atomic::{AtomicBool, AtomicUsize};
+    use std::sync::Arc;
 
     use base64::Engine;
     use ed25519_dalek::Signer;
@@ -464,6 +482,8 @@ mod tests {
         fetches: Arc<AtomicUsize>,
         /// When set, `/keys` answers 500.
         down: Arc<AtomicBool>,
+        /// When set, `/keys` answers 500 after 4 s (a slow identity provider).
+        hang: Arc<AtomicBool>,
     }
 
     /// Serves `/keys` (the JWKS) and `/redirect` (302 to `/keys`).
@@ -476,18 +496,25 @@ mod tests {
         }]});
         let fetches = Arc::new(AtomicUsize::new(0));
         let down = Arc::new(AtomicBool::new(false));
-        let (f, d) = (fetches.clone(), down.clone());
+        let hang = Arc::new(AtomicBool::new(false));
+        let (f, d, h) = (fetches.clone(), down.clone(), hang.clone());
         let router = axum::Router::new()
             .route(
                 "/keys",
                 axum::routing::get(move || {
                     f.fetch_add(1, Ordering::SeqCst);
-                    let res = if d.load(Ordering::SeqCst) {
-                        Err(axum::http::StatusCode::INTERNAL_SERVER_ERROR)
-                    } else {
-                        Ok(axum::Json(doc.clone()))
-                    };
-                    async move { res }
+                    let (down, hang) = (d.load(Ordering::SeqCst), h.load(Ordering::SeqCst));
+                    let doc = doc.clone();
+                    async move {
+                        if hang {
+                            tokio::time::sleep(Duration::from_secs(4)).await;
+                        }
+                        if down || hang {
+                            Err(axum::http::StatusCode::INTERNAL_SERVER_ERROR)
+                        } else {
+                            Ok(axum::Json(doc))
+                        }
+                    }
                 }),
             )
             .route(
@@ -502,6 +529,7 @@ mod tests {
             key,
             fetches,
             down,
+            hang,
         }
     }
 
@@ -526,10 +554,22 @@ mod tests {
         cfg
     }
 
-    /// Pretends the key set was fetched two hours ago.
-    fn age(jwks: &Jwks) {
+    /// Pretends the key set was fetched `secs` seconds ago.
+    fn age(jwks: &Jwks, secs: u64) {
         let mut cache = jwks.inner.cache.lock().unwrap();
-        cache.fetched_at = Instant::now().checked_sub(Duration::from_secs(7200));
+        cache.fetched_at = Instant::now().checked_sub(Duration::from_secs(secs));
+    }
+
+    /// Waits until no background refresh is running.
+    async fn refresh_done(jwks: &Jwks) {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while jwks.inner.refreshing.load(Ordering::SeqCst) {
+            assert!(
+                Instant::now() < deadline,
+                "the background refresh never ended"
+            );
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
     }
 
     /// Once keys are cached, a stale set is refreshed in the background: the request is
@@ -544,7 +584,7 @@ mod tests {
         assert!(jwks.verify(&cfg, &token, now).await.is_ok());
         assert_eq!(idp.fetches.load(Ordering::SeqCst), 1);
 
-        age(&jwks);
+        age(&jwks, 7200);
         assert!(jwks.verify(&cfg, &token, now).await.is_ok());
         let deadline = Instant::now() + Duration::from_secs(5);
         while idp.fetches.load(Ordering::SeqCst) < 2 {
@@ -552,14 +592,53 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
 
-        // Down, and the refresh is slow to fail: the cached key still answers at once.
-        idp.down.store(true, Ordering::SeqCst);
-        // Let the background refresh finish so it is not still marked as running.
-        tokio::time::sleep(Duration::from_millis(50)).await;
-        age(&jwks);
+        refresh_done(&jwks).await;
+
+        // The identity provider hangs: the cached key still answers at once, while the
+        // refresh waits in the background.
+        idp.hang.store(true, Ordering::SeqCst);
+        age(&jwks, 7200);
         let started = Instant::now();
         assert!(jwks.verify(&cfg, &token, now).await.is_ok());
+        assert!(jwks.verify(&cfg, &token, now).await.is_ok());
         assert!(started.elapsed() < Duration::from_secs(1));
+        assert!(jwks.inner.refreshing.load(Ordering::SeqCst));
+        refresh_done(&jwks).await;
+        assert_eq!(
+            idp.fetches.load(Ordering::SeqCst),
+            3,
+            "one refresh while hanging"
+        );
+    }
+
+    /// Keys not confirmed for 24 hours are not served: with the identity provider down,
+    /// sign-in is unavailable rather than trusting old keys forever.
+    #[tokio::test]
+    async fn keys_older_than_a_day_are_not_served() {
+        let idp = idp().await;
+        let cfg = cfg_at(format!("{}/keys", idp.url));
+        let jwks = Jwks::new().unwrap();
+        let now = crate::db::now_unix();
+        let token = ed_token(&idp.key, "EdDSA", now);
+        assert!(jwks.verify(&cfg, &token, now).await.is_ok());
+
+        idp.down.store(true, Ordering::SeqCst);
+        age(&jwks, 23 * 3600);
+        assert!(
+            jwks.verify(&cfg, &token, now).await.is_ok(),
+            "23 h: still served"
+        );
+        refresh_done(&jwks).await;
+        age(&jwks, 25 * 3600);
+        jwks.inner.cache.lock().unwrap().failed_at = None;
+        assert_eq!(
+            jwks.verify(&cfg, &token, now).await,
+            Err(TokenError::Unavailable)
+        );
+        // Back up: fetched again and served.
+        idp.down.store(false, Ordering::SeqCst);
+        jwks.inner.cache.lock().unwrap().failed_at = None;
+        assert!(jwks.verify(&cfg, &token, now).await.is_ok());
     }
 
     /// Redirects are not followed: the configured URL is the one fetched.

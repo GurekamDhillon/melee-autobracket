@@ -383,6 +383,31 @@ async fn last_seen_is_refreshed_only_when_stale() {
     assert_eq!(accounts(&app).await, 1);
 }
 
+/// Many concurrent signed-in requests do not exhaust the database pool: each request holds
+/// at most one connection at a time.
+#[tokio::test]
+async fn concurrent_pings_do_not_exhaust_the_pool() {
+    let app = TestApp::spawn_identity(|_| {}).await;
+    let web = std::sync::Arc::new(app.web(&TestWeb::player("u1")));
+    expect(web.get(PING).await, StatusCode::NO_CONTENT, None).await;
+    let handles: Vec<_> = (0..32)
+        .map(|_| {
+            let web = web.clone();
+            tokio::spawn(async move { web.get(PING).await.status() })
+        })
+        .collect();
+    let all = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        let mut out = Vec::new();
+        for h in handles {
+            out.push(h.await.unwrap());
+        }
+        out
+    })
+    .await
+    .expect("32 concurrent pings finish within 10 s");
+    assert!(all.iter().all(|s| *s == StatusCode::NO_CONTENT), "{all:?}");
+}
+
 #[tokio::test]
 async fn tombstoned_sub_is_refused() {
     let app = TestApp::spawn_identity(|_| {}).await;

@@ -188,12 +188,17 @@ impl FromRequestParts<AppState> for WebUser {
         if is_tombstoned(&mut conn, &claims.sub).await? {
             return Err(deleted());
         }
-        let row: Option<(i64, Option<i64>, i64)> =
-            sqlx::query_as("SELECT id, disabled_at, last_seen_at FROM accounts WHERE sub = ?")
-                .bind(&claims.sub)
-                .fetch_optional(&mut *conn)
-                .await?;
-        if matches!(row, Some((_, Some(_), _))) {
+        let row: Option<(i64, Option<i64>, i64, Option<String>)> = sqlx::query_as(
+            "SELECT a.id, a.disabled_at, a.last_seen_at, COALESCE(p.global_name, p.username)
+             FROM accounts a LEFT JOIN discord_profiles p ON p.discord_id = a.discord_id
+             WHERE a.sub = ?",
+        )
+        .bind(&claims.sub)
+        .fetch_optional(&mut *conn)
+        .await?;
+        // At most one pool connection per request: never acquire another while this is held.
+        drop(conn);
+        if matches!(row, Some((_, Some(_), _, _))) {
             return Err(disabled());
         }
         if !csrf_ok(parts, cfg) {
@@ -202,21 +207,14 @@ impl FromRequestParts<AppState> for WebUser {
                 "cross-site request refused",
             ));
         }
-        let account_id = match row {
-            Some((id, _, seen)) if now.saturating_sub(seen) < LAST_SEEN_REFRESH_SECS => id,
-            _ => {
-                drop(conn);
-                touch_account(state, &claims.sub, now).await?
+        let (account_id, display_name) = match row {
+            Some((id, _, seen, name)) if now.saturating_sub(seen) < LAST_SEEN_REFRESH_SECS => {
+                (id, name)
             }
+            Some((_, _, _, name)) => (touch_account(state, &claims.sub, now).await?, name),
+            // A new account has no Discord id yet, so no name.
+            None => (touch_account(state, &claims.sub, now).await?, None),
         };
-        let display_name: Option<String> = sqlx::query_scalar(
-            "SELECT COALESCE(p.global_name, p.username) FROM accounts a
-             JOIN discord_profiles p ON p.discord_id = a.discord_id WHERE a.id = ?",
-        )
-        .bind(account_id)
-        .fetch_optional(&state.db)
-        .await?
-        .flatten();
         Ok(WebUser {
             account_id,
             sub: claims.sub,
