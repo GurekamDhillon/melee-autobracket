@@ -222,8 +222,8 @@ so the constant is unchanged. The corpus has no game in which the engine's match
 
 **F1 (fixed in `361152e`). The verifier sets `SLPCHECK_VANILLA_SPAWN=1` for every file. Every
 replay that carries Slippi's Neutral Spawn codes then diverges at frame -123.**
-Before the fix: `crates/server/src/resim.rs:62` and `:136` (`.env(SPAWN_ENV, "1")`,
-unconditional).
+Before the fix, in commit `1cd6121` (the fix's parent): `crates/server/src/resim.rs:67` and
+`:141` (`.env(SPAWN_ENV, "1")`, unconditional).
 The engine only applies Slippi's replay rules, Neutral Spawn included, when the variable is unset
 (`~/melee-engine/rust/melee/src/slpcheck.rs:505-508`). The engine documents the variable as being
 for "the port's own .slp exports, played without it".
@@ -254,14 +254,21 @@ have become a real fault the moment Slippi replays were admitted.
 Missing fixture: an own-netplay export on Battlefield or another non-FD stage, to confirm that
 own exports need the variable there.
 
+Known limit of the rule: "no Gecko list" also describes Slippi replays recorded before Slippi
+started writing the Gecko list into replay files. Such a replay would run with the variable set
+and would likely come back `Diverged` on a stage whose vanilla and neutral spawns differ. That
+errs in the safe direction (a real game reads as not matching, never the reverse), and the
+corpus has no such file.
+
 **F2 (fixed in `361152e`). A missing or unreadable disc image is reported as `Crashed`, so the
 game counts as `VerifiedInexact`.**
-Before the fix, `crates/server/src/resim.rs:164` treated only exit code 2 as `Unavailable`.
+Before the fix, in commit `1cd6121`, `crates/server/src/resim.rs:169` treated only exit code 2
+as `Unavailable`.
 The engine exits 2 only for usage errors: no `--slp`, no `--iso`, or an unreadable `.slp`
 (`slpcheck.rs:373/378/385`). A disc that cannot be opened makes it write a CSV row
 `boot-error: <disc>: No such file or directory` and exit 1 (`slpcheck.rs:528`, `:762-766`).
 `outcome_from_csv` then mapped any non-`match`/`diverged` status to `Crashed`
-(`resim.rs:388`), and `finish` maps `Crashed` to `VerifiedInexact`
+(`resim.rs:387` in `1cd6121`), and `finish` maps `Crashed` to `VerifiedInexact`
 (`crates/server/src/judge.rs:98-104`).
 
 - Shown by: `missing_disc_is_unavailable`, using `own-netplay/netplay_host.slp`.
@@ -272,7 +279,8 @@ The engine exits 2 only for usage errors: no `--slp`, no `--iso`, or an unreadab
   fake engine script exited 2.
 - Fix (`361152e`): a status whose first word is `boot-error` becomes `Unavailable(<status>)`.
   `Slpcheck::new` also refuses, naming the path, an engine that cannot be executed and a disc
-  image that is not a readable regular file (it opens the image and reads a few bytes), so both
+  image that is not a readable regular file of at least 1 GiB (`MIN_DISC_BYTES`; it checks the
+  size, opens the image and reads a few bytes, and the error gives the size), so both
   `serve` in `in_process` mode and `verify-worker` fail at start-up. A disc that disappears after
   start-up still comes back `Unavailable` through the `boot-error` row. The fake engine's
   `nodisc` mode now imitates the real engine (CSV row `boot-error: ...`, exit 1); a separate
@@ -369,16 +377,18 @@ this folder". Both files are present, and they match the listed sha256.
 - **What gets verified today:** games played with this project's own netplay client. Both
   players' exports are identical, the reader reads them correctly, and the engine re-runs them
   frame for frame. Such a game comes out **Verified**, with the winner taken from the replay.
-  This was checked end to end on two real games: a clean one and one with 40 ms lag and 5 %
-  packet loss.
+  Here that was checked on the replay files of two real games (a clean one and one with 40 ms
+  lag and 5 % packet loss): `pre_judge`, then the real `Slpcheck`, then `finish`, called
+  directly by `pre_judge_then_finish_is_verified`. That is not the full loop through a running
+  server and clients; `docs/real-engine-e2e.md` on the main branch covers that.
 - **What goes to the organiser:** a game where only one player uploaded (`Single`). Also a game
   that ended by disconnect or by both players quitting without a winner (`Undecided`), a game
   with the wrong rules, stage, ports or a Gecko list (`Illegal`), and a file the reader cannot
   read (`Undecided`). Replays recorded on Slippi Dolphin or a console are all refused today (F3).
   Admitting them needs the Gecko rule and the ports rule changed; the spawn setting (F1) is
   already per replay.
-- **A misconfigured verifier is caught (F2, fixed):** a missing or unreadable disc image, or an
-  engine that cannot run, stops the server (`in_process`) or `verify-worker` at start-up with the
+- **A misconfigured verifier is caught (F2, fixed):** a missing, unreadable or too-small disc
+  image, or an engine that cannot run, stops the server (`in_process`) or `verify-worker` at start-up with the
   path in the error. A disc that disappears later makes games `PeerOnly`, not
   `VerifiedInexact`.
 - **How long verification takes:** about 1 s of one core per 20 s of game time (about 19x real

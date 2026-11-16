@@ -1,7 +1,7 @@
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-use autobracket_server::resim::{outcome_from_csv, Resim, Slpcheck};
+use autobracket_server::resim::{outcome_from_csv, Resim, Slpcheck, MIN_DISC_BYTES};
 use proto::ResimOutcome;
 use replay::testkit::SlpBuilder;
 use replay::PlayerKind;
@@ -12,14 +12,23 @@ fn fake_engine() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/fake_slpcheck.sh")
 }
 
-/// Stands in for the disc image: `Slpcheck::new` only checks that the disc is a readable
-/// regular file, and the fake engine never reads it.
-fn fake_disc() -> PathBuf {
-    fake_engine()
+/// A sparse file of `len` bytes at `dir/disc.iso`: it takes no space on disk, and reads as zeros.
+fn sparse_disc(dir: &tempfile::TempDir, len: u64) -> PathBuf {
+    let path = dir.path().join("disc.iso");
+    std::fs::File::create(&path).unwrap().set_len(len).unwrap();
+    path
+}
+
+/// Stands in for the disc image: `Slpcheck::new` only checks that the disc is a readable regular
+/// file of disc size, and the fake engine never reads it.
+fn fake_disc(dir: &tempfile::TempDir) -> PathBuf {
+    sparse_disc(dir, MIN_DISC_BYTES + (MIN_DISC_BYTES >> 1))
 }
 
 async fn fake(timeout: Duration) -> Slpcheck {
-    Slpcheck::new(fake_engine(), fake_disc(), timeout)
+    // The disc only has to exist while `new` checks it.
+    let dir = tempfile::tempdir().unwrap();
+    Slpcheck::new(fake_engine(), fake_disc(&dir), timeout)
         .await
         .expect("fake engine starts")
 }
@@ -384,9 +393,10 @@ async fn build_string() {
 
 #[tokio::test]
 async fn missing_engine_fails_to_start() {
+    let dir = tempfile::tempdir().unwrap();
     let r = Slpcheck::new(
         PathBuf::from("/no/such/engine"),
-        fake_disc(),
+        fake_disc(&dir),
         Duration::from_secs(1),
     )
     .await;
@@ -401,7 +411,7 @@ async fn non_executable_engine_fails_to_start() {
     let engine = dir.path().join("melee");
     std::fs::copy(fake_engine(), &engine).unwrap();
     std::fs::set_permissions(&engine, std::fs::Permissions::from_mode(0o644)).unwrap();
-    let r = Slpcheck::new(engine.clone(), fake_disc(), Duration::from_secs(1)).await;
+    let r = Slpcheck::new(engine.clone(), fake_disc(&dir), Duration::from_secs(1)).await;
     let err = format!("{:#}", r.err().expect("a non-executable engine is refused"));
     assert!(err.contains(&engine.display().to_string()), "{err}");
 }
@@ -432,8 +442,7 @@ async fn directory_disc_fails_to_start() {
 async fn unreadable_disc_fails_to_start() {
     use std::os::unix::fs::PermissionsExt;
     let dir = tempfile::tempdir().unwrap();
-    let disc = dir.path().join("disc.iso");
-    std::fs::write(&disc, b"GALE01").unwrap();
+    let disc = fake_disc(&dir);
     std::fs::set_permissions(&disc, std::fs::Permissions::from_mode(0o000)).unwrap();
     if std::fs::File::open(&disc).is_ok() {
         // Running as root: permissions do not stop the read, so there is nothing to test.
@@ -456,4 +465,25 @@ async fn real_engine_match() {
         engine.check(&var("AB_FIXTURE_A"), 2974).await,
         ResimOutcome::Match
     );
+}
+
+#[tokio::test]
+async fn small_disc_fails_to_start() {
+    for len in [0, 6, MIN_DISC_BYTES - 1] {
+        let dir = tempfile::tempdir().unwrap();
+        let disc = sparse_disc(&dir, len);
+        let r = Slpcheck::new(fake_engine(), disc.clone(), Duration::from_secs(1)).await;
+        let err = format!("{:#}", r.err().expect("a too-small disc is refused"));
+        assert!(err.contains(&disc.display().to_string()), "{err}");
+        assert!(err.contains(&format!("{len} bytes")), "{err}");
+    }
+}
+
+#[tokio::test]
+async fn disc_of_minimum_size_starts() {
+    let dir = tempfile::tempdir().unwrap();
+    let disc = sparse_disc(&dir, MIN_DISC_BYTES);
+    Slpcheck::new(fake_engine(), disc, Duration::from_secs(1))
+        .await
+        .expect("a disc of exactly MIN_DISC_BYTES is accepted");
 }

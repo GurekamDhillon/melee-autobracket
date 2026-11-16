@@ -71,6 +71,9 @@ pub const EARLY_END_SLACK_FRAMES: i32 = 0;
 /// instead of applying Slippi's Neutral Spawn. Set only for replays without a Gecko list
 /// (see [`vanilla_spawn`]); the engine checks only whether it is present, not its value.
 const SPAWN_ENV: &str = "SLPCHECK_VANILLA_SPAWN";
+/// The smallest file accepted as a disc image. A GameCube disc image is about 1.36 GiB; anything
+/// under 1 GiB is empty, truncated or not a disc.
+pub const MIN_DISC_BYTES: u64 = 1 << 30;
 /// Bytes of the engine's stderr kept for error messages.
 const STDERR_TAIL_BYTES: usize = 2048;
 
@@ -132,14 +135,21 @@ impl Slpcheck {
     }
 }
 
-/// Fails, naming `iso`, unless it is a regular file (after symlinks) whose first bytes can be
-/// read. Reads only a few bytes, not the whole image.
+/// Fails, naming `iso`, unless it is a regular file (after symlinks) of at least
+/// [`MIN_DISC_BYTES`] whose first bytes can be read. Reads only a few bytes, not the whole image.
 async fn check_disc(iso: &Path) -> anyhow::Result<()> {
     let meta = tokio::fs::metadata(iso)
         .await
         .with_context(|| format!("disc image {}", iso.display()))?;
     if !meta.is_file() {
         bail!("disc image {} is not a regular file", iso.display());
+    }
+    if meta.len() < MIN_DISC_BYTES {
+        bail!(
+            "disc image {} is {} bytes, too small for a disc image (at least {MIN_DISC_BYTES})",
+            iso.display(),
+            meta.len()
+        );
     }
     let mut file = tokio::fs::File::open(iso)
         .await

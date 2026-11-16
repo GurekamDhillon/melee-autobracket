@@ -463,6 +463,12 @@ async fn worker_binary_end_to_end() {
     .await;
     let key_file = app.dir.path().join("verifier.key");
     std::fs::write(&key_file, format!("{}\n", hex::encode(vk.to_bytes()))).unwrap();
+    // The worker checks the disc image's size at start-up; a sparse file takes no disc space.
+    let disc = app.dir.path().join("disc.iso");
+    std::fs::File::create(&disc)
+        .unwrap()
+        .set_len(autobracket_server::resim::MIN_DISC_BYTES)
+        .unwrap();
     let log_path = app.dir.path().join("verify-worker.log");
     let log = std::fs::File::create(&log_path).unwrap();
 
@@ -475,7 +481,7 @@ async fn worker_binary_end_to_end() {
         .arg("--engine")
         .arg(fake_engine())
         .arg("--iso")
-        .arg(fake_engine())
+        .arg(&disc)
         .arg("--timeout-secs")
         .arg("10")
         .stdin(Stdio::null())
