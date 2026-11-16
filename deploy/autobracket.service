@@ -7,6 +7,8 @@ Wants=network-online.target
 ExecStart=/usr/local/bin/autobracket serve --config /etc/autobracket/autobracket.toml
 Restart=always
 RestartSec=2
+# Log level (tracing filter); logs go to stderr, i.e. the journal.
+Environment=AUTOBRACKET_LOG=info
 DynamicUser=yes
 StateDirectory=autobracket
 NoNewPrivileges=yes
