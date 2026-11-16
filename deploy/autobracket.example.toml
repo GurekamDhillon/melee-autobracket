@@ -54,3 +54,5 @@ best_of_finals = 5
 legal_stages = [2, 3, 8, 28, 31, 32]
 # Character ids that may not be played.
 banned_characters = []
+# Permitted Gecko code lists, as lowercase SHA-256 hex (docs/real-engine.md, "Gecko code lists").
+allowed_gecko = []

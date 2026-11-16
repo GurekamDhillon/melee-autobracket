@@ -104,6 +104,88 @@ fn illegal_gecko() {
     );
 }
 
+/// SHA-256 of the 3-byte list `abc`.
+const ABC_SHA: &str = "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad";
+/// SHA-256 of `long_list()`, computed independently of the reader (Python `hashlib`).
+const LONG_SHA: &str = "b60f0e05937c77e7c3818dde3d41f69073ae3bf508374d1295df7a55bde99ee9";
+
+/// 1300 bytes: three Message Splitter events (512 + 512 + 276).
+fn long_list() -> Vec<u8> {
+    (0..1300u32).map(|i| (i % 251) as u8).collect()
+}
+
+fn allowing(hashes: &[&str]) -> Ruleset {
+    Ruleset {
+        allowed_gecko: hashes.iter().map(|h| h.to_string()).collect(),
+        ..Ruleset::default()
+    }
+}
+
+fn legality_of(list: &[u8], rules: &Ruleset) -> Result<(), &'static str> {
+    let file = base().gecko_bytes(list).end(2, None).build();
+    legality(&replay::parse(&file).unwrap(), rules)
+}
+
+#[test]
+fn gecko_allow_list() {
+    // No list: legal, whatever the allow-list holds.
+    assert_eq!(legality_of(&[], &Ruleset::default()), Ok(()));
+    assert_eq!(legality_of(&[], &allowing(&[ABC_SHA])), Ok(()));
+    // A list not on the (empty, or other) allow-list.
+    assert_eq!(legality_of(b"abc", &Ruleset::default()), Err("gecko"));
+    assert_eq!(legality_of(b"abc", &allowing(&[LONG_SHA])), Err("gecko"));
+    // A list on the allow-list.
+    assert_eq!(legality_of(b"abc", &allowing(&[ABC_SHA])), Ok(()));
+    assert_eq!(legality_of(b"abc", &allowing(&[LONG_SHA, ABC_SHA])), Ok(()));
+}
+
+#[test]
+fn gecko_two_lists_only_one_allowed() {
+    let rules = allowing(&[ABC_SHA]);
+    assert_eq!(legality_of(b"abc", &rules), Ok(()));
+    assert_eq!(legality_of(b"abd", &rules), Err("gecko"));
+    let a = base().gecko_bytes(b"abc").end(2, None).build();
+    let b = base().gecko_bytes(b"abd").end(2, None).build();
+    assert!(matches!(
+        pre_judge([Some(&a), Some(&a)], &rules),
+        Pre::NeedsResim { winner_port: 2, .. }
+    ));
+    assert_eq!(pre_judge([Some(&b), Some(&b)], &rules), illegal("gecko"));
+}
+
+#[test]
+fn gecko_hashes_compare_exactly_lowercase() {
+    let upper = ABC_SHA.to_uppercase();
+    assert_eq!(legality_of(b"abc", &allowing(&[&upper])), Err("gecko"));
+    let padded = format!(" {ABC_SHA}");
+    assert_eq!(legality_of(b"abc", &allowing(&[&padded])), Err("gecko"));
+}
+
+#[test]
+fn gecko_multi_event_list_hashes_as_the_concatenation() {
+    let list = long_list();
+    assert_eq!(legality_of(&list, &allowing(&[LONG_SHA])), Ok(()));
+    // Only the first splitter event's 512 bytes, or the list minus its last byte: not allowed.
+    assert_eq!(
+        legality_of(&list[..512], &allowing(&[LONG_SHA])),
+        Err("gecko")
+    );
+    assert_eq!(
+        legality_of(&list[..1299], &allowing(&[LONG_SHA])),
+        Err("gecko")
+    );
+}
+
+#[test]
+fn allowed_gecko_does_not_change_rule_order() {
+    // An allowed list on the wrong stage is still `stage`.
+    let a = base().stage(4).gecko_bytes(b"abc").end(2, None).build();
+    assert_eq!(
+        pre_judge([Some(&a), Some(&a)], &allowing(&[ABC_SHA])),
+        illegal("stage")
+    );
+}
+
 #[test]
 fn illegal_teams() {
     assert_eq!(

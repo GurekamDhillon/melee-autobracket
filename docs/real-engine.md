@@ -372,6 +372,115 @@ and no initiator. `winner_port` is `None`, so even a matching pair of such files
 **Manifest note.** `MANIFEST.txt` says `netplay_host.slp` / `netplay_guest.slp` have "no file in
 this folder". Both files are present, and they match the listed sha256.
 
+## Gecko code lists
+
+Follow-up to F3. The legality rule changed from "any Gecko list is illegal" to an allow-list of
+known lists, identified by a hash. This section records the specification, what the corpus holds,
+and a finding that limits the approach.
+
+**Specification (agreed with the engine team).**
+
+- The list bytes: walk the events of the `raw` element in file order. For each Message Splitter
+  event (command 0x10) whose total length, command byte included, is at least 0x205 and whose
+  byte at 0x203 is 0x3D (internal command "Gecko List"), let n = min(big-endian u16 at 0x201,
+  512) and append bytes `1 .. 1+n` of the event. The concatenation is the list. A bare 0x3D event
+  contributes nothing (the engine ignores it too, `melee_data/src/slp.rs:271-277`).
+- Legality identity: SHA-256 over the list bytes, lowercase hex (64 characters):
+  `replay::ReplayFacts::gecko_sha256`, `None` when the list is empty. `has_gecko` is
+  `gecko_sha256.is_some()`.
+- Display and cross-check only, never legality: the engine's `slpcheck` CSV column `gecko_hash`
+  is FNV-1a 64 (basis 0xcbf29ce484222325, prime 0x100000001b3) over the same bytes, low 32 bits,
+  8 lowercase hex characters, `none` for an empty list (`slpcheck.rs:700-709`).
+  `replay::gecko_fnv32` computes the same value.
+- Rule (`judge.rs` `legality`): no list is legal on this point (this project's own exports
+  today). A list is legal only if its `gecko_sha256` is in `[ruleset] allowed_gecko`, compared
+  exactly; otherwise the word is still `gecko`. The order of the rule checks is unchanged.
+
+**Cross-check against the engine** (`gecko_fnv32_matches_engine_gecko_hash`, direct
+`melee slpcheck --slp F --iso ISO --csv OUT` runs with `SLPCHECK_VANILLA_SPAWN` unset):
+all **50 files our reader parses agree** (`1 passed`, 292.9 s). 37 carry a
+list and the two values are equal for each (for example `tournament/20476_0a7cb485-...slp`:
+`83817cc6` both sides); the 13 without a list (own-netplay exports and the synthetic files) are
+`none` on both sides. So our byte selection is the engine's.
+
+**Measured SHA-256 values** (`console_recordings_gecko_sha256`). 37 files carry a list, and
+there are **37 distinct values: no two files share a list.** That includes the 28 Slippi
+console recordings, all Slippi 3.17.0:
+
+| gecko_sha256 | file | folder | list (standard Slippi console set, its shape) |
+|---|---|---|---|
+| `0092a5d9f35ec9f2a386fff98b64483c62f493e7b6caf5abe0be6274406bc529` | `20476_10909063-82b4-42b2-8ba7-08d1be1e1526.slp` | tournament | 88 codes, 10904 bytes |
+| `0c07d81fdc36906bc2e55e8c15da99b897d2dbd7e8f035a42c2b3bcc3f0eb818` | `20476_18e83ec4-c553-48d5-98b5-8e75d6d01919.slp` | dolphin | 88 codes, 10904 bytes |
+| `132e64999a9f0dbddc50c4a03a108ce708bea208d8425b9fc8d4b9440175eead` | `20476_2619fcd0-bbb3-4f8c-8865-0a53b4f1ca5f.slp` | tournament | 88 codes, 10904 bytes |
+| `184f0a34cdc757868de8b7ccb8332df841a6a2b2903b7c413fc59fa7db44cdba` | `20476_1c7b2d10-8872-4f13-8cee-b8a349e14d51.slp` | tournament | 88 codes, 10904 bytes |
+| `1d8b21ad3e22f90918212c600887cbbf4af4cd268034bbd07cadb2eb0ef57a7b` | `20476_2df0f989-fee1-4e0d-aa1f-f6c5cffdd9a3.slp` | tournament | 88 codes, 10904 bytes |
+| `28969bdb9ee50e31e3e15053c5be891820a9e7e70ccf8a2b35a82c6e3afd2bdc` | `20476_1a66cc9f-d363-4ee5-a1ac-c6b77d5e2c7c.slp` | dolphin | 95 codes, 11856 bytes |
+| `29bb9ae55532226a68662f7dbbd8882c0c198b7b7251d3c8b5fc52806634e957` | `20476_265b95dd-355b-4519-9726-1688e7e6e383.slp` | tournament | 88 codes, 10904 bytes |
+| `2c00c450c0535b3334a8a53b5428396da3d002fcc48f609fe79030f695fb4ff1` | `20476_20a1f939-1e39-4aff-ae98-1939d76999ff.slp` | tournament | 89 codes, 11128 bytes |
+| `3dcff11742cbc9965bd8533635d2eb9e60ed97600471d116945cc247d997ac7a` | `20476_03b84423-9e9d-43c1-b4e6-b591a7a3fbaa.slp` | tournament | 95 codes, 11856 bytes |
+| `3e7f96b2c3c13be359ad9de73643f93733fc7419d09804edf046b878285f4816` | `20476_03c52089-9e8e-4425-885c-e32af62c14b2.slp` | dolphin | 95 codes, 11856 bytes |
+| `4f273374957ed2fa4001052993420cac350c4f29bd09fe79899ce27ae6685bfe` | `20476_23b2b24b-715e-43a7-be16-f8817af0c695.slp` | tournament | 95 codes, 11856 bytes |
+| `5237cc54f51e87ac5bab592141f689f588cc5c308d5654ba20a68c4847931b28` | `20476_08f9e70f-2f7e-418b-8121-699ef271aacd.slp` | tournament | 88 codes, 10904 bytes |
+| `52a78009e4a5465f54c76e02adebc2a5a0eca6494a4ef4655be07c7aee44c06e` | `20476_1285c0cd-acb2-4512-b141-ffdc938d5f23.slp` | tournament | 88 codes, 10904 bytes |
+| `57e8e8c544d022c15a38ea12ec904494992977c1597ea50cf30db7a0271d5310` | `20476_325cee5d-46aa-475d-8f5b-fee967e2cc4a.slp` | tournament | 88 codes, 10904 bytes |
+| `5bd02b41346fd20d43f289d1694455b0f2189cd84c947a9dc746d40d4765db91` | `20476_0b318d95-f3c1-4884-8a99-67f92c0d8796.slp` | dolphin | 88 codes, 10904 bytes |
+| `73942cc16d71974c633cadb04e0eddc95c691a8a753dbe19a0b97c71a12124aa` | `20476_0a7cb485-47b1-4ecb-8d02-079c219272cc.slp` | tournament | 88 codes, 10904 bytes |
+| `756687dce563d59bc8c567c49e301616bc3a342d0d18cfcb0bafcb7053e35d17` | `20476_1a2af8a2-e21d-40d4-97ae-8e095d1a075a.slp` | tournament | 88 codes, 10904 bytes |
+| `78e172aceee1f5d7a95eb55602896c79734e6ac0ce44e0af11fad30d3d9fc42c` | `20476_1b5afde1-cc91-4f82-b5a7-543a8cbfa25d.slp` | dolphin | 88 codes, 10904 bytes |
+| `87e50d4cf206e14cd4eec2026a2134b4c2c7c1a0a630780a57a898a8e910dba2` | `lras_20476_14664b32_p1_initiator.slp` | edge | 88 codes, 10904 bytes |
+| `8b962570181148208298da910debc7b31cfe246745031dbd2b67c58fbc6776f1` | `20476_0ecf0448-1368-408b-ba44-951349a79c42.slp` | tournament | 89 codes, 11128 bytes |
+| `a5405d494fe96a1388f0bde61c0f3df86fa927572da7907b0fb04253a214938c` | `20476_19fd3cbb-54cc-4805-b479-f7b01d1c32e5.slp` | tournament | 95 codes, 11856 bytes |
+| `a8a9ace3b33efef387c2dadf70a9014045ab00157df178a27a98385dc0c47735` | `20476_01c6d260-8e33-4031-ab2c-b12e46a7aa8d.slp` | dolphin | 95 codes, 11856 bytes |
+| `b4efb5e157f1629b57e9494c6f93004bfd8ec2d21de00913d9251fd1ed8b7bdf` | `20476_147832a2-24d4-4dad-bdad-d0608f83f579.slp` | tournament | 88 codes, 10904 bytes |
+| `c284be3ef56ed2d2b1881a06fbbe38e7e4e76783176abb24efcd26901f53642f` | `20476_12ea3f66-3b37-4e18-ac46-7142c1eee126.slp` | tournament | 88 codes, 10904 bytes |
+| `d9a56d2d2ec44c920936513fb16bc2c6a66c2e2edc0faa48e47967e4d8a7bed4` | `lras_20689_fa028fa2_p4_initiator.slp` | edge | 113 codes, 12728 bytes |
+| `e0bf48116304685e36d4b5d654352f488880fa4ddb9f2e230a6494b690577ebc` | `20476_06200225-6243-4da9-a90d-6e40cb611d3a.slp` | tournament | 88 codes, 10904 bytes |
+| `e209d7e704bf210702e4dfbd7d9c3ee6e99c5ef2e0116e41d1f6cc581bda1a66` | `20476_28bf8e4c-5126-40bc-aca3-9b6f5fc6f695.slp` | tournament | 88 codes, 10904 bytes |
+| `f4859939d3f3cc084b4148a3fcd770937e4b29ceffe2e7b75203483cee054e56` | `20476_1c57c3ef-c2ab-4548-b7ab-fb9aba553293.slp` | tournament | 88 codes, 10904 bytes |
+
+The other 9 values are one file each: the four `own-offline/` files and four CPU files in `edge/`
+(the custom coverage-corpus lists of F3) and `edge/mex_check_luigi_replay.slp` (m-ex,
+300 codes).
+
+**Finding: a whole-list SHA-256 identifies a recording, not a code set.** F3 above said the 28
+console recordings share 85 byte-identical codes. Measured again (per-code bytes, and the
+engine's own per-code hashes from `slpcheck --gecko`), the 28 lists have 85 (type, address)
+pairs in common but only **70 of them are byte-identical in every file**. 15 differ: 12 of them
+take 2-4 values that follow the four list shapes, and three differ from game to game:
+
+- `C2 8006B460` (UCF 0.84 pad buffer and 1.0 cardinals): 28 different payloads, one per file,
+  differing in the inline data words near the start of the code.
+- `C2 800D65EC` (UCF DBOOC fix): 16 different payloads, differing in one byte (offset 31).
+- `C2 800998A4` (UCF shield drop): 7 different payloads.
+
+These codes keep data inside their own code body, and the list Slippi writes carries those
+words as they stood when it was written. The engine authors note the same:
+"per file the hash differs because some payloads embed per-game data"
+(`docs/rust-port/notes/slpcheck.md:106-107` in the engine repository). With those three codes
+left out, the 28 lists fall into exactly four groups: the 88-code shape (19 files), 95 codes
+(6), 89 codes (2) and 113 codes (1, `edge/lras_20689`), matching the four shapes of F3.
+
+Consequence: an organiser cannot admit "the standard Slippi set" with one or a few
+`allowed_gecko` entries. Every Slippi recording would need its own entry, which defeats the
+rule. The allow-list works as specified for lists that are written byte-for-byte the same every
+game. Whether the engine's own exports will be such lists depends on how the engine writes them
+(a list written from the codes as loaded, not from memory after they ran, would be stable).
+Admitting Slippi recordings needs a different identity, for example a hash over each code with
+its known data words masked, or a per-code allow-list keyed on (type, address) plus the bytes of
+the code outside its data words. That is a design decision, not made here.
+
+**How an organiser allows a code set.** Get the SHA-256 of the list from a replay played with
+it (`replay::parse(..).gecko_sha256`; the real-engine test above prints it for every corpus
+file) and add it, in lowercase, to the ruleset:
+
+```toml
+[ruleset]
+allowed_gecko = ["<64 lowercase hex characters>"]
+```
+
+An entry in uppercase, or with spaces, never matches. `proto::ruleset::is_gecko_hash` checks the
+shape of an entry (config validation does not call it yet).
+
 ## What this means for running an event
 
 - **What gets verified today:** games played with this project's own netplay client. Both

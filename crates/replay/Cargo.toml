@@ -9,6 +9,7 @@ testkit = []
 
 [dependencies]
 thiserror.workspace = true
+sha2.workspace = true
 
 [dev-dependencies]
 # The integration tests fabricate replays with `testkit`; enabling it here means a plain

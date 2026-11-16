@@ -1742,6 +1742,7 @@ name = "replay"
 version = "0.1.0"
 dependencies = [
  "replay",
+ "sha2 0.10.9",
  "thiserror 2.0.21",
 ]
 

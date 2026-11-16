@@ -743,3 +743,88 @@ fn early_end_slack_is_calibrated() {
         bad.join("\n")
     );
 }
+
+/// The engine's `gecko_hash` column and `replay::gecko_fnv32` agree on every file our reader
+/// parses, so both select the same Gecko list bytes. Direct engine runs, spawn variable unset.
+#[test]
+#[ignore = "needs AB_ENGINE, AB_ISO and AB_FIXTURES"]
+fn gecko_fnv32_matches_engine_gecko_hash() {
+    let env = env();
+    let (mut checked, mut with_list, mut bad) = (0, 0, Vec::new());
+    for e in manifest(&env) {
+        let path = env.fixtures.join(&e.relpath);
+        let file = read(&path);
+        if replay::parse(&file).is_err() {
+            continue;
+        }
+        let ours = replay::gecko_fnv32(&file)
+            .expect("a parsed file walks")
+            .unwrap_or_else(|| "none".to_string());
+        let run = engine_run(&env, &path, false);
+        let engine = run.col("gecko_hash");
+        println!("{}: ours {ours}, engine {engine:?}", e.relpath);
+        checked += 1;
+        with_list += usize::from(ours != "none");
+        if engine.as_deref() != Some(ours.as_str()) {
+            bad.push(format!("{}: ours {ours}, engine {engine:?}", e.relpath));
+        }
+    }
+    println!("{checked} files compared, {with_list} with a Gecko list");
+    assert!(checked > 0, "no parsed files");
+    assert!(bad.is_empty(), "gecko_hash mismatches:\n{}", bad.join("\n"));
+}
+
+/// The distinct Gecko list SHA-256 values in the corpus, and in particular among the 28 Slippi
+/// console recordings (`dolphin/`, `tournament/`, the two LRAS files in `edge/`).
+///
+/// Measured: no two recordings share a value. Three codes in the standard Slippi set
+/// (`C2 8006B460`, `C2 800D65EC`, `C2 800998A4`) carry data that differs from game to game, so a
+/// SHA-256 of the whole list identifies one recording, not a code set (docs/real-engine.md,
+/// "Gecko code lists"). This test pins that finding.
+#[test]
+#[ignore = "needs AB_ENGINE, AB_ISO and AB_FIXTURES"]
+fn console_recordings_gecko_sha256() {
+    let env = env();
+    let console = |relpath: &str| {
+        relpath.starts_with("dolphin/")
+            || relpath.starts_with("tournament/")
+            || relpath.starts_with("edge/lras_")
+    };
+    // sha256 -> files (with their Slippi version)
+    let mut console_shas: HashMap<String, Vec<String>> = HashMap::new();
+    let mut all_shas: HashMap<String, Vec<String>> = HashMap::new();
+    for e in manifest(&env) {
+        let Ok(f) = replay::parse(&read(&env.fixtures.join(&e.relpath))) else {
+            continue;
+        };
+        let Some(sha) = f.gecko_sha256 else { continue };
+        let [a, b, c, _] = f.slippi_version;
+        let label = format!("{} (Slippi {a}.{b}.{c})", e.relpath);
+        all_shas.entry(sha.clone()).or_default().push(label.clone());
+        if console(&e.relpath) {
+            console_shas.entry(sha).or_default().push(label);
+        }
+    }
+    for (name, map) in [
+        ("console recordings", &console_shas),
+        ("whole corpus", &all_shas),
+    ] {
+        let mut rows: Vec<_> = map.iter().collect();
+        rows.sort();
+        let files: usize = map.values().map(Vec::len).sum();
+        println!(
+            "{name}: {files} files with a list, {} distinct gecko_sha256",
+            rows.len()
+        );
+        for (sha, files) in rows {
+            println!("  {sha} {}", files.join(", "));
+        }
+    }
+    let files: usize = console_shas.values().map(Vec::len).sum();
+    assert_eq!(files, 28, "console recordings with a Gecko list");
+    assert_eq!(
+        console_shas.len(),
+        28,
+        "every console recording has its own list SHA-256"
+    );
+}

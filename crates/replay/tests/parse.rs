@@ -1,5 +1,5 @@
 use replay::testkit::{simple_game, SlpBuilder};
-use replay::{parse, raw_element, winner_port, PlayerKind, ReplayError, ReplayFacts};
+use replay::{gecko_fnv32, parse, raw_element, winner_port, PlayerKind, ReplayError, ReplayFacts};
 
 /// Two humans on ports 1 and 2 with the given final states and game end.
 fn duel(p1: (u8, f32), p2: (u8, f32), end: Option<(u8, Option<u8>)>) -> ReplayFacts {
@@ -182,6 +182,105 @@ fn gecko_detected() {
     )
     .unwrap();
     assert!(f.has_gecko);
+    assert!(f.gecko_sha256.is_some());
+}
+
+/// A 1300-byte list: three Message Splitter events (512 + 512 + 276 bytes).
+fn long_list() -> Vec<u8> {
+    (0..1300u32).map(|i| (i % 251) as u8).collect()
+}
+
+fn with_list(list: &[u8]) -> Vec<u8> {
+    SlpBuilder::new()
+        .player(1, 2, PlayerKind::Human)
+        .gecko_bytes(list)
+        .frame(10, 1, 4, 0.0)
+        .build()
+}
+
+#[test]
+fn no_list_has_no_hashes() {
+    for file in [simple_game(1, "t"), with_list(&[])] {
+        let f = parse(&file).unwrap();
+        assert!(!f.has_gecko);
+        assert_eq!(f.gecko_sha256, None);
+        assert_eq!(gecko_fnv32(&file).unwrap(), None);
+    }
+}
+
+#[test]
+fn list_hashes_are_sha256_and_engine_fnv32() {
+    let file = with_list(b"abc");
+    let f = parse(&file).unwrap();
+    assert!(f.has_gecko);
+    assert_eq!(
+        f.gecko_sha256.as_deref(),
+        Some("ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad")
+    );
+    assert_eq!(gecko_fnv32(&file).unwrap().as_deref(), Some("0541574b"));
+}
+
+#[test]
+fn multi_event_list_hashes_as_the_concatenation() {
+    let file = with_list(&long_list());
+    let f = parse(&file).unwrap();
+    assert!(f.has_gecko);
+    assert_eq!(
+        f.gecko_sha256.as_deref(),
+        Some("b60f0e05937c77e7c3818dde3d41f69073ae3bf508374d1295df7a55bde99ee9")
+    );
+    assert_eq!(gecko_fnv32(&file).unwrap().as_deref(), Some("8de65260"));
+    // Any change to the list changes the identity.
+    let mut other = long_list();
+    other[1299] ^= 1;
+    assert_ne!(
+        parse(&with_list(&other)).unwrap().gecko_sha256,
+        f.gecko_sha256
+    );
+}
+
+/// A Message Splitter event (payload 0x204 bytes) carrying a Gecko List chunk
+/// whose "actual size" field says `claimed`.
+fn splitter(block: &[u8], claimed: u16) -> Vec<u8> {
+    let mut p = vec![0u8; 0x204];
+    p[..block.len()].copy_from_slice(block);
+    p[0x200..0x202].copy_from_slice(&claimed.to_be_bytes());
+    p[0x202] = 0x3D;
+    p[0x203] = 1;
+    p
+}
+
+#[test]
+fn splitter_size_beyond_its_block_is_capped_at_512() {
+    let block: Vec<u8> = (0..512u32).map(|i| (i * 7) as u8).collect();
+    let capped = SlpBuilder::new()
+        .player(1, 2, PlayerKind::Human)
+        .event(0x10, splitter(&block, 0xFFFF))
+        .build();
+    let f = parse(&capped).unwrap();
+    assert_eq!(
+        f.gecko_sha256,
+        parse(&with_list(&block)).unwrap().gecko_sha256
+    );
+    assert_eq!(
+        gecko_fnv32(&capped).unwrap(),
+        gecko_fnv32(&with_list(&block)).unwrap()
+    );
+    // A zero actual size contributes nothing: no list.
+    let empty = SlpBuilder::new()
+        .player(1, 2, PlayerKind::Human)
+        .event(0x10, splitter(&block, 0))
+        .build();
+    let f = parse(&empty).unwrap();
+    assert!(!f.has_gecko);
+    assert_eq!(f.gecko_sha256, None);
+}
+
+#[test]
+fn gecko_fnv32_errors_on_garbage() {
+    assert!(matches!(gecko_fnv32(b"hello"), Err(ReplayError::NotSlp)));
+    let g = with_list(b"abc");
+    assert!(gecko_fnv32(&g[..40]).is_err());
 }
 
 #[test]
@@ -258,41 +357,65 @@ fn with_raw(stream: &[u8]) -> Vec<u8> {
     f
 }
 
+/// Parses `f` and checks the invariants that must hold for any readable file.
+fn parse_checked(f: &[u8]) -> Result<ReplayFacts, ReplayError> {
+    let parsed = parse(f);
+    let fnv = gecko_fnv32(f);
+    if let Ok(facts) = &parsed {
+        let _ = winner_port(facts);
+        assert_eq!(facts.has_gecko, facts.gecko_sha256.is_some());
+        let sha = facts.gecko_sha256.as_deref().unwrap_or("");
+        assert!(sha.is_empty() || (sha.len() == 64 && sha.bytes().all(|b| b.is_ascii_hexdigit())));
+        // The walk that parse completed also completes for the list alone.
+        let fnv = fnv.expect("gecko_fnv32 succeeds on a file parse accepts");
+        assert_eq!(fnv.is_some(), facts.has_gecko);
+    }
+    parsed
+}
+
 #[test]
 fn every_truncation_and_mutation_is_safe() {
-    let g = SlpBuilder::new()
-        .player(1, 2, PlayerKind::Human)
-        .player(2, 9, PlayerKind::Human)
-        .gecko(true)
-        .event(0x42, vec![1, 2, 3])
-        .frame(-123, 1, 4, 0.0)
-        .frame(-123, 2, 4, 0.0)
-        .frame(10, 1, 3, 12.5)
-        .frame(10, 2, 1, 80.0)
-        .end(2, None)
-        .build();
-    let raw_len = raw_element(&g).unwrap().len();
-    // Truncating the file anywhere inside the raw element is an error.
-    for cut in 0..15 + raw_len {
-        assert!(parse(&g[..cut]).is_err(), "cut {cut}");
-    }
-    // Truncating inside the metadata leaves the raw element intact.
-    for cut in 15 + raw_len..g.len() {
-        let _ = parse(&g[..cut]);
-    }
-    // A stream cut short with a consistent declared length (event split mid-payload).
-    for len in 0..raw_len {
-        let mut f = g[..15 + len].to_vec();
-        f[11..15].copy_from_slice(&(len as u32).to_be_bytes());
-        let _ = parse(&f);
-    }
-    // Single-byte corruption anywhere.
-    for i in 0..g.len() {
-        for v in [0x00, 0x01, 0x10, 0x35, 0x36, 0x38, 0x39, 0x7F, 0xFF] {
-            let mut f = g.clone();
-            f[i] = v;
-            if let Ok(facts) = parse(&f) {
-                let _ = winner_port(&facts);
+    let builder = || {
+        SlpBuilder::new()
+            .player(1, 2, PlayerKind::Human)
+            .player(2, 9, PlayerKind::Human)
+            .event(0x42, vec![1, 2, 3])
+            .frame(-123, 1, 4, 0.0)
+            .frame(-123, 2, 4, 0.0)
+            .frame(10, 1, 3, 12.5)
+            .frame(10, 2, 1, 80.0)
+            .end(2, None)
+    };
+    let files = [
+        builder().build(),
+        builder().gecko(true).build(),
+        // Two splitter events, the second one partly filled.
+        builder().gecko_bytes(&long_list()[..600]).build(),
+    ];
+    for g in &files {
+        let raw_len = raw_element(g).unwrap().len();
+        // Truncating the file anywhere inside the raw element is an error.
+        for cut in 0..15 + raw_len {
+            assert!(parse_checked(&g[..cut]).is_err(), "cut {cut}");
+        }
+        // Truncating inside the metadata leaves the raw element intact.
+        for cut in 15 + raw_len..g.len() {
+            let _ = parse_checked(&g[..cut]);
+        }
+        // A stream cut short with a consistent declared length (event split mid-payload).
+        for len in 0..raw_len {
+            let mut f = g[..15 + len].to_vec();
+            f[11..15].copy_from_slice(&(len as u32).to_be_bytes());
+            let _ = parse_checked(&f);
+        }
+        // Single-byte corruption anywhere.
+        for i in 0..g.len() {
+            for v in [
+                0x00, 0x01, 0x02, 0x10, 0x35, 0x36, 0x38, 0x39, 0x3D, 0x7F, 0xFF,
+            ] {
+                let mut f = g.clone();
+                f[i] = v;
+                let _ = parse_checked(&f);
             }
         }
     }
