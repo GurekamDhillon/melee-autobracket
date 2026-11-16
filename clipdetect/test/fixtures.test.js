@@ -135,3 +135,16 @@ test("--config applies overrides and rejects unknown keys", { skip }, () => {
     fs.rmSync(dir, { recursive: true, force: true });
   }
 });
+
+// I1 regression: this 16-hit, 82% combo has the victim down/teching between hits
+// (largest "free" gap was 88 frames before down/tech/dying counted as not
+// actionable, 44 after), so it must now be kept.
+test("tech-chase combo (1285c0cd frame 933) is kept by the hitstun-gap filter", { skip }, () => {
+  const { loadReplay } = require("../lib/load");
+  const { detect, maxHitstunGap } = require("../lib/detect");
+  const { model } = loadReplay(path.join(FIXTURES, "tournament", "20476_1285c0cd-acb2-4512-b141-ffdc938d5f23.slp"));
+  const c = model.stats.combos.find((x) => x.startFrame === 933);
+  assert.equal(c.moves.length, 16);
+  assert.ok(maxHitstunGap(model, c) <= 45);
+  assert.ok(detect(model).clips.some((x) => x.kind === "combo" && x.details.core_start_frame === 933));
+});

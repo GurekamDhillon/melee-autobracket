@@ -4,7 +4,7 @@
 // model built from a .slp file). Nothing here touches the filesystem, so the
 // unit tests feed it small synthetic models.
 
-const { isDamaged, isGrabbed, isCommandGrabbed } = require("@slippi/slippi-js/node");
+const { isDamaged, isGrabbed, isCommandGrabbed, isDown, isTeching, isDead } = require("@slippi/slippi-js/node");
 const { ledgeX } = require("./stages");
 
 const FPS = 60;
@@ -41,6 +41,9 @@ const DEFAULT_CONFIG = Object.freeze({
   padAfterFrames: 1.5 * FPS,
 });
 
+const INTEGER_KEYS = ["comboMinHits", "comboMaxHitstunGapFrames", "comebackMinStockDeficit", "zeroToDeathMinHits", "padBeforeFrames", "padAfterFrames"];
+const POSITIVE_KEYS = ["comebackMinStockDeficit", "comboMinHits"];
+
 function mergeConfig(overrides) {
   const cfg = { ...DEFAULT_CONFIG };
   if (overrides == null) return cfg;
@@ -57,6 +60,11 @@ function mergeConfig(overrides) {
         ? true
         : typeof v === typeof dflt && (typeof v !== "number" || Number.isFinite(v));
     if (!okType) throw new Error(`config key ${k}: expected ${typeof dflt}, got ${JSON.stringify(v)}`);
+    if (typeof v === "number") {
+      if (INTEGER_KEYS.includes(k) && !Number.isInteger(v)) throw new Error(`config key ${k}: expected an integer, got ${v}`);
+      if (v < 0) throw new Error(`config key ${k}: must not be negative, got ${v}`);
+      if (POSITIVE_KEYS.includes(k) && v < 1) throw new Error(`config key ${k}: must be >= 1, got ${v}`);
+    }
     cfg[k] = v;
   }
   return cfg;
@@ -88,6 +96,16 @@ function attackerIndex(c) {
   return c.moves.length ? c.moves[0].playerIndex : null;
 }
 
+// A victim is not actionable while damaged, grabbed, command-grabbed, down
+// (knockdown/missed tech/getup, 0xB7-0xC6), teching (0xC7-0xCC) or dying
+// (0x00-0x0A). Ranges are slippi-js 9.1.3's State.DOWN_START/END,
+// TECH_START/END and DYING_START/END in common/stats/common.cjs; its
+// ComboComputer (combos.cjs) uses the same set to keep a combo alive, so a
+// tech chase is one continuous combo, not a gap.
+function notActionable(s) {
+  return isDamaged(s) || isGrabbed(s) || isCommandGrabbed(s) || isDown(s) || isTeching(s) || isDead(s);
+}
+
 // First frame strictly after `fromFrame` at which the victim is no longer in a
 // damaged/grabbed state. If the frame data runs out first, returns the last
 // frame examined + 1 (that is, the victim is treated as stuck in hitstun).
@@ -96,7 +114,7 @@ function victimFreeFrame(model, victimIndex, fromFrame, untilFrame) {
     const post = model.getPost(f, victimIndex);
     if (!post) continue;
     const s = post.actionStateId;
-    if (!(isDamaged(s) || isGrabbed(s) || isCommandGrabbed(s))) return f;
+    if (!notActionable(s)) return f;
   }
   return untilFrame + 1;
 }
@@ -187,7 +205,7 @@ function detectKills(model, cfg) {
       low.push({
         kind: "low_kill",
         ...base,
-        score: round3(clamp01(0.3 + 0.7 * (1 - pct / cfg.lowKillMaxPercent))),
+        score: round3(clamp01(0.3 + 0.7 * (1 - pct / Math.max(cfg.lowKillMaxPercent, 1e-9)))),
         details: {
           kill_percent: round3(pct),
           stock_count_before: stock.count,
@@ -276,12 +294,15 @@ function detectComeback(model, cfg) {
   let maxDeficit = 0;
   let deficitFrame = null;
   let stocksAt = null;
-  for (const d of deaths) {
-    remaining[d.playerIndex] -= 1;
+  // Apply every death of one frame before measuring, so a same-frame trade
+  // never records a transient deficit.
+  for (let i = 0; i < deaths.length; ) {
+    const frame = deaths[i].endFrame;
+    for (; i < deaths.length && deaths[i].endFrame === frame; i++) remaining[deaths[i].playerIndex] -= 1;
     const deficit = remaining[loser] - remaining[winner];
     if (deficit > maxDeficit) {
       maxDeficit = deficit;
-      deficitFrame = d.endFrame;
+      deficitFrame = frame;
       stocksAt = { winner: remaining[winner], loser: remaining[loser] };
     }
   }

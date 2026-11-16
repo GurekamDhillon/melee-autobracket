@@ -243,3 +243,38 @@ test("output order is stable: by start frame, then kind, then ports", () => {
     [1, 2],
   );
 });
+
+test("combo: tech-chase (victim down/teching between hits) is kept; real actionable gap still rejected", () => {
+  const moves = [100, 160, 220, 280, 340].map((f) => move(f, 0, 6));
+  const c = combo({ victim: 1, moves });
+  const withStates = (states) => {
+    const m = model({ combos: [c] });
+    m.getPost = (frame) => {
+      const i = (((frame - 100) % 60) + 60) % 60;
+      return { actionStateId: i < 5 ? HITSTUN : states(i), positionX: 0, positionY: 0, percent: 0 };
+    };
+    return m;
+  };
+  // 0xB7 down, then 0xC7 tech: not actionable for the whole gap
+  const chase = withStates((i) => (i < 30 ? 0xb7 : 0xc7));
+  assert.equal(maxHitstunGap(chase, c), 0);
+  assert.equal(detect(chase).clips.length, 1);
+  // Wait for 55 of every 60 frames: genuinely free, gap > 45
+  const free = withStates(() => WAIT);
+  assert.ok(maxHitstunGap(free, c) > 45);
+  assert.equal(detect(free).clips.length, 0);
+});
+
+test("comeback: same-frame trade does not inflate the deficit", () => {
+  // winner (0) is down 3-4, then both lose a stock on frame 3000: deficit stays 1.
+  const stocks = [stock(0, 1000, 100, 4), stock(0, 3000, 100, 3), stock(1, 3000, 100, 4), stock(1, 5000, 100, 3)];
+  const r = detect(model({ stocks, winners: [{ playerIndex: 0 }] }));
+  assert.equal(r.clips.filter((c) => c.kind === "comeback").length, 0);
+});
+
+test("config: range checks reject bad values", () => {
+  assert.throws(() => mergeConfig({ comebackMinStockDeficit: 0 }), /config key comebackMinStockDeficit/);
+  assert.throws(() => mergeConfig({ padBeforeFrames: -1 }), /negative/);
+  assert.throws(() => mergeConfig({ lowKillMaxPercent: -1 }), /negative/);
+  assert.throws(() => mergeConfig({ comboMinHits: 2.5 }), /integer/);
+});
