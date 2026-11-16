@@ -61,6 +61,37 @@ async fn event_page_is_the_bracket_viewer() {
 }
 
 #[tokio::test]
+async fn bracket_page_has_a_vertical_layout() {
+    let app = TestApp::spawn(|_| {}).await;
+    let id = app.create_event(Format::SingleElim).await;
+    let page = fetch(&app, &format!("/events/{id}"))
+        .await
+        .text()
+        .await
+        .unwrap();
+    for s in [
+        "(orientation: portrait)",
+        r#"[data-layout="vertical"]"#,
+        ">Horizontal<",
+        ">Vertical<",
+        ">Jump to live<",
+        "aria-pressed",
+        r#"try { return localStorage.getItem(LAYOUT_KEY); } catch"#,
+        r#"try { localStorage.setItem(LAYOUT_KEY, value); } catch"#,
+        r#"behavior: "auto""#,
+        // A click wins for the visit even where storage refused to remember it.
+        "chosen || storedLayout() ||",
+    ] {
+        assert!(page.contains(s), "{s} in the bracket page");
+    }
+    // Storage is touched only inside the two guarded functions.
+    assert_eq!(page.matches("localStorage").count(), 2);
+    // Everything the vertical layout shows is as wide as the page, never wider.
+    assert!(page
+        .contains(r#".board[data-layout="vertical"] .bracket { display: block; width: auto; }"#));
+}
+
+#[tokio::test]
 async fn pages_have_no_external_urls() {
     let app = TestApp::spawn(|_| {}).await;
     for path in all_pages(&app).await {
