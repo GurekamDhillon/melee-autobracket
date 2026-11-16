@@ -92,10 +92,9 @@ run() { # run [extra env assignments...] -> stdout+stderr in $out, status in $st
 }
 
 # 1. A missing config file named explicitly is an error.
-set +e
-bash "$script" --env "$work/nope.env" > /dev/null 2>&1
-[ $? -ne 0 ] || fail "missing --env file should fail"
-set -e
+if bash "$script" --env "$work/nope.env" > /dev/null 2>&1; then
+    fail "missing --env file should fail"
+fi
 pass "missing config file fails"
 
 # 2. First run: sqlite copied, postgres skipped, modes right, integrity ok.
@@ -104,7 +103,9 @@ run
 grep -q "postgres: skipped" <<<"$out" || fail "postgres step should be skipped: $out"
 [ "$(stat -c %a "$bdir")" = 700 ] || fail "backup dir mode is $(stat -c %a "$bdir"), want 700"
 files=("$bdir"/autobracket-*.sqlite)
-[ "${#files[@]}" = 1 ] && [ -f "${files[0]}" ] || fail "expected one sqlite backup, got: ${files[*]}"
+if [ "${#files[@]}" != 1 ] || [ ! -f "${files[0]}" ]; then
+    fail "expected one sqlite backup, got: ${files[*]}"
+fi
 [ "$(stat -c %a "${files[0]}")" = 600 ] || fail "backup file mode is $(stat -c %a "${files[0]}"), want 600"
 [ "$("$SQLITE3" -readonly "${files[0]}" "PRAGMA integrity_check;")" = ok ] || fail "backup copy fails integrity_check"
 [ "$("$SQLITE3" -readonly "${files[0]}" "SELECT count(*) FROM events;")" = 3 ] || fail "backup copy has wrong content"
@@ -155,7 +156,9 @@ grep -q '^exec -i zitadel-db-1 pg_dump -U zitadel --format=custom --no-password 
     || fail "unexpected docker invocation: $(cat "$work/docker.log")"
 # The real dump: today's timestamp, not one of the 2020 fakes.
 pg=("$(find "$bdir" -maxdepth 1 -name 'zitadel-*.pgdump' ! -name 'zitadel-2020*' -print)")
-[ -n "${pg[0]}" ] && [ -f "${pg[0]}" ] || fail "no postgres dump written"
+if [ -z "${pg[0]}" ] || [ ! -f "${pg[0]}" ]; then
+    fail "no postgres dump written"
+fi
 [ "$(stat -c %a "${pg[0]}")" = 600 ] || fail "pg dump mode is $(stat -c %a "${pg[0]}"), want 600"
 [ "$(head -c 5 "${pg[0]}")" = PGDMP ] || fail "pg dump content wrong"
 [ "$(find "$bdir" -maxdepth 1 -name 'zitadel-*.pgdump' | wc -l)" = 7 ] || fail "pg rotation did not keep 7"
