@@ -6,7 +6,8 @@
 
 use std::time::Duration;
 
-use axum::extract::{FromRequest, OriginalUri, Request};
+use axum::extract::{FromRequest, FromRequestParts, OriginalUri, Request};
+use axum::http::request::Parts;
 use axum::http::{header, HeaderMap, StatusCode};
 use bytes::Bytes;
 use http_body_util::{BodyExt, LengthLimitError, Limited};
@@ -29,10 +30,24 @@ pub const UPLOAD_BODY_TIMEOUT: Duration = Duration::from_secs(120);
 pub type Rejection = ApiError;
 
 /// A registered player. 401 when unsigned or invalid, 403 when the key is not registered.
+/// The signing key may be the player's canonical key or one linked to it (`player_keys`).
 pub struct Player {
+    /// The player's canonical key (`players.key`), what entries and sets refer to.
     pub key: String,
+    /// The key that signed the request; its nonce is recorded under it.
+    pub signer: String,
     pub tag: String,
     pub body: Bytes,
+}
+
+/// A registered player, from the headers alone: every check of [`Player`] with the signature
+/// over an empty body, and the body left unread. For the live relay's WebSocket upgrade.
+pub struct PlayerHead {
+    /// The player's canonical key.
+    pub key: String,
+    /// The key that signed the request.
+    pub signer: String,
+    pub tag: String,
 }
 
 /// A registered player uploading a replay: as [`Player`], with a body of up to
@@ -78,10 +93,68 @@ const JSON_BODY: BodyLimit = BodyLimit {
 
 /// A request whose signature verified.
 struct Signed {
+    /// The signing key.
     key: String,
-    /// The player's tag, for [`Role::Player`].
-    tag: Option<String>,
+    /// The player, for [`Role::Player`].
+    player: Option<PlayerId>,
     body: Bytes,
+}
+
+/// A player's canonical key and tag.
+struct PlayerId {
+    key: String,
+    tag: String,
+}
+
+/// The checks made before any body is read: well-formed headers, clock skew, and the role.
+struct Head {
+    headers: SignedHeaders,
+    /// The signing key.
+    key: String,
+    player: Option<PlayerId>,
+    /// One clock reading for the skew check, the signature check and the nonce.
+    now: i64,
+}
+
+async fn check_head(parts: &Parts, state: &AppState, role: &Role) -> Result<Head, Rejection> {
+    let headers = signed_headers(&parts.headers).ok_or_else(|| {
+        state.rejections.record();
+        ApiError::new(StatusCode::UNAUTHORIZED, "missing signature headers")
+    })?;
+    let now = now_unix();
+    let key = check_headers(&headers, now).map_err(|e| sign_rejection(state, e))?;
+    let player = authorize(state, role, &key).await?;
+    Ok(Head {
+        headers,
+        key,
+        player,
+        now,
+    })
+}
+
+/// Verifies the signature over method, path-and-query and `body`, then records the nonce
+/// under the signing key.
+async fn check_signature(
+    parts: &Parts,
+    state: &AppState,
+    head: &Head,
+    body: &[u8],
+) -> Result<(), Rejection> {
+    // Sign over the URI the client sent, not one with a `Router::nest` prefix stripped.
+    let uri = parts
+        .extensions
+        .get::<OriginalUri>()
+        .map_or(&parts.uri, |o| &o.0);
+    let path_and_query = uri.path_and_query().map_or(uri.path(), |pq| pq.as_str());
+    verify_request(
+        &head.headers,
+        parts.method.as_str(),
+        path_and_query,
+        head.now,
+        body,
+    )
+    .map_err(|e| sign_rejection(state, e))?;
+    record_nonce(state, &head.key, &head.headers.nonce, head.now).await
 }
 
 async fn authenticate(
@@ -91,14 +164,7 @@ async fn authenticate(
     limit: BodyLimit,
 ) -> Result<Signed, Rejection> {
     let (parts, body) = req.into_parts();
-    let headers = signed_headers(&parts.headers).ok_or_else(|| {
-        state.rejections.record();
-        ApiError::new(StatusCode::UNAUTHORIZED, "missing signature headers")
-    })?;
-    // One clock reading for the skew check, the signature check and the nonce.
-    let now = now_unix();
-    let key = check_headers(&headers, now).map_err(|e| sign_rejection(state, e))?;
-    let tag = authorize(state, &role, &key).await?;
+    let head = check_head(&parts, state, &role).await?;
 
     if declared_length(&parts.headers).is_some_and(|n| n > limit.bytes) {
         return Err(too_large());
@@ -121,31 +187,31 @@ async fn authenticate(
         }
     };
 
-    // Sign over the URI the client sent, not one with a `Router::nest` prefix stripped.
-    let uri = parts
-        .extensions
-        .get::<OriginalUri>()
-        .map_or(&parts.uri, |o| &o.0);
-    let path_and_query = uri.path_and_query().map_or(uri.path(), |pq| pq.as_str());
-    verify_request(&headers, parts.method.as_str(), path_and_query, now, &body)
-        .map_err(|e| sign_rejection(state, e))?;
-    record_nonce(state, &key, &headers.nonce, now).await?;
-    Ok(Signed { key, tag, body })
+    check_signature(&parts, state, &head, &body).await?;
+    Ok(Signed {
+        key: head.key,
+        player: head.player,
+        body,
+    })
 }
 
-/// Checks that `key` holds `role`; for a player, returns their tag.
-async fn authorize(state: &AppState, role: &Role, key: &str) -> Result<Option<String>, Rejection> {
+/// Checks that `key` holds `role`; for a player, returns the player it signs as.
+async fn authorize(
+    state: &AppState,
+    role: &Role,
+    key: &str,
+) -> Result<Option<PlayerId>, Rejection> {
     let cfg = &state.cfg;
     let listed = |keys: &[String]| keys.iter().any(|k| k.eq_ignore_ascii_case(key));
     match role {
         Role::Any => Ok(None),
         Role::Player => {
-            let tag: Option<String> = sqlx::query_scalar("SELECT tag FROM players WHERE key = ?")
-                .bind(key)
-                .fetch_optional(&state.db)
+            let mut conn = state.db.acquire().await.map_err(internal)?;
+            let player = crate::accounts::resolve_key(&mut conn, key)
                 .await
                 .map_err(internal)?;
-            tag.map(Some)
+            player
+                .map(|(key, tag)| Some(PlayerId { key, tag }))
                 .ok_or_else(|| ApiError::new(StatusCode::FORBIDDEN, "key is not registered"))
         }
         Role::To if listed(&cfg.to_keys) => Ok(None),
@@ -193,14 +259,32 @@ impl FromRequest<AppState> for PlayerUpload {
 }
 
 fn player(s: Signed) -> Result<Player, Rejection> {
-    let tag = s
-        .tag
-        .ok_or_else(|| ApiError::internal("player authorised without a tag"))?;
+    let p = s
+        .player
+        .ok_or_else(|| ApiError::internal("player authorised without a player"))?;
     Ok(Player {
-        key: s.key,
-        tag,
+        key: p.key,
+        signer: s.key,
+        tag: p.tag,
         body: s.body,
     })
+}
+
+impl FromRequestParts<AppState> for PlayerHead {
+    type Rejection = Rejection;
+
+    async fn from_request_parts(parts: &mut Parts, state: &AppState) -> Result<Self, Rejection> {
+        let head = check_head(parts, state, &Role::Player).await?;
+        check_signature(parts, state, &head, &[]).await?;
+        let p = head
+            .player
+            .ok_or_else(|| ApiError::internal("player authorised without a player"))?;
+        Ok(PlayerHead {
+            key: p.key,
+            signer: head.key,
+            tag: p.tag,
+        })
+    }
 }
 
 impl FromRequest<AppState> for To {

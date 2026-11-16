@@ -3,9 +3,11 @@
 
 use std::collections::VecDeque;
 use std::path::Path;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
+use base64::Engine;
 use bracket::Format;
 use proto::{
     sign_request, EventCreateReq, EventSummary, RegisterReq, ResimOutcome, SigningKey, SignupReq,
@@ -14,8 +16,11 @@ use rand::rngs::OsRng;
 use rand::RngCore;
 use reqwest::Method;
 use serde::Serialize;
+use serde_json::{json, Value};
 use tempfile::TempDir;
+use tokio::task::JoinHandle;
 
+use crate::config::{HookKeys, IdentityConfig};
 use crate::db::now_unix;
 use crate::{build_app, AppState, Config, NoResim, Resim};
 
@@ -27,6 +32,8 @@ pub struct TestApp {
     pub state: AppState,
     /// Holds the database and replay directory.
     pub dir: TempDir,
+    /// The fake identity provider, for [`TestApp::spawn_identity`].
+    identity: Option<IdentityKit>,
 }
 
 impl TestApp {
@@ -63,6 +70,7 @@ impl TestApp {
             to,
             state,
             dir,
+            identity: None,
         }
     }
 
@@ -276,5 +284,334 @@ impl TestApp {
     /// A client signing with `sk` (registered or not).
     pub fn client(&self, sk: SigningKey, tag: &str) -> TestPlayer {
         TestPlayer::new(sk, tag, &self.url)
+    }
+}
+
+// --- Web identity (phase 2b) ---
+
+/// The identity provider's issuer in tests.
+pub const TEST_ISSUER: &str = "https://auth.test";
+/// The site's origin in tests.
+pub const TEST_ORIGIN: &str = "https://bracket.test";
+/// The bracket web client id (the ID token's audience) in tests.
+pub const TEST_CLIENT_ID: &str = "client-test";
+/// `identity.proxy_secret` in tests.
+pub const TEST_PROXY_SECRET: &str = "test-proxy-secret-test-proxy-secret-00";
+
+/// A fake identity provider: a JWKS server on a random local port and its signing keys.
+struct IdentityKit {
+    /// Signs `kid "t1"`, served from the start.
+    t1: SigningKey,
+    /// Signs `kid "t2"`, served after [`TestApp::rotate_jwks`].
+    t2: SigningKey,
+    /// The JWKS document's keys.
+    keys: Arc<Mutex<Vec<Value>>>,
+    /// Requests the JWKS server has answered.
+    fetches: Arc<AtomicUsize>,
+    server: Mutex<Option<JoinHandle<()>>>,
+}
+
+/// How [`TestApp::web`] makes the `X-Id-Token`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TokenMode {
+    /// Signed with `t1`, every claim right.
+    Valid,
+    /// `alg: none` and no signature.
+    Unsigned,
+    /// Claims `kid "t1"` but signed with another key.
+    WrongKey,
+    /// `iss` of another issuer.
+    WrongIss,
+    /// `aud` without our client id.
+    WrongAud,
+    /// Expired an hour ago.
+    Expired,
+    /// Signed with `t2` (served after [`TestApp::rotate_jwks`]).
+    Kid2,
+    /// No `X-Id-Token` header.
+    Absent,
+}
+
+/// A web user as nginx and oauth2-proxy would present them.
+#[derive(Clone, Debug)]
+pub struct TestWeb {
+    pub sub: String,
+    pub groups: Vec<String>,
+    pub amr: Vec<String>,
+    /// Seconds since the sign-in (`auth_time = now - auth_time_ago`).
+    pub auth_time_ago: i64,
+    pub token: TokenMode,
+    /// `X-Auth-Request-User`; `None` sends `sub`.
+    pub header_sub: Option<String>,
+    /// `X-Autobracket-Proxy`; `None` sends the right secret, `Some("")` none at all.
+    pub proxy_secret: Option<String>,
+}
+
+impl TestWeb {
+    /// A signed-in user with no groups.
+    pub fn player(sub: &str) -> Self {
+        TestWeb {
+            sub: sub.into(),
+            groups: Vec::new(),
+            amr: vec!["user".into()],
+            auth_time_ago: 60,
+            token: TokenMode::Valid,
+            header_sub: None,
+            proxy_secret: None,
+        }
+    }
+
+    /// An organiser who signed in a minute ago with a second factor.
+    pub fn admin(sub: &str) -> Self {
+        TestWeb {
+            groups: vec!["autobracket-admins".into()],
+            amr: vec!["user".into(), "mfa".into()],
+            ..TestWeb::player(sub)
+        }
+    }
+}
+
+/// An HTTP client sending a [`TestWeb`]'s identity headers, plus `Origin` and `x-ab-csrf`.
+pub struct WebClient {
+    url: String,
+    client: reqwest::Client,
+    headers: Vec<(&'static str, String)>,
+}
+
+impl WebClient {
+    /// A request with every header except those named in `omit` (lowercase).
+    pub fn request(&self, method: Method, path: &str, omit: &[&str]) -> reqwest::RequestBuilder {
+        let mut req = self.client.request(method, format!("{}{path}", self.url));
+        for (name, value) in &self.headers {
+            if !omit.contains(name) {
+                req = req.header(*name, value);
+            }
+        }
+        req
+    }
+
+    pub async fn get(&self, path: &str) -> reqwest::Response {
+        self.request(Method::GET, path, &[])
+            .send()
+            .await
+            .expect("send request")
+    }
+
+    pub async fn post_json<T: Serialize>(&self, path: &str, body: &T) -> reqwest::Response {
+        self.request(Method::POST, path, &[])
+            .json(body)
+            .send()
+            .await
+            .expect("send request")
+    }
+
+    pub async fn delete(&self, path: &str) -> reqwest::Response {
+        self.request(Method::DELETE, path, &[])
+            .send()
+            .await
+            .expect("send request")
+    }
+}
+
+/// The public JWK of an Ed25519 key.
+fn ed25519_jwk(kid: &str, key: &SigningKey) -> Value {
+    json!({
+        "kty": "OKP",
+        "crv": "Ed25519",
+        "use": "sig",
+        "alg": "EdDSA",
+        "kid": kid,
+        "x": base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(key.verifying_key().to_bytes()),
+    })
+}
+
+/// A compact JWT of `claims` with header `alg` and `kid`, signed with `key` (EdDSA), or with
+/// an empty signature when `key` is `None`.
+fn jwt(alg: &str, kid: &str, claims: &Value, key: Option<&SigningKey>) -> String {
+    use ed25519_dalek::Signer;
+    let b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD;
+    let header = json!({ "alg": alg, "typ": "JWT", "kid": kid });
+    let signing_input = format!(
+        "{}.{}",
+        b64.encode(header.to_string()),
+        b64.encode(claims.to_string())
+    );
+    let sig = key.map_or_else(String::new, |k| {
+        b64.encode(k.sign(signing_input.as_bytes()).to_bytes())
+    });
+    format!("{signing_input}.{sig}")
+}
+
+impl TestApp {
+    /// As [`TestApp::spawn`], with `[identity]` set up against a fake identity provider: a
+    /// JWKS server on a random local port serving one Ed25519 key (`kid "t1"`), the test
+    /// origin, issuer and client id, proxy secret [`TEST_PROXY_SECRET`],
+    /// `trusted_proxies = ["127.0.0.1/32"]` and hook keys `k-idp`, `k-token`, `k-events`.
+    /// `edit` runs last.
+    pub async fn spawn_identity(edit: impl FnOnce(&mut Config)) -> Self {
+        let t1 = SigningKey::generate(&mut OsRng);
+        let t2 = SigningKey::generate(&mut OsRng);
+        let keys = Arc::new(Mutex::new(vec![ed25519_jwk("t1", &t1)]));
+        let fetches = Arc::new(AtomicUsize::new(0));
+        let router = {
+            let (keys, fetches) = (keys.clone(), fetches.clone());
+            axum::Router::new().route(
+                "/oauth/v2/keys",
+                axum::routing::get(move || {
+                    fetches.fetch_add(1, Ordering::SeqCst);
+                    let doc = json!({ "keys": keys.lock().expect("JWKS lock").clone() });
+                    async move { axum::Json(doc) }
+                }),
+            )
+        };
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind JWKS server");
+        let jwks_addr = listener.local_addr().expect("JWKS address");
+        let server = tokio::spawn(async move {
+            axum::serve(listener, router).await.expect("JWKS server");
+        });
+
+        let mut app = Self::spawn(move |cfg| {
+            cfg.trusted_proxies = vec!["127.0.0.1/32".into()];
+            cfg.identity = Some(IdentityConfig {
+                public_origin: TEST_ORIGIN.into(),
+                issuer: TEST_ISSUER.into(),
+                client_id: TEST_CLIENT_ID.into(),
+                jwks_url: Some(format!("http://{jwks_addr}/oauth/v2/keys")),
+                project_id: "p1".into(),
+                org_id: "o1".into(),
+                discord_idp_id: "idp1".into(),
+                proxy_secret: TEST_PROXY_SECRET.into(),
+                admin_group: "autobracket-admins".into(),
+                admin_max_auth_age_secs: 43_200,
+                sign_out_url: "/oauth2/sign_out".into(),
+                mfa_setup_url: "https://auth.test/mfa".into(),
+                hook_peers: Vec::new(),
+                hook_keys: HookKeys {
+                    idp_intent: "k-idp".into(),
+                    token: "k-token".into(),
+                    user_events: "k-events".into(),
+                },
+            });
+            edit(cfg);
+        })
+        .await;
+        app.state.tasks.add(server.abort_handle());
+        app.identity = Some(IdentityKit {
+            t1,
+            t2,
+            keys,
+            fetches,
+            server: Mutex::new(Some(server)),
+        });
+        app
+    }
+
+    fn kit(&self) -> &IdentityKit {
+        self.identity
+            .as_ref()
+            .expect("identity helpers need TestApp::spawn_identity")
+    }
+
+    /// Adds a second key (`kid "t2"`) to the served JWKS.
+    pub fn rotate_jwks(&self) {
+        let kit = self.kit();
+        kit.keys
+            .lock()
+            .expect("JWKS lock")
+            .push(ed25519_jwk("t2", &kit.t2));
+    }
+
+    /// Stops the JWKS server; fetching the keys then fails.
+    pub async fn stop_jwks(&self) {
+        let server = self.kit().server.lock().expect("JWKS lock").take();
+        if let Some(server) = server {
+            server.abort();
+            let _ = server.await;
+        }
+    }
+
+    /// How many times the JWKS has been fetched.
+    pub fn jwks_fetches(&self) -> usize {
+        self.kit().fetches.load(Ordering::SeqCst)
+    }
+
+    /// The claims of a valid ID token for `who` (ignoring `who.token`).
+    pub fn id_claims(&self, who: &TestWeb) -> Value {
+        let now = now_unix();
+        json!({
+            "iss": TEST_ISSUER,
+            "aud": [TEST_CLIENT_ID, "p1"],
+            "sub": who.sub,
+            "iat": now,
+            "exp": now + 3600,
+            "auth_time": now - who.auth_time_ago,
+            "groups": who.groups,
+            "amr": who.amr,
+        })
+    }
+
+    /// `claims` as an EdDSA ID token with header `kid`: signed with `t1` or `t2` for those
+    /// kids, with a fresh unknown key for any other.
+    pub fn sign_id_token(&self, kid: &str, claims: &Value) -> String {
+        let kit = self.kit();
+        let other;
+        let key = match kid {
+            "t1" => &kit.t1,
+            "t2" => &kit.t2,
+            _ => {
+                other = SigningKey::generate(&mut OsRng);
+                &other
+            }
+        };
+        jwt("EdDSA", kid, claims, Some(key))
+    }
+
+    /// The `X-Id-Token` value (without `Bearer `) for `who`, per `who.token`.
+    pub fn id_token(&self, who: &TestWeb) -> Option<String> {
+        let mut claims = self.id_claims(who);
+        let now = now_unix();
+        match who.token {
+            TokenMode::Valid => {}
+            TokenMode::Unsigned => return Some(jwt("none", "t1", &claims, None)),
+            TokenMode::WrongKey => {
+                let other = SigningKey::generate(&mut OsRng);
+                return Some(jwt("EdDSA", "t1", &claims, Some(&other)));
+            }
+            TokenMode::WrongIss => claims["iss"] = json!("https://evil.test"),
+            TokenMode::WrongAud => claims["aud"] = json!(["other-client"]),
+            TokenMode::Expired => {
+                claims["iat"] = json!(now - 7200);
+                claims["exp"] = json!(now - 3600);
+            }
+            TokenMode::Kid2 => return Some(self.sign_id_token("t2", &claims)),
+            TokenMode::Absent => return None,
+        }
+        Some(self.sign_id_token("t1", &claims))
+    }
+
+    /// A client presenting `who` the way nginx would: `X-Auth-Request-User`,
+    /// `X-Id-Token: Bearer <jwt>`, `X-Autobracket-Proxy`, plus `Origin` and `x-ab-csrf: 1`.
+    pub fn web(&self, who: &TestWeb) -> WebClient {
+        let mut headers = vec![(
+            "x-auth-request-user",
+            who.header_sub.clone().unwrap_or_else(|| who.sub.clone()),
+        )];
+        if let Some(token) = self.id_token(who) {
+            headers.push(("x-id-token", format!("Bearer {token}")));
+        }
+        match who.proxy_secret.as_deref() {
+            None => headers.push(("x-autobracket-proxy", TEST_PROXY_SECRET.into())),
+            Some("") => {}
+            Some(secret) => headers.push(("x-autobracket-proxy", secret.into())),
+        }
+        headers.push(("origin", TEST_ORIGIN.into()));
+        headers.push(("x-ab-csrf", "1".into()));
+        WebClient {
+            url: self.url.clone(),
+            client: reqwest::Client::new(),
+            headers,
+        }
     }
 }

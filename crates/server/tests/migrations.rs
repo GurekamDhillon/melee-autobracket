@@ -183,3 +183,116 @@ async fn migration_0005_applies_to_a_populated_0004_database() {
     pool.close().await;
     db::open(&path).await.unwrap();
 }
+
+/// A database at the 0005 schema with phase-1 data (players, an invite, a running event with
+/// entrants, a set, a game and a queue item), then opened by the current server: 0006 adds
+/// the identity tables and columns, and every old row is intact.
+#[tokio::test]
+async fn migration_0006_applies_to_a_populated_0005_database() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("old.sqlite");
+
+    let mut old = sqlx::migrate!("./migrations");
+    assert!(old.migrations.len() >= 6, "expected 0001 to 0006");
+    old.migrations = Cow::Owned(old.migrations[..5].to_vec());
+    assert_eq!(old.migrations[4].version, 5);
+    let opts = SqliteConnectOptions::new()
+        .filename(&path)
+        .create_if_missing(true);
+    let pool = SqlitePoolOptions::new().connect_with(opts).await.unwrap();
+    old.run(&pool).await.unwrap();
+    for sql in [
+        "INSERT INTO players (key, tag, created_at) VALUES ('k0', 'Alice', 1), ('k1', 'Bob', 2)",
+        "INSERT INTO invites (code, used_by) VALUES ('inv', 'k0')",
+        "INSERT INTO events (id, name, format, ruleset_json, state, bracket_json, created_at,
+                             starts_at, description)
+         VALUES (1, 'Old', 'single_elim', '{}', 'running', NULL, 1, 100, 'weekly')",
+        "INSERT INTO entrants (event_id, player_key, seed, engine_build) VALUES (1, 'k0', 0, 'b'),
+         (1, 'k1', 1, 'b')",
+        "INSERT INTO sets (event_id, set_id, state, room_code, wins0, wins1, updated_at)
+         VALUES (1, 0, 'ready', 'AB12', 1, 0, 5)",
+        "INSERT INTO games (id, event_id, set_id, game_no, state, verdict_json, winner_slot,
+                            first_upload_at)
+         VALUES (1, 1, 0, 1, 'counted', '\"Verified\"', 0, 1)",
+        "INSERT INTO queue (id, event_id, set_id, game_id, reason, state, created_at)
+         VALUES (1, 1, 0, NULL, 'Conflicted', 'open', 1)",
+    ] {
+        sqlx::query(sql).execute(&pool).await.unwrap();
+    }
+    pool.close().await;
+
+    let pool = db::open(&path).await.unwrap();
+    let players: Vec<(String, String, i64, Option<i64>)> =
+        sqlx::query_as("SELECT key, tag, created_at, account_id FROM players ORDER BY key")
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+    assert_eq!(
+        players,
+        vec![
+            ("k0".into(), "Alice".into(), 1, None),
+            ("k1".into(), "Bob".into(), 2, None)
+        ]
+    );
+    let used_by: String = sqlx::query_scalar("SELECT used_by FROM invites")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(used_by, "k0");
+    let entrants: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM entrants")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(entrants, 2);
+    let set: (String, Option<String>, i64, Option<i64>, Option<i64>) = sqlx::query_as(
+        "SELECT state, room_code, wins0, ready0_at, ready1_at FROM sets WHERE set_id = 0",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(set, ("ready".into(), Some("AB12".into()), 1, None, None));
+    let (description, games, queue): (Option<String>, i64, i64) = sqlx::query_as(
+        "SELECT (SELECT description FROM events), (SELECT COUNT(*) FROM games),
+                (SELECT COUNT(*) FROM queue)",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        (description.as_deref(), games, queue),
+        (Some("weekly"), 1, 1)
+    );
+    for table in [
+        "accounts",
+        "account_tombstones",
+        "discord_profiles",
+        "player_keys",
+        "link_codes",
+        "audit_log",
+        "stage_moves",
+    ] {
+        let n: i64 =
+            sqlx::query_scalar(sqlx::AssertSqlSafe(format!("SELECT COUNT(*) FROM {table}")))
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(n, 0, "{table}");
+    }
+    // One player per account.
+    sqlx::query("INSERT INTO accounts (id, sub, created_at, last_seen_at) VALUES (1, 's', 1, 1)")
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE players SET account_id = 1 WHERE key = 'k0'")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let second = sqlx::query("UPDATE players SET account_id = 1 WHERE key = 'k1'")
+        .execute(&pool)
+        .await;
+    assert!(second.is_err(), "a second player for one account");
+
+    // Opening again is a no-op.
+    pool.close().await;
+    db::open(&path).await.unwrap();
+}
