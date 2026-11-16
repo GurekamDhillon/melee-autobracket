@@ -106,7 +106,19 @@ impl ClientConfig {
         }
     }
 
+    /// Reads the config, checking `server` if one is set.
     pub fn load(path: &Path) -> anyhow::Result<Self> {
+        let cfg = Self::load_unchecked(path)?;
+        // Empty until `register --server`.
+        if !cfg.server.is_empty() {
+            crate::api::check_server_url(&cfg.server)
+                .with_context(|| format!("bad `server` in {}", path.display()))?;
+        }
+        Ok(cfg)
+    }
+
+    /// Reads the config without checking `server`, for `register --server` to replace it.
+    pub fn load_unchecked(path: &Path) -> anyhow::Result<Self> {
         let text = std::fs::read_to_string(path)
             .with_context(|| format!("reading {} (run `init` first?)", path.display()))?;
         toml::from_str(&text).with_context(|| format!("parsing {}", path.display()))

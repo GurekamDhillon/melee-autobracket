@@ -100,7 +100,7 @@ async fn main() -> anyhow::Result<()> {
             tag,
             invite,
         } => {
-            let mut cfg = ClientConfig::load(&path)?;
+            let mut cfg = ClientConfig::load_unchecked(&path)?;
             check_server_url(&server)?;
             cfg.server = server;
             api(&cfg)?.register(&tag, invite.as_deref()).await?;

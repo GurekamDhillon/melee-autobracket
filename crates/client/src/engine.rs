@@ -258,7 +258,7 @@ impl Engine for CommandEngine {
     fn stop(&mut self) {
         if let Some(mut run) = self.run.take() {
             if let Some(child) = run.child.as_mut() {
-                let _ = child.kill();
+                kill_group(child);
                 let _ = child.wait();
             }
         }
@@ -280,6 +280,20 @@ impl Drop for CommandEngine {
                     run.dir.display()
                 );
             }
+        }
+    }
+}
+
+/// Kills the game and everything else in its process group (the game leads its own
+/// group, so its pgid is its pid), such as a helper it started.
+fn kill_group(child: &mut Child) {
+    match libc::pid_t::try_from(child.id()) {
+        // SAFETY: `killpg` only sends a signal; it has no memory-safety requirements.
+        Ok(pgid) => unsafe {
+            libc::killpg(pgid, libc::SIGKILL);
+        },
+        Err(_) => {
+            let _ = child.kill();
         }
     }
 }

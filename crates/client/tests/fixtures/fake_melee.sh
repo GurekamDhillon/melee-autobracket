@@ -5,6 +5,8 @@
 #                   stderr is connected to to $MELEE_SLP_DIR/stderr-target, and its pid and
 #                   process group to $MELEE_SLP_DIR/pid and .../pgid. Then, by first argument:
 #     slow          prints a line on stderr, sleeps 2 s, prints another, writes one replay.
+#     spawner       like slow, but first starts a background `sleep 30` of its own and
+#                   records its pid to $MELEE_SLP_DIR/bgpid.
 #     quick         prints the host's MATCH CODE line on stderr, writes one replay, exits.
 #     (otherwise)   prints the MATCH CODE line, sleeps 1 s, writes one replay.
 # Every mode exits 0.
@@ -31,6 +33,13 @@ case "${1:-}" in
         echo "fake: first line" >&2
         sleep 2
         echo "fake: second line" >&2
+        printf 'fake replay' > "$replay"
+        ;;
+    spawner)
+        sleep 30 &
+        echo "$!" > "$MELEE_SLP_DIR/bgpid"
+        echo "fake: first line" >&2
+        sleep 2
         printf 'fake replay' > "$replay"
         ;;
     quick)

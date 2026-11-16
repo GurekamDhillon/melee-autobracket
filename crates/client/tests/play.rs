@@ -440,19 +440,49 @@ fn game_survives_the_engine_being_dropped() {
 #[test]
 fn stop_terminates_a_running_game() {
     let work = TempDir::new().unwrap();
-    let mut engine = CommandEngine::new(&mode_config(work.path(), "slow")).unwrap();
+    let mut engine = CommandEngine::new(&mode_config(work.path(), "spawner")).unwrap();
     let run = work.path().join("run-1");
 
     engine.host(&PARAMS).unwrap();
-    assert!(wait_for_file(&run.join("pid"), Duration::from_secs(5)));
+    assert!(wait_for_file(&run.join("bgpid"), Duration::from_secs(5)));
+    let bgpid = read_trimmed(&run.join("bgpid"));
+    assert!(Path::new(&format!("/proc/{bgpid}")).exists());
     engine.stop();
     assert!(!engine.running());
+
+    // The game's own child goes with it (its whole process group is killed).
+    let gone = PathBuf::from(format!("/proc/{bgpid}"));
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while gone.exists() && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert!(!gone.exists(), "the game's child {bgpid} outlived stop()");
 
     std::thread::sleep(Duration::from_millis(2500));
     assert!(
         !run.join("Game_20261115T200000.slp").exists(),
         "a stopped game writes no replay"
     );
+}
+
+#[test]
+fn loading_a_config_checks_its_server_url() {
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("client.toml");
+    let mut cfg = fake_config(dir.path());
+
+    cfg.save(&path).unwrap();
+    assert_eq!(
+        ClientConfig::load(&path).unwrap(),
+        cfg,
+        "no server yet is fine"
+    );
+
+    cfg.server = "not a url".into();
+    cfg.save(&path).unwrap();
+    let msg = format!("{:#}", ClientConfig::load(&path).unwrap_err());
+    assert!(msg.contains("not a url"), "{msg}");
+    assert!(msg.contains(&path.display().to_string()), "{msg}");
 }
 
 #[tokio::test]
