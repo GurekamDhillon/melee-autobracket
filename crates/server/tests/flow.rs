@@ -223,6 +223,18 @@ async fn four_player_double_elim_runs_to_champion() {
 }
 
 #[tokio::test]
+async fn matched_game_records_the_verifier_build() {
+    let (app, host, guest, event) =
+        two_player(TestApp::spawn_with(|_| {}, fake(vec![])).await).await;
+    play_game(&app, event, 0, 1, &host, &guest, 1).await;
+    let (state, verdict, _, resim, build) = game(&app, event, 0, 1).await;
+    assert_eq!(state, "counted");
+    assert_eq!(verdict, Some(Verdict::Verified));
+    assert_eq!(resim, Some(ResimOutcome::Match));
+    assert_eq!(build.as_deref(), Some("fake"));
+}
+
+#[tokio::test]
 async fn inexact_counts_and_is_quarantined() {
     let (app, host, guest, event) =
         two_player(TestApp::spawn_with(|_| {}, fake(vec![diverged()])).await).await;
@@ -361,7 +373,8 @@ async fn verifier_off_is_peer_only() {
     assert_eq!(verdict, Some(Verdict::PeerOnly));
     assert_eq!(slot, Some(1));
     assert_eq!(resim, Some(ResimOutcome::Skipped));
-    assert_eq!(build.as_deref(), Some("none"));
+    // The verifier is off: nothing was re-simulated, so no build is recorded.
+    assert_eq!(build, None);
     assert_eq!(set_row(&app, event, 0).await, ("ready".into(), 0, 1));
     let (first_upload, judged): (i64, Option<i64>) =
         sqlx::query_as("SELECT first_upload_at, judged_at FROM games WHERE event_id = ?")
@@ -384,10 +397,12 @@ async fn unavailable_verifier_is_peer_only() {
     .await;
     let (app, host, guest, event) = two_player(app).await;
     play_game(&app, event, 0, 1, &host, &guest, 1).await;
-    let (state, verdict, _, resim, _) = game(&app, event, 0, 1).await;
+    let (state, verdict, _, resim, build) = game(&app, event, 0, 1).await;
     assert_eq!(state, "counted");
     assert_eq!(verdict, Some(Verdict::PeerOnly));
     assert_eq!(resim, Some(ResimOutcome::Unavailable("no disc".into())));
+    // The engine never ran, so no build is recorded.
+    assert_eq!(build, None);
 }
 
 #[tokio::test]

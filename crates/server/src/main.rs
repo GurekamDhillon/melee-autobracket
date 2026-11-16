@@ -8,6 +8,7 @@ use std::time::Duration;
 
 use anyhow::Context;
 use autobracket_server::config::VerifierMode;
+use autobracket_server::logging::{clean, detail, label};
 use autobracket_server::resim::EXTERNAL_RESULT_TIMEOUT;
 use autobracket_server::{
     build_app, verify_worker, Config, ExternalResim, NoResim, Resim, Slpcheck,
@@ -136,13 +137,13 @@ async fn serve(cfg: Config) -> anyhow::Result<()> {
     tracing::info!(
         bind = %addr,
         verifier = %cfg.verifier.mode.as_str(),
-        verifier_build = %state.resim.build(),
-        db = %cfg.db_path.display(),
-        relay = %cfg.relay,
+        verifier_build = %label(&state.resim.build()),
+        db = %detail(cfg.db_path.display()),
+        relay = %label(&cfg.relay),
         to_keys = cfg.to_keys.len(),
         verifier_keys = cfg.verifier_keys.len(),
         set_stall_secs = cfg.set_stall_secs,
-        ruleset = %ruleset,
+        ruleset = %clean(&ruleset, 2000),
         "server started"
     );
     // Kept on stdout as the readiness line scripts wait for.

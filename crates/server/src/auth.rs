@@ -178,6 +178,6 @@ async fn record_nonce(state: &AppState, key: &str, nonce: &str, now: i64) -> Res
 
 /// Logs a store failure and maps it to a generic 500.
 fn internal(e: sqlx::Error) -> Rejection {
-    tracing::error!(error = %e, "auth: database error");
+    tracing::error!(error = %crate::logging::detail(&e), "auth: database error");
     ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, "internal error")
 }

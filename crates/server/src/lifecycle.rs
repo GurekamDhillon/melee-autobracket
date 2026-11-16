@@ -9,7 +9,7 @@ use sqlx::{SqliteConnection, SqlitePool};
 use tracing::{info, warn};
 
 use crate::db::{begin_write, now_unix};
-use crate::logging::Journal;
+use crate::logging::{detail, label, Journal};
 use crate::review::open_queue_item;
 use crate::routes::ApiError;
 use crate::state::AppState;
@@ -104,7 +104,13 @@ pub async fn start_event(st: &AppState, event_id: i64) -> Result<(), LifecycleEr
         open_set(&mut tx, event_id, set_id).await?;
     }
     tx.commit().await?;
-    info!(event = event_id, name = %name, format = %format_name, entrants, "event started");
+    info!(
+        event = event_id,
+        name = %detail(&name),
+        format = %label(&format_name),
+        entrants,
+        "event started"
+    );
     Ok(())
 }
 
@@ -188,8 +194,9 @@ pub async fn load_bracket_on(
 /// late apply cannot count a game twice.
 ///
 /// A counting verdict needs `winner_slot` (0 is the host). `verifier_build` is recorded on
-/// the game as the build that re-simulated it: `None` when no re-simulation ran (the
-/// verdicts decided before one: `Single`, `Conflicted`, `Illegal`, `Undecided`). The time of
+/// the game as the build that re-simulated it: `None` when the engine did not run on the game
+/// (the verdicts decided before re-simulation: `Single`, `Conflicted`, `Illegal`, `Undecided`;
+/// and outcomes `Skipped` and `Unavailable`). The time of
 /// the verdict is recorded as `judged_at`, a late (voided) one included.
 pub async fn apply_verdict(
     st: &AppState,
@@ -404,18 +411,20 @@ pub(crate) async fn award_on(
                 "set {event_id}/{set_id} has no sets row"
             )));
         }
+        // For the log only: a failed read must not fail the award.
         let score: (i64, i64) =
             sqlx::query_as("SELECT wins0, wins1 FROM sets WHERE event_id = ? AND set_id = ?")
                 .bind(event_id)
                 .bind(set_id)
                 .fetch_one(&mut *conn)
-                .await?;
+                .await
+                .unwrap_or((-1, -1));
         let winner_seat = bracket
             .sets
             .get(set_id as usize)
             .map(|s| s.slots[usize::from(winner_slot.min(1))]);
         let winner = match winner_seat {
-            Some(Slot::Entrant(seed)) => entrant_tag(conn, event_id, seed).await?,
+            Some(Slot::Entrant(seed)) => tag_for_log(conn, event_id, seed).await,
             other => format!("{other:?}"),
         };
         journal.set_decided(
@@ -446,7 +455,7 @@ pub(crate) async fn award_on(
             .execute(&mut *conn)
             .await?;
         let champion = match bracket.champion() {
-            Some(seed) => entrant_tag(conn, event_id, seed).await?,
+            Some(seed) => tag_for_log(conn, event_id, seed).await,
             None => "none".into(),
         };
         journal.event_completed(event_id, champion);
@@ -455,22 +464,29 @@ pub(crate) async fn award_on(
 }
 
 /// The tag of the entrant seeded `seed` in `event_id`.
-pub(crate) async fn entrant_tag(
-    conn: &mut SqliteConnection,
-    event_id: i64,
-    seed: u32,
-) -> Result<String, LifecycleError> {
-    let tag: Option<String> = sqlx::query_scalar(
+///
+/// Only for the log, so it never fails the caller's state change: when the tag cannot be
+/// found it says so in the log and stands in `seed=N`.
+async fn tag_for_log(conn: &mut SqliteConnection, event_id: i64, seed: u32) -> String {
+    let tag: Result<Option<String>, sqlx::Error> = sqlx::query_scalar(
         "SELECT p.tag FROM entrants n JOIN players p ON p.key = n.player_key
          WHERE n.event_id = ? AND n.seed = ?",
     )
     .bind(event_id)
     .bind(seed)
     .fetch_optional(&mut *conn)
-    .await?;
-    tag.ok_or_else(|| {
-        LifecycleError::Corrupt(format!("event {event_id} has no entrant seeded {seed}"))
-    })
+    .await;
+    match tag {
+        Ok(Some(tag)) => tag,
+        other => {
+            let error = match other {
+                Err(e) => crate::logging::detail(e),
+                _ => "no such entrant or player".to_owned(),
+            };
+            warn!(event = event_id, seed, error = %error, "tag not found for the log");
+            format!("seed={seed}")
+        }
+    }
 }
 
 /// Queue reason for a set awarded with both of its entrants disqualified.

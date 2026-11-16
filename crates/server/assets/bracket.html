@@ -272,12 +272,14 @@
     const row = el("div", cls);
     row.append(el("span", "seed", entrant === null ? "" : entrant + 1));
     row.append(el("span", "tag", entrant === null ? "TBD" : tagOf(entrant)));
+    // Games played before an award or DQ still show; a bare 0-0 gives way to the tag.
+    const played = Array.isArray(score) && (score[0] > 0 || score[1] > 0);
     let scoreText = "";
-    if (decided) scoreText = "";
-    else if (score) scoreText = score[idx];
-    else if (winner !== null) scoreText = winner === idx ? "W" : "";
+    if (played || (score && !decided)) scoreText = score[idx];
+    else if (!decided && winner !== null) scoreText = winner === idx ? "W" : "";
     const scoreCell = el("span", "score", scoreText);
     if (decided && winner === idx) {
+      if (played) scoreCell.append(" ");
       scoreCell.append(el("span", "decided", DECIDED_LABEL[decided] || decided));
     }
     row.append(scoreCell);

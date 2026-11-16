@@ -45,6 +45,11 @@ pub fn router() -> Router<AppState> {
         .route("/v1/verify/jobs/{id}/result", post(verify_jobs::result))
 }
 
+/// Longest engine build string a client may send (`engine_build`, `x-ab-build`).
+pub(crate) const MAX_BUILD_CHARS: usize = 64;
+/// Longest event name.
+pub(crate) const MAX_EVENT_NAME_CHARS: usize = 80;
+
 /// An error response: a status code and a JSON body of the form `{"error": "...", ...}`.
 #[derive(Debug)]
 pub struct ApiError(pub StatusCode, pub Value);
@@ -57,7 +62,7 @@ impl ApiError {
 
     /// Logs the cause; the client only sees a generic 500.
     pub fn internal(e: impl Display) -> Self {
-        tracing::error!(error = %e, "internal error");
+        tracing::error!(error = %crate::logging::detail(e), "internal error");
         ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, "internal error")
     }
 }
@@ -71,6 +76,19 @@ impl IntoResponse for ApiError {
 impl From<sqlx::Error> for ApiError {
     fn from(e: sqlx::Error) -> Self {
         ApiError::internal(format_args!("database error: {e}"))
+    }
+}
+
+/// 400 unless `value` is at most `max_chars` characters with nothing unprintable in it (no
+/// control characters, no line or paragraph separators): text that is stored and logged.
+pub(crate) fn check_text(field: &str, value: &str, max_chars: usize) -> Result<(), ApiError> {
+    if crate::logging::is_printable_within(value, max_chars) {
+        Ok(())
+    } else {
+        Err(ApiError::new(
+            StatusCode::BAD_REQUEST,
+            format!("{field} must be at most {max_chars} printable characters"),
+        ))
     }
 }
 

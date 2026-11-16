@@ -19,6 +19,9 @@ pub struct AppState {
     pub tasks: Arc<Tasks>,
     /// Requests refused for their signature, summarised in the log.
     pub rejections: Arc<Rejections>,
+    /// When this process started, unix seconds. The stall check counts a set's inactivity
+    /// from here at the earliest: time the server was down is not inactivity it observed.
+    pub started_at: i64,
 }
 
 /// Abort handles of spawned background tasks, so an embedder (e.g. a test) can stop them.

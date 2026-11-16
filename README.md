@@ -82,7 +82,8 @@ Two changes are needed today:
   `"--headless", "--no-audio"`. Players at a desktop do not need them.
 
 If your opponent never shows up, report it so the organiser sees it straight away:
-`POST /v1/sets/{event}/{set}/no-show` with an optional `{"detail": "..."}` note. The set
+`POST /v1/sets/{event}/{set}/no-show` with an optional `{"detail": "..."}` note (at most 200
+characters, no control characters). The set
 goes to the organiser queue (reason `no-show`) and both players are told to wait.
 
 ### When a set needs a human
@@ -91,7 +92,8 @@ Games that cannot be counted automatically land in the organiser's queue, and so
 that are not being played: a player can report a no-show (reason `no-show`, with the
 reporting slot and their note in `detail`), and a `ready` set with no activity (no room code,
 upload or counted game) for `set_stall_secs` (default 1800; 0 turns the check off) is sent
-there as `stalled`, checked about every 30 seconds. Both players then see the set as waiting
+there as `stalled`, checked about every 30 seconds. Inactivity counts from the server's own
+start at the earliest, so a restart after downtime does not flag every set at once. Both players then see the set as waiting
 for the organiser.
 
 ```sh
@@ -104,7 +106,8 @@ autobracket admin --server URL --key-file to.key queue resolve 7 dq --slot 1
 `award` gives the set to a slot (slot 0 is the set's host), `replay` voids the game so it is
 played again (or, for a no-show, gives the players another try), and `dq` disqualifies the
 player in that slot from the event. A set decided by `award` or a DQ is listed in the event's
-`decided_by` and shown on the bracket page as "awarded" or "DQ" instead of a score.
+`decided_by` and tagged "awarded" or "DQ" on the bracket page, next to the games played
+before the decision (or in place of a 0-0 score).
 
 ## Verdicts
 
@@ -128,8 +131,10 @@ by each peer's exporter and may differ between versions or clocks without the ga
 any different. Port 1 is always the set's host and port 2 the guest, because a netplay replay
 carries no identity.
 
-Games decided before any re-simulation (Single, Conflicted, Illegal, Undecided) record no
-verifier build; every verdict records the time it was applied (`judged_at`).
+A game records a verifier build only when the engine actually re-simulated it (outcome
+Match, Diverged, EarlyEnd or Crashed). Games decided before re-simulation (Single, Conflicted,
+Illegal, Undecided) and games whose re-simulation was skipped (verifier off) or unavailable
+record none. Every verdict records the time it was applied (`judged_at`).
 
 Two players colluding can still produce any result they like, exactly as they could by
 throwing the match.
@@ -180,7 +185,10 @@ The server logs to stderr (the journal, under systemd), one plain-text line per 
 sign-ups, room codes posted (never the code itself), uploads (size, SHA-256 prefix, client
 build), verdicts (with judging and re-simulation times in ms), sets decided and how, queue
 items opened and resolved, no-shows, stalled sets and verifier jobs. Keys appear only as their
-first 8 characters; secret keys, room codes and request bodies are never logged. Requests
+first 8 characters; secret keys, room codes and request bodies are never logged. Text that
+comes from outside (build strings, event names, engine and error messages) is escaped
+(`\n`, `\u{1b}`, ...) so it cannot start a line of its own, and the server refuses control
+characters in engine builds, the `x-ab-build` header, event names and no-show notes. Requests
 refused for a bad signature are counted and summarised at most once a minute. Set the level
 with `AUTOBRACKET_LOG` (default `info`; e.g. `AUTOBRACKET_LOG=debug`, or any `tracing`
 filter such as `autobracket_server=debug,info`).

@@ -11,11 +11,11 @@ use rand::Rng;
 use serde_json::{json, Value};
 
 use super::events::{event_view, summary};
-use super::{parse_body, ApiError};
+use super::{check_text, parse_body, ApiError, MAX_EVENT_NAME_CHARS};
 use crate::auth::To;
 use crate::db::{begin_write, now_unix};
 use crate::lifecycle::{self, format_to_str};
-use crate::logging::{key_prefix, label};
+use crate::logging::key_prefix;
 use crate::review;
 use crate::state::AppState;
 
@@ -31,6 +31,7 @@ pub async fn create_event(
     to: To,
 ) -> Result<(StatusCode, Json<EventSummary>), ApiError> {
     let req: EventCreateReq = parse_body(&to.body)?;
+    check_text("name", &req.name, MAX_EVENT_NAME_CHARS)?;
     if let Some(r) = &req.ruleset {
         check_odd("best_of", r.best_of)?;
         check_odd("best_of_finals", r.best_of_finals)?;
@@ -53,7 +54,7 @@ pub async fn create_event(
     .await?;
     tracing::info!(
         event = id,
-        name = %label(&req.name),
+        name = %crate::logging::detail(&req.name),
         format = %format_to_str(req.format),
         best_of = ruleset.best_of,
         "event created"

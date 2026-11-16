@@ -17,7 +17,7 @@ use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use sqlx::SqliteConnection;
 
-use super::{parse_body, ApiError};
+use super::{check_text, parse_body, ApiError, MAX_BUILD_CHARS};
 use crate::auth::Player;
 use crate::db::{begin_write, now_unix};
 use crate::lifecycle::{load_bracket_on, LifecycleError};
@@ -200,6 +200,9 @@ pub async fn no_show(
     } else {
         parse_body(&player.body)?
     };
+    if let Some(note) = &req.detail {
+        check_text("detail", note, review::MAX_NOTE_CHARS)?;
+    }
     if review::game_in_progress(&mut tx, event, set).await? {
         return Err(ApiError::new(
             StatusCode::CONFLICT,
@@ -219,7 +222,7 @@ pub async fn no_show(
     .await?;
     tx.commit().await?;
     // The note is the player's own text, so it stays in the queue item, not the log.
-    tracing::info!(event, set, slot = seat.slot, tag = %player.tag, "no-show reported");
+    tracing::info!(event, set, slot = seat.slot, tag = %label(&player.tag), "no-show reported");
     journal.emit();
     Ok(StatusCode::NO_CONTENT)
 }
@@ -241,6 +244,7 @@ pub async fn upload(
             .map_err(|_| ApiError::new(StatusCode::BAD_REQUEST, "invalid x-ab-build header"))?
             .to_owned(),
     };
+    check_text("x-ab-build", &client_build, MAX_BUILD_CHARS)?;
 
     // Parse and hash off the async runtime, before taking the write lock.
     let body = player.body.clone();

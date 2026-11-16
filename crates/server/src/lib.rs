@@ -61,6 +61,7 @@ pub async fn build_app(cfg: Config, resim: Arc<dyn Resim>) -> anyhow::Result<(Ro
         wake: Arc::new(Notify::new()),
         tasks: Arc::default(),
         rejections: Arc::default(),
+        started_at: db::now_unix(),
     };
 
     if state.cfg.worker_enabled {
@@ -68,7 +69,7 @@ pub async fn build_app(cfg: Config, resim: Arc<dyn Resim>) -> anyhow::Result<(Ro
         let worker = tokio::spawn(async move {
             if let Err(e) = worker::recover(&st).await {
                 tracing::error!(
-                    error = %format_args!("{e:#}"),
+                    error = %logging::detail(format_args!("{e:#}")),
                     "recovering interrupted judging failed"
                 );
             }

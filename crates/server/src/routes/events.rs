@@ -7,7 +7,7 @@ use proto::{EventSummary, EventView, Ruleset, SignupReq};
 use serde_json::json;
 use sqlx::SqlitePool;
 
-use super::{parse_body, ApiError};
+use super::{check_text, parse_body, ApiError, MAX_BUILD_CHARS};
 use crate::auth::Player;
 use crate::db::begin_write;
 use crate::lifecycle::{load_bracket, LifecycleError, MAX_ENTRANTS};
@@ -44,6 +44,7 @@ pub async fn signup(
     player: Player,
 ) -> Result<StatusCode, ApiError> {
     let body: SignupReq = parse_body(&player.body)?;
+    check_text("engine_build", &body.engine_build, MAX_BUILD_CHARS)?;
 
     let mut tx = begin_write(&state.db).await?;
     let event_state: Option<String> = sqlx::query_scalar("SELECT state FROM events WHERE id = ?")
@@ -99,7 +100,7 @@ pub async fn signup(
     tx.commit().await?;
     tracing::info!(
         event = id,
-        tag = %player.tag,
+        tag = %label(&player.tag),
         seed = count,
         engine_build = %label(&body.engine_build),
         "signed up"

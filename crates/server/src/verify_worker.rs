@@ -10,7 +10,7 @@ use reqwest::{Method, StatusCode};
 use tracing::{info, warn};
 
 use crate::db::now_unix;
-use crate::logging::resim_kind;
+use crate::logging::{detail, label, resim_kind};
 use crate::resim::{Resim, ScratchDir, Slpcheck};
 
 /// Pause after the server reports no queued jobs.
@@ -61,12 +61,12 @@ pub fn insecure_server_warning(server: &str) -> Option<String> {
 /// HTTP client can fail.
 pub async fn run(server: String, key: SigningKey, engine: Slpcheck) -> anyhow::Result<()> {
     if let Some(warning) = insecure_server_warning(&server) {
-        warn!("{warning}");
+        warn!(warning = %detail(&warning), "insecure server URL");
     }
     let client = Client::new(&server, key, CONNECT_TIMEOUT, REQUEST_TIMEOUT)?;
     info!(
-        server = %client.base,
-        build = %engine.build(),
+        server = %detail(&client.base),
+        build = %label(&engine.build()),
         "verify-worker started"
     );
     loop {
@@ -74,7 +74,10 @@ pub async fn run(server: String, key: SigningKey, engine: Slpcheck) -> anyhow::R
             Ok(true) => {}
             Ok(false) => tokio::time::sleep(IDLE_SLEEP).await,
             Err(e) => {
-                warn!(error = %format_args!("{e:#}"), "verify-worker: retrying after an error");
+                warn!(
+                    error = %detail(format_args!("{e:#}")),
+                    "verify-worker: retrying after an error"
+                );
                 tokio::time::sleep(ERROR_SLEEP).await;
             }
         }
@@ -141,7 +144,7 @@ async fn step(client: &Client, engine: &Slpcheck) -> anyhow::Result<bool> {
         StatusCode::NO_CONTENT => info!(
             job = job.id,
             outcome = %resim_kind(&result.outcome),
-            build = %result.build,
+            build = %label(&result.build),
             "verify result posted"
         ),
         // The server gave up on the job, or another verifier finished it first.

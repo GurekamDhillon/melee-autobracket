@@ -1,9 +1,11 @@
 //! A set that is not being played reaches the organiser: a player reports a no-show, or the
 //! judging worker finds the set stalled.
 
+use autobracket_server::db::now_unix;
 use autobracket_server::lifecycle::load_bracket;
 use autobracket_server::testkit::{play_game, TestApp, TestPlayer};
 use autobracket_server::worker::flag_stalled_sets;
+use autobracket_server::AppState;
 use bracket::{Format, SetState, Slot};
 use proto::{EventView, Next, NoShowReq, QueueItem, Resolve, RoomReq};
 use replay::testkit::simple_game;
@@ -72,6 +74,14 @@ async fn age_set(app: &TestApp, event: i64, set: u32, secs: i64) {
         .unwrap();
 }
 
+/// The app's state as seen by a server process that has been up for a day, so inactivity
+/// counts from `sets.updated_at` alone.
+fn long_running(app: &TestApp) -> AppState {
+    let mut st = app.state.clone();
+    st.started_at = now_unix() - 86_400;
+    st
+}
+
 /// A started 2-player single elimination event: `(app, host, guest, event)`.
 async fn two_player(app: TestApp) -> (TestApp, TestPlayer, TestPlayer, i64) {
     let host = app.player("Alice").await;
@@ -135,7 +145,20 @@ async fn no_show_sends_set_to_review() {
         .await;
     assert_eq!(res.status(), StatusCode::NO_CONTENT);
 
-    let long = "x".repeat(300);
+    // At most 200 characters, and no control characters.
+    for bad in [
+        "x".repeat(201),
+        "line\nbreak".into(),
+        "esc\u{1b}[31m".into(),
+    ] {
+        assert_eq!(
+            no_show(&host, event, 0, Some(&bad)).await,
+            StatusCode::BAD_REQUEST,
+            "{bad:?}"
+        );
+    }
+    assert_eq!(set_row(&app, event, 0).await.0, "ready");
+    let long = "x".repeat(200);
     assert_eq!(
         no_show(&host, event, 0, Some(&long)).await,
         StatusCode::NO_CONTENT
@@ -150,7 +173,6 @@ async fn no_show_sends_set_to_review() {
     assert!(detail.contains("slot 0"), "{detail}");
     assert!(detail.contains("Alice"), "{detail}");
     assert!(detail.contains(&"x".repeat(200)), "{detail}");
-    assert!(!detail.contains(&"x".repeat(201)), "{detail}");
 
     assert_eq!(set_row(&app, event, 0).await, ("review".into(), None));
     assert_eq!(next(&host, event).await, Next::Review { set_id: 0 });
@@ -209,7 +231,7 @@ async fn replay_resolution_reopens_the_set() {
     assert_eq!(set_row(&app, event, 0).await.0, "ready");
     assert!(matches!(next(&guest, event).await, Next::Play { .. }));
     // The reopened set counts as fresh: it is not flagged as stalled straight away.
-    assert_eq!(flag_stalled_sets(&app.state).await.unwrap(), 0);
+    assert_eq!(flag_stalled_sets(&long_running(&app)).await.unwrap(), 0);
 
     // Best of 3: two games won by the guest decide it.
     play_game(&app, event, 0, 1, &host, &guest, 2).await;
@@ -259,7 +281,7 @@ async fn stalled_set_is_flagged_and_fresh_one_is_not() {
     // 10 s short of the limit (default 1800 s).
     age_set(&app, event, fresh, 1790).await;
 
-    assert_eq!(flag_stalled_sets(&app.state).await.unwrap(), 1);
+    assert_eq!(flag_stalled_sets(&long_running(&app)).await.unwrap(), 1);
     let items = queue(&app).await;
     assert_eq!(items.len(), 1);
     assert_eq!(items[0].reason, "stalled");
@@ -277,7 +299,7 @@ async fn stalled_set_is_flagged_and_fresh_one_is_not() {
     assert_eq!(next(&ps[s1], event).await, Next::Review { set_id: old });
 
     // Flagged once only.
-    assert_eq!(flag_stalled_sets(&app.state).await.unwrap(), 0);
+    assert_eq!(flag_stalled_sets(&long_running(&app)).await.unwrap(), 0);
     assert_eq!(queue(&app).await.len(), 1);
 }
 
@@ -294,7 +316,7 @@ async fn posting_a_room_code_is_activity() {
         )
         .await;
     assert_eq!(res.status(), StatusCode::NO_CONTENT);
-    assert_eq!(flag_stalled_sets(&app.state).await.unwrap(), 0);
+    assert_eq!(flag_stalled_sets(&long_running(&app)).await.unwrap(), 0);
 }
 
 #[tokio::test]
@@ -305,12 +327,12 @@ async fn stalled_check_ignores_a_set_with_a_game_in_progress() {
         StatusCode::ACCEPTED
     );
     age_set(&app, event, 0, 5000).await;
-    assert_eq!(flag_stalled_sets(&app.state).await.unwrap(), 0);
+    assert_eq!(flag_stalled_sets(&long_running(&app)).await.unwrap(), 0);
     sqlx::query("UPDATE games SET state = 'judging'")
         .execute(&app.state.db)
         .await
         .unwrap();
-    assert_eq!(flag_stalled_sets(&app.state).await.unwrap(), 0);
+    assert_eq!(flag_stalled_sets(&long_running(&app)).await.unwrap(), 0);
     assert_eq!(set_row(&app, event, 0).await.0, "ready");
     assert!(queue(&app).await.is_empty());
 }
@@ -324,7 +346,7 @@ async fn stalled_check_ignores_events_not_running() {
         .execute(&app.state.db)
         .await
         .unwrap();
-    assert_eq!(flag_stalled_sets(&app.state).await.unwrap(), 0);
+    assert_eq!(flag_stalled_sets(&long_running(&app)).await.unwrap(), 0);
     assert_eq!(set_row(&app, event, 0).await.0, "ready");
 }
 
@@ -333,6 +355,51 @@ async fn stalled_check_is_off_at_zero() {
     let app = TestApp::spawn(|c| c.set_stall_secs = 0).await;
     let (app, _host, _guest, event) = two_player(app).await;
     age_set(&app, event, 0, 1_000_000).await;
-    assert_eq!(flag_stalled_sets(&app.state).await.unwrap(), 0);
+    assert_eq!(flag_stalled_sets(&long_running(&app)).await.unwrap(), 0);
     assert_eq!(set_row(&app, event, 0).await.0, "ready");
+}
+
+/// A server that was down a long time does not flag every ready set the moment it starts:
+/// inactivity counts from when this process started, if that is later.
+#[tokio::test]
+async fn restart_counts_inactivity_from_start_up() {
+    let (app, host, guest, event) = two_player(TestApp::spawn(|_| {}).await).await;
+    age_set(&app, event, 0, 100_000).await;
+    // Just started.
+    assert_eq!(flag_stalled_sets(&app.state).await.unwrap(), 0);
+    let mut st = app.state.clone();
+    st.started_at = now_unix() - 1790;
+    assert_eq!(flag_stalled_sets(&st).await.unwrap(), 0);
+    assert_eq!(set_row(&app, event, 0).await.0, "ready");
+    // Up for longer than the limit with the set idle all along.
+    st.started_at = now_unix() - 1801;
+    assert_eq!(flag_stalled_sets(&st).await.unwrap(), 1);
+    assert_eq!(next(&host, event).await, Next::Review { set_id: 0 });
+    assert_eq!(next(&guest, event).await, Next::Review { set_id: 0 });
+}
+
+/// A tag looked up only for the log cannot fail an award: with the winner's player row gone,
+/// the award still goes through.
+#[tokio::test]
+async fn award_survives_a_missing_player_row() {
+    let (app, host, guest, event) = two_player(TestApp::spawn(|_| {}).await).await;
+    assert_eq!(no_show(&host, event, 0, None).await, StatusCode::NO_CONTENT);
+    let item = queue(&app).await[0].id;
+    sqlx::query("DELETE FROM players WHERE key = ?")
+        .bind(hex::encode(host.sk.verifying_key().to_bytes()))
+        .execute(&app.state.db)
+        .await
+        .unwrap();
+    assert_eq!(
+        resolve(&app, item, &Resolve::Award { slot: 0 }).await,
+        StatusCode::NO_CONTENT
+    );
+    assert_eq!(set_row(&app, event, 0).await.0, "done");
+    let state: String = sqlx::query_scalar("SELECT state FROM events WHERE id = ?")
+        .bind(event)
+        .fetch_one(&app.state.db)
+        .await
+        .unwrap();
+    assert_eq!(state, "complete");
+    assert_eq!(next(&guest, event).await, Next::Eliminated);
 }

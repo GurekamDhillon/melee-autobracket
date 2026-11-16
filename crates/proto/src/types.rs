@@ -95,7 +95,8 @@ pub struct RoomReq {
 /// A player's report that their opponent has not shown up for the set.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Default)]
 pub struct NoShowReq {
-    /// Optional short note for the organiser; the server keeps the first 200 characters.
+    /// Optional short note for the organiser: at most 200 characters, none of them control
+    /// characters or line separators (the server answers 400 otherwise).
     #[serde(default)]
     pub detail: Option<String>,
 }

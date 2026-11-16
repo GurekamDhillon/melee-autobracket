@@ -99,7 +99,7 @@ pub(crate) async fn send_to_review(
 }
 
 /// The queue detail of a no-show report: who reported it, and their note cut to
-/// [`MAX_NOTE_CHARS`] characters (blank notes are dropped).
+/// [`MAX_NOTE_CHARS`] characters (the route refuses longer ones; blank notes are dropped).
 pub fn no_show_detail(slot: u8, tag: &str, note: Option<&str>) -> String {
     let note: String = note
         .unwrap_or("")

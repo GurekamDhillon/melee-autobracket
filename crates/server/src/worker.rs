@@ -15,7 +15,7 @@ use tracing::{error, info, warn};
 use crate::db::{begin_write, now_unix};
 use crate::judge::{self, Pre};
 use crate::lifecycle::{self, verdict_name};
-use crate::logging::{resim_kind, Journal};
+use crate::logging::{detail, label, resim_kind, Journal};
 use crate::review::{self, STALLED};
 use crate::state::AppState;
 
@@ -30,12 +30,15 @@ pub async fn run(st: AppState) {
     let mut last_stall_check: Option<Instant> = None;
     loop {
         if let Err(e) = judge_due(&st).await {
-            error!(error = %format_args!("{e:#}"), "judging failed");
+            error!(error = %detail(format_args!("{e:#}")), "judging failed");
         }
         if last_stall_check.is_none_or(|t| t.elapsed() >= STALL_CHECK_PERIOD) {
             last_stall_check = Some(Instant::now());
             if let Err(e) = flag_stalled_sets(&st).await {
-                error!(error = %format_args!("{e:#}"), "looking for stalled sets failed");
+                error!(
+                    error = %detail(format_args!("{e:#}")),
+                    "looking for stalled sets failed"
+                );
             }
         }
         tokio::select! {
@@ -97,7 +100,7 @@ pub async fn judge_due(st: &AppState) -> anyhow::Result<usize> {
                 .execute(&st.db)
                 .await;
                 if let Err(he) = handed_back {
-                    error!(game_id, error = %he, "returning a game to uploading failed");
+                    error!(game_id, error = %detail(&he), "returning a game to uploading failed");
                 }
                 first_err.get_or_insert(e.context(format!("judging game {game_id}")));
             }
@@ -110,8 +113,9 @@ pub async fn judge_due(st: &AppState) -> anyhow::Result<usize> {
 }
 
 /// Sends every stalled set to the organiser queue (reason `stalled`), as a no-show report
-/// would: a `ready` set of a `running` event with no activity for `set_stall_secs`
-/// (`sets.updated_at`) and no game uploading or awaiting a verdict. Does nothing when
+/// would: a `ready` set of a `running` event with no activity for `set_stall_secs` (since
+/// `sets.updated_at`, or since this process started if that is later, see
+/// [`AppState::started_at`]) and no game uploading or awaiting a verdict. Does nothing when
 /// `set_stall_secs` is 0. Returns how many sets were flagged.
 pub async fn flag_stalled_sets(st: &AppState) -> anyhow::Result<usize> {
     let stall_secs = st.cfg.set_stall_secs;
@@ -123,24 +127,28 @@ pub async fn flag_stalled_sets(st: &AppState) -> anyhow::Result<usize> {
     let mut journal = Journal::default();
     let mut flagged = Vec::new();
     let mut tx = begin_write(&st.db).await?;
+    // Inactivity counts from the last change or from this process's start, whichever is
+    // later: time the server was down is not inactivity it observed.
     let idle: Vec<(i64, i64, i64)> = sqlx::query_as(
-        "SELECT s.event_id, s.set_id, s.updated_at FROM sets s JOIN events e ON e.id = s.event_id
-         WHERE s.state = 'ready' AND e.state = 'running' AND s.updated_at < ?
+        "SELECT s.event_id, s.set_id, MAX(s.updated_at, ?) AS since
+         FROM sets s JOIN events e ON e.id = s.event_id
+         WHERE s.state = 'ready' AND e.state = 'running' AND MAX(s.updated_at, ?) < ?
          ORDER BY s.event_id, s.set_id",
     )
+    .bind(st.started_at)
+    .bind(st.started_at)
     .bind(cutoff)
     .fetch_all(&mut *tx)
     .await
     .context("finding idle sets")?;
-    for (event_id, set_id, updated_at) in idle {
+    for (event_id, set_id, since) in idle {
         if review::game_in_progress(&mut tx, event_id, set_id).await? {
             continue;
         }
         let set = u32::try_from(set_id).with_context(|| format!("sets row set_id {set_id}"))?;
-        let idle_secs = now - updated_at;
-        let detail = format!("no activity for {idle_secs} s");
-        review::send_to_review(&mut tx, event_id, set, STALLED, Some(&detail), &mut journal)
-            .await?;
+        let idle_secs = now - since;
+        let note = format!("no activity for {idle_secs} s");
+        review::send_to_review(&mut tx, event_id, set, STALLED, Some(&note), &mut journal).await?;
         flagged.push((event_id, set, idle_secs));
     }
     tx.commit().await?;
@@ -217,8 +225,8 @@ async fn judge_claimed(st: &AppState, game_id: i64, claim: Claim) -> anyhow::Res
             // A lost file is a missing upload: the game goes to the organiser, never counts.
             Err(e) => warn!(
                 game_id,
-                path = %path.display(),
-                error = %e,
+                path = %detail(path.display()),
+                error = %detail(&e),
                 "stored replay unreadable; judged as missing"
             ),
         }
@@ -246,22 +254,19 @@ async fn judge_claimed(st: &AppState, game_id: i64, claim: Claim) -> anyhow::Res
             let resim_started = Instant::now();
             let (outcome, build) = st.resim.check_with_build(host, last_frame).await;
             resim_ms = resim_started.elapsed().as_millis();
-            if let ResimOutcome::Unavailable(detail) = &outcome {
+            if let ResimOutcome::Unavailable(why) = &outcome {
                 warn!(
                     game_id,
                     event = claim.event_id,
                     set = claim.set_id,
-                    detail = %detail,
+                    detail = %detail(why),
                     "verifier unavailable; judging peer-only"
                 );
             }
             let v: Verdict = judge::finish(&outcome, st.cfg.strict_resim);
-            (
-                v,
-                Some(judge::winner_slot(winner_port)),
-                outcome,
-                Some(build),
-            )
+            // A build is recorded only when the engine actually ran on the game.
+            let build = engine_ran(&outcome).then_some(build);
+            (v, Some(judge::winner_slot(winner_port)), outcome, build)
         }
     };
     lifecycle::apply_verdict(
@@ -280,12 +285,24 @@ async fn judge_claimed(st: &AppState, game_id: i64, claim: Claim) -> anyhow::Res
         game_id,
         verdict = %verdict_display(&verdict),
         resim = %resim_kind(&resim),
-        verifier_build = %verifier_build.as_deref().unwrap_or("-"),
+        verifier_build = %verifier_build.as_deref().map_or_else(|| "-".to_owned(), label),
         judging_ms = started.elapsed().as_millis(),
         resim_ms,
         "verdict"
     );
     Ok(())
+}
+
+/// Whether a re-simulation outcome means the engine ran on the replay: `Skipped` (verifier
+/// off) and `Unavailable` (no verifier, or it could not start the game) mean it did not.
+fn engine_ran(outcome: &ResimOutcome) -> bool {
+    match outcome {
+        ResimOutcome::Match
+        | ResimOutcome::Diverged { .. }
+        | ResimOutcome::EarlyEnd { .. }
+        | ResimOutcome::Crashed(_) => true,
+        ResimOutcome::Unavailable(_) | ResimOutcome::Skipped => false,
+    }
 }
 
 /// A verdict as logged: its name, with the failed rule of an `Illegal` one.

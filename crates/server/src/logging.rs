@@ -18,8 +18,8 @@ pub const SHA_PREFIX_CHARS: usize = 12;
 const MAX_LABEL_CHARS: usize = 64;
 
 /// The first [`KEY_PREFIX_CHARS`] characters of a key: enough to tell keys apart in the log.
-pub fn key_prefix(key: &str) -> &str {
-    key.get(..KEY_PREFIX_CHARS).unwrap_or(key)
+pub fn key_prefix(key: &str) -> String {
+    clean(key, KEY_PREFIX_CHARS)
 }
 
 /// The first [`SHA_PREFIX_CHARS`] hex digits of a digest.
@@ -27,9 +27,44 @@ pub fn sha_prefix(sha256: &str) -> &str {
     sha256.get(..SHA_PREFIX_CHARS).unwrap_or(sha256)
 }
 
-/// A client-supplied label cut to [`MAX_LABEL_CHARS`] characters.
+/// A client-supplied label as logged: [`clean`], cut to [`MAX_LABEL_CHARS`] characters.
 pub fn label(s: &str) -> String {
-    s.chars().take(MAX_LABEL_CHARS).collect()
+    clean(s, MAX_LABEL_CHARS)
+}
+
+/// Longest error or engine message shown in the log.
+pub const MAX_DETAIL_CHARS: usize = 300;
+
+/// Text from outside the process (players, verifiers, the engine, stored rows) made safe for a
+/// one-line log record: cut to `max_chars` characters, then every character that is not
+/// printable (control characters, the line and paragraph separators U+2028/U+2029, NEL, and
+/// anything else `char::escape_debug` would escape) written as its Rust escape (`\n`,
+/// `\u{1b}`). The log formatter does not escape `%` fields itself, so without this a newline
+/// in a field would start a forged log line.
+pub fn clean(s: &str, max_chars: usize) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars().take(max_chars) {
+        match c {
+            // `escape_debug` escapes these too, but they cannot break a line.
+            '\\' | '"' | '\'' => out.push(c),
+            _ => out.extend(c.escape_debug()),
+        }
+    }
+    out
+}
+
+/// An error or engine message as logged: [`clean`], cut to [`MAX_DETAIL_CHARS`] characters.
+pub fn detail(s: impl std::fmt::Display) -> String {
+    clean(&s.to_string(), MAX_DETAIL_CHARS)
+}
+
+/// Whether text from a request may be stored: at most `max_chars` characters and nothing
+/// [`clean`] would have to escape except quotes and backslashes (so no control characters,
+/// line or paragraph separators, or other unprintable characters).
+pub fn is_printable_within(s: &str, max_chars: usize) -> bool {
+    s.chars().count() <= max_chars
+        && s.chars()
+            .all(|c| matches!(c, '\\' | '"' | '\'') || c.escape_debug().len() == 1)
 }
 
 /// The variant name of a re-simulation outcome.
@@ -153,7 +188,7 @@ impl Journal {
                     id,
                     event = event_id,
                     set = set_id,
-                    reason = %reason,
+                    reason = %label(&reason),
                     "queue item opened"
                 ),
                 Entry::SetDecided {
@@ -166,13 +201,13 @@ impl Journal {
                     target: TARGET,
                     event = event_id,
                     set = set_id,
-                    winner = %winner,
+                    winner = %label(&winner),
                     score = %format_args!("{w0}-{w1}"),
                     how = %how,
                     "set decided"
                 ),
                 Entry::EventCompleted { event_id, champion } => {
-                    info!(target: TARGET, event = event_id, champion = %champion, "event completed")
+                    info!(target: TARGET, event = event_id, champion = %label(&champion), "event completed")
                 }
             }
         }
@@ -190,6 +225,24 @@ mod tests {
         assert_eq!(key_prefix("abc"), "abc");
         assert_eq!(sha_prefix(&"0f".repeat(32)), "0f0f0f0f0f0f");
         assert_eq!(label(&"x".repeat(100)).len(), 64);
+        assert_eq!(key_prefix("ab\ncdefghij"), "ab\\ncdefg");
+    }
+
+    #[test]
+    fn label_escapes_everything_that_could_break_a_line() {
+        let raw = "a\nb\rc\u{1b}[2Kd\u{2028}e\u{2029}f\u{85}g\th\u{0}i";
+        let out = label(raw);
+        assert_eq!(
+            out,
+            "a\\nb\\rc\\u{1b}[2Kd\\u{2028}e\\u{2029}f\\u{85}g\\th\\0i"
+        );
+        assert!(!out.chars().any(|c| c.is_control()));
+        // Printable text, quotes and backslashes pass through.
+        assert_eq!(label(r#"melee "1.0" \ build"#), r#"melee "1.0" \ build"#);
+        assert_eq!(label("Ünïcødé 🎮"), "Ünïcødé 🎮");
+        // Cut to 64 characters before escaping.
+        assert_eq!(label(&"\n".repeat(100)), "\\n".repeat(64));
+        assert_eq!(clean("é".repeat(10).as_str(), 3), "ééé");
     }
 
     #[test]

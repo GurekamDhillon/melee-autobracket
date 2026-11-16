@@ -67,7 +67,7 @@ pub async fn register(State(state): State<AppState>, req: AnyKey) -> Result<Stat
         Err(e) => return Err(e.into()),
     }
     tx.commit().await?;
-    tracing::info!(tag = %body.tag, key = %key_prefix(&req.key), "player registered");
+    tracing::info!(tag = %crate::logging::label(&body.tag), key = %key_prefix(&req.key), "player registered");
     Ok(StatusCode::CREATED)
 }
 
