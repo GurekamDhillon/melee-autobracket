@@ -69,7 +69,7 @@ How the pieces of autobracket plug together. Status as of 2026-11-16:
     "set live / set done", switches scenes)        └──► restream RTMP → Twitch / YouTube
 ```
 
-- OBS runs on the desktop (GPU compositing). obs-websocket stays on localhost and is never exposed to the internet. Its password lives in a local secret file, not git.
+- OBS runs on whichever machine has the GPU (today the Windows desktop; it may become Linux and/or non-NVIDIA, so the scripts and config stay host-agnostic). obs-websocket stays on localhost and is never exposed to the internet. Its password lives in a local secret file, not git.
 - C5 pulls state from B2's public API, so no inbound connection to the desktop is needed.
 - OBS uploads once, to MediaMTX. MediaMTX fans out to Twitch and YouTube, so the desktop's upstream carries one stream. The stream keys live in MediaMTX's root-only env file.
 
