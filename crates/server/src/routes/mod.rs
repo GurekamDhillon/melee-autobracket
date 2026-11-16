@@ -24,6 +24,8 @@ pub fn router() -> Router<AppState> {
     Router::new()
         .route("/", get(view::home))
         .route("/events/{id}", get(view::event))
+        .route("/schedule", get(view::schedule))
+        .route("/history", get(view::history))
         .route("/assets/fonts/{file}", get(view::font))
         .route("/v1/players", post(players::register))
         .route("/v1/events", get(events::list))

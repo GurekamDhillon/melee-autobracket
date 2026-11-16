@@ -35,6 +35,18 @@ const SOURCES: &[(&str, &str, &str, &str)] = &[
         include_str!("../../assets/pages/event.html"),
         include_str!("../../assets/pages/event.js"),
     ),
+    (
+        "schedule",
+        "Schedule",
+        include_str!("../../assets/pages/schedule.html"),
+        include_str!("../../assets/pages/schedule.js"),
+    ),
+    (
+        "history",
+        "History",
+        include_str!("../../assets/pages/history.html"),
+        include_str!("../../assets/pages/history.js"),
+    ),
 ];
 
 /// A finished page and the policy that pins its inline blocks.
@@ -104,6 +116,16 @@ pub async fn event(
         return Err(ApiError::new(StatusCode::NOT_FOUND, "no such event"));
     }
     Ok(page("event"))
+}
+
+/// `GET /schedule`: what is running and what is coming up.
+pub async fn schedule() -> Response {
+    page("schedule")
+}
+
+/// `GET /history`: completed events and their placings.
+pub async fn history() -> Response {
+    page("history")
 }
 
 /// The pages' fonts by file name (`assets/fonts/README.md` says where they come from).

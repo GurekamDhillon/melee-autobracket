@@ -18,7 +18,36 @@ async fn fetch(app: &TestApp, path: &str) -> reqwest::Response {
 async fn all_pages(app: &TestApp) -> Vec<String> {
     let event = app.create_event(Format::SingleElim).await;
     app.player("Mango").await;
-    vec!["/".to_owned(), format!("/events/{event}")]
+    vec![
+        "/".to_owned(),
+        "/schedule".to_owned(),
+        "/history".to_owned(),
+        format!("/events/{event}"),
+    ]
+}
+
+#[tokio::test]
+async fn schedule_and_history_pages_fetch_their_data() {
+    let app = TestApp::spawn(|_| {}).await;
+    let schedule = fetch(&app, "/schedule").await.text().await.unwrap();
+    for needle in [
+        "/v1/events",
+        "Happening now",
+        "Coming up",
+        "time to be announced",
+        "autobracket-client register",
+    ] {
+        assert!(schedule.contains(needle), "/schedule has {needle:?}");
+    }
+    let history = fetch(&app, "/history").await.text().await.unwrap();
+    for needle in [
+        "/v1/history",
+        "No completed events yet",
+        "and ",
+        "AB.ordinal(",
+    ] {
+        assert!(history.contains(needle), "/history has {needle:?}");
+    }
 }
 
 #[tokio::test]
