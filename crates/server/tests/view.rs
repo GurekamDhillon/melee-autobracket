@@ -119,3 +119,52 @@ async fn page_has_security_headers() {
         assert!(csp.contains(&expected), "{expected} in {csp}");
     }
 }
+
+/// Every route in the table of `docs/api.md` exists with its method (rows for routes added in
+/// the same release by another part of the server are skipped until they are integrated).
+#[tokio::test]
+async fn documented_routes_exist() {
+    let doc =
+        std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("../../docs/api.md"))
+            .unwrap();
+    let app = TestApp::spawn(|_| {}).await;
+    let client = reqwest::Client::new();
+    let mut seen = 0;
+    for line in doc.lines() {
+        let cells: Vec<&str> = line.split('|').map(str::trim).collect();
+        let [_, method, path, _, _, success, ..] = cells[..] else {
+            continue;
+        };
+        if !["GET", "POST", "DELETE"].contains(&method) || success.contains("added in the same") {
+            continue;
+        }
+        // `{name}` placeholders become 1.
+        let mut concrete = String::new();
+        let mut rest = path.trim_matches('`');
+        while let Some((before, after)) = rest.split_once('{') {
+            concrete.push_str(before);
+            concrete.push('1');
+            rest = after.split_once('}').unwrap().1;
+        }
+        concrete.push_str(rest);
+        let method = reqwest::Method::from_bytes(method.as_bytes()).unwrap();
+        let res = client
+            .request(method.clone(), format!("{}{concrete}", app.url))
+            .send()
+            .await
+            .unwrap();
+        let status = res.status();
+        let body = res.text().await.unwrap();
+        assert_ne!(
+            status,
+            StatusCode::METHOD_NOT_ALLOWED,
+            "{method} {concrete}"
+        );
+        assert!(
+            !body.contains("no such route"),
+            "{method} {concrete}: {body}"
+        );
+        seen += 1;
+    }
+    assert!(seen >= 20, "parsed {seen} routes from the table");
+}
