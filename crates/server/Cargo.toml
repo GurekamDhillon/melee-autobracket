@@ -26,7 +26,8 @@ anyhow.workspace = true
 hex.workspace = true
 rand.workspace = true
 axum.workspace = true
-tokio.workspace = true
+tokio = { workspace = true, features = ["process", "io-util"] }
+sha2.workspace = true
 sqlx.workspace = true
 tower_governor.workspace = true
 http-body-util.workspace = true
@@ -42,3 +43,4 @@ replay = { workspace = true, features = ["testkit"] }
 autobracket-server = { path = ".", features = ["testkit"] }
 reqwest.workspace = true
 tower.workspace = true
+tempfile.workspace = true
