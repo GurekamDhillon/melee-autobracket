@@ -1,0 +1,14 @@
+{
+  "name": "autobracket-clipdetect",
+  "version": "0.1.0",
+  "description": "Prototype hype-moment detector for Slippi replays (autobracket auto-clip, phase d)",
+  "license": "AGPL-3.0-or-later",
+  "private": true,
+  "type": "commonjs",
+  "engines": { "node": ">=20" },
+  "bin": { "clipdetect": "cli.js" },
+  "scripts": { "test": "node --test test/" },
+  "dependencies": {
+    "@slippi/slippi-js": "9.1.3"
+  }
+}
