@@ -352,7 +352,10 @@ default): for requests from a trusted address the client is the right-most `X-Fo
 entry that is not itself trusted. With the proxy on the same host that is
 `trusted_proxies = ["127.0.0.1/32"]`; with nginx in Docker the requests arrive from the Docker
 bridge, e.g. `trusted_proxies = ["172.16.0.0/12"]`. Never trust a range that untrusted clients
-can send from. IPv6 clients are limited per /64. Players behind one NAT (a venue) share one
+can send from. When `trusted_proxies` contains the Docker bridge range, bind the server only
+where the proxy can reach it, not on a public address: otherwise a visitor connecting directly
+(through a port Docker publishes, say) arrives from the bridge, is taken for the trusted proxy,
+and its `X-Forwarded-For` is believed. IPv6 clients are limited per /64. Players behind one NAT (a venue) share one
 address: a client polls every 2 s, so raise `rate_per_sec` and `rate_burst` for a venue
 event. `max_connections` (default 512) caps connections handled at once.
 

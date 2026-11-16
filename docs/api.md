@@ -9,11 +9,6 @@ or response carries is listed here. The JSON shapes are those of the `proto` cra
 so the examples cannot drift from the code. The worked signing example is checked by the same
 test.
 
-Items marked **added in the same release** come from changes made alongside this document by
-other parts of the server (the organiser's evidence, `unverified_games`, the
-`VerifierUnavailable` verdict, entrant removal). Their names are final; they are marked so that
-whoever integrates the release can confirm them against the code.
-
 Contents:
 1. [Conventions](#1-conventions)
 2. [Signing a request](#2-signing-a-request)
@@ -33,7 +28,8 @@ Contents:
   body and a replay download's response body, which are the raw `.slp` bytes
   (`application/octet-stream`). The server does not look at `content-type` on requests.
 - **Paths.** Ids in paths are decimal integers (`{event}`, `{set}`, `{id}`, `{n}`, `{slot}`);
-  `{old_key}` is 64 lowercase hex characters; `{tag}` is a player tag.
+  `{old_key}` is 64 lowercase hex characters; `{tag}` is a player tag, matched in any case
+  (tags are unique regardless of case).
 - **Set ids** are the bracket's own set ids, starting at 0. **Slots** are 0 (the host, the
   bracket's upper slot) and 1 (the guest). `wins` and `scores` are `[slot 0, slot 1]` unless
   stated otherwise.
@@ -42,7 +38,10 @@ Contents:
   `{"error": "<human-readable message>"}`, sometimes with more keys (sign-up's 403 adds
   `"accepted"`). This includes signature failures, unknown routes (404), wrong methods (405),
   malformed paths and queries (400), oversized bodies (413), body timeouts (408) and the rate
-  limit (429). Messages are for people; act on the status code.
+  limit (429). Messages are for people; act on the status code. The exception is an error the
+  HTTP layer produces before a request is parsed at all (a malformed request line, oversized
+  headers, or headers that do not arrive in time): that answer is not JSON, or the connection
+  is simply closed.
 
 | Status | Meaning |
 |---|---|
@@ -105,7 +104,8 @@ retries (a retry is a new request).
 
 **Order of checks.** The server checks, in this order, and answers with the first failure:
 
-1. All four headers are present (else 401 `missing signature headers`) and well formed:
+1. All four headers are present as visible ASCII (else 401 `missing signature headers`; a
+   header value with any other byte counts as missing) and well formed:
    hex of the right lengths, the key a valid Ed25519 point, the time an integer (else 401
    `malformed signature headers`).
 2. The time is within the skew window (else 401 `clock skew: …`).
@@ -172,7 +172,7 @@ x-ab-sig: d5e64034507c78a9938b1fe15b48130f5e3716eadc4eb23f5562f9ea2bafa5e4dd0f4e
 |---|---|
 | Request body, every signed route except replay upload | 64 KiB (65536 bytes) |
 | Request body, replay upload | `max_replay_bytes` (default 16 MiB, 16777216 bytes) |
-| Time for the request body to arrive | 30 s; 60 s for a replay upload (else 408) |
+| Time for the request body to arrive | 30 s; 120 s for a replay upload (else 408) |
 | Time for the request line and headers to arrive | 30 s, after which the connection is closed |
 | Idle keep-alive connection | closed after 30 s without a new request |
 | Connections served at once | `max_connections` (default 512); more wait to be accepted |
@@ -225,7 +225,7 @@ described above; the tables list the other statuses.
 | POST | `/v1/sets/{event}/{set}/games/{n}/replay` | player of the set | the `.slp` file's bytes; header `x-ab-build` optional | 202 stored; 200 this exact file was already stored for this slot | 400 not a readable replay, bad `x-ab-build`; 403; 404; 409 `n` is not the current game, a different file is stored for this slot, the game no longer takes uploads, the set is not in play; 413 |
 | POST | `/v1/admin/events` | organiser | `EventCreateReq` | 201 `EventSummary` | 400 |
 | POST | `/v1/admin/events/{id}/start` | organiser | ignored (send `{}`) | 200 `EventView` | 404; 409 already started, fewer than 2 entrants |
-| DELETE | `/v1/admin/events/{id}/entrants/{tag}` | organiser | — | **added in the same release**; allowed only while the event is in sign-up; later seeds shift down | (see the server's code) |
+| DELETE | `/v1/admin/events/{id}/entrants/{tag}` | organiser | — | 204, empty; only while the event is in sign-up; later seeds shift down; `{tag}` matches in any case | 400 bad path; 404 no such event, or no such entrant; 409 event not in sign-up |
 | POST | `/v1/admin/invites` | organiser | ignored (send `{}`) | 201 `{"code":"<12 characters A-Z 2-7>"}` | — |
 | GET | `/v1/admin/queue` | organiser | — | 200 `[QueueItem]`, open items, oldest first | — |
 | POST | `/v1/admin/queue/{id}/resolve` | organiser | `Resolve` | 204, empty | 400 bad slot; 404; 409 already resolved, set already decided, no entrant in that slot |
@@ -262,8 +262,7 @@ Notes on individual routes:
 - **Verifier routes** are for `autobracket verify-worker` (external verifier mode). A claim
   not answered within 300 s is offered again.
 - **Admin CLI commands** that use these routes include `autobracket admin quarantine get ID
-  SLOT --out FILE` (**added in the same release**; it downloads
-  `GET /v1/quarantine/{id}/replay/{slot}`).
+  SLOT --out FILE` (it downloads `GET /v1/quarantine/{id}/replay/{slot}`).
 
 ## 5. Types
 
@@ -379,7 +378,7 @@ In a request every field is optional (missing ones take the defaults shown here)
 | `bracket` | `Bracket` or null | null until the event starts |
 | `scores` | [[set id, [wins slot 0, wins slot 1]]] | one entry per set that has become ready (is being played or is decided) |
 | `decided_by` | [[set id, how]] | sets decided other than by played games: `"award"`, `"dq"` or `"double-dq"`; their scores count only the games played before |
-| `unverified_games` | integer | **added in the same release**: counted games of the event whose verdict is `PeerOnly` while the server's verifier is not off (re-simulation was unavailable) |
+| `unverified_games` | integer | counted games of the event whose re-simulation outcome is `Unavailable`: a verifier is configured but was unavailable, so they counted on peer agreement alone (`PeerOnly`) |
 
 `Bracket`: `format`; `entrants` (count); `sets`, each with `id`, `side` (`"Winners"`,
 `"Losers"` or `"GrandFinal"`), `round`, `slots` (two of `"Empty"`, `"Bye"` or
@@ -446,7 +445,7 @@ for this game); `game_no` (1-based); `wins` (**`[me, opponent]`**); `best_of`; `
     "set_id": 0,
     "opponent_tag": "Armada",
     "role": "Host",
-    "relay": "netplay.gsd.sh:51600",
+    "relay": "relay.example.org:51600",
     "room_code": "KQ7X",
     "game_no": 2,
     "wins": [1, 0],
@@ -482,7 +481,7 @@ How a judged game was decided. Only `Verified`, `VerifiedInexact` and `PeerOnly`
 | `{"Illegal": "word"}` | a ruleset violation; the word is one of `"players"` (not two human players), `"teams"`, `"stage"`, `"stocks"`, `"timer"`, `"character"` (a banned character), `"gecko"` (a Gecko code list not in `allowed_gecko`) |
 | `"Undecided"` | the replays determine no winner |
 | `"Inexact"` | `strict_resim` and the re-simulation diverged |
-| `"VerifierUnavailable"` | **added in the same release**: `strict_resim`, a verifier is configured, and it was unavailable; does not count |
+| `"VerifierUnavailable"` | `strict_resim`, a verifier is configured, and it was unavailable; does not count |
 
 <!-- checked: Verdict -->
 ```json
@@ -559,13 +558,13 @@ An open organiser queue item.
 | `id` | integer | |
 | `event_id`, `set_id` | integer | |
 | `game_id` | integer or null | the game in question, for verdict items |
-| `reason` | string | a verdict name (`"Conflicted"`, `"Single"`, `"Illegal"`, `"Undecided"`, `"Inexact"`, `"VerifierUnavailable"`), or `"no-show"`, `"client-failure"`, `"stalled"`, `"double-dq"`, `"judging-failed"` (**added in the same release**: a game whose judging kept failing) |
+| `reason` | string | a verdict name (`"Conflicted"`, `"Single"`, `"Illegal"`, `"Undecided"`, `"Inexact"`, `"VerifierUnavailable"`), or `"no-show"`, `"client-failure"`, `"stalled"`, `"double-dq"`, `"judging-failed"` (a game whose judging kept failing) |
 | `verdict` | `Verdict` or null | |
 | `resim` | `ResimOutcome` or null | |
 | `detail` | string or null | for a no-show, who reported it and their note; for a stalled set, how long it was idle |
-| `evidence` | JSON or null | **added in the same release**: per uploaded file, what the replay shows (slot, tag, file hash prefix, parse result, stage, timer, per-port character, stocks and percent, end method, derived winner), and for a lone upload the re-simulation run as evidence; for a set-level item, that of every game of the set |
-| `reporter_tag` | string or null | **added in the same release** |
-| `tags` | [slot 0 tag, slot 1 tag] or null | **added in the same release** |
+| `evidence` | JSON or null | per uploaded file, what the replay shows (slot, tag, file hash prefix, parse result, stage, timer, per-port character, stocks and percent, end method, derived winner), and for a lone upload the re-simulation run as evidence; for a set-level item, that of every game of the set |
+| `reporter_tag` | string or null | the tag of the player who reported the set (`no-show`, `client-failure`), else null |
+| `tags` | [slot 0 tag, slot 1 tag] or null | the tags of the set's two players, or null when they are not known |
 
 <!-- checked: QueueItem -->
 ```json
@@ -640,7 +639,7 @@ A game kept for study (a re-simulation divergence, a conflict), with its evidenc
      game and checked afterwards against the ruleset (see `GET /v1/events/{id}` for
      `legal_stages` and `banned_characters`).
 5. **Upload** the game's replay when it ends: `POST /v1/sets/{event}/{set}/games/{game_no}/replay`
-   with the file's bytes. Retry on transport errors and 5xx/429 (an identical re-upload is 200);
+   with the file's bytes. Retry on transport errors and 5xx/429/408 (an identical re-upload is 200);
    do not retry a 400 or 409 unchanged. Both players upload; while `awaiting_verdict` is true,
    wait.
 6. **Verdict.** The game is judged once both files are in (or `upload_timeout_secs` after the
