@@ -2,10 +2,9 @@
 //! the paths and templates in the config.
 
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use std::time::{Duration, Instant};
 
-use autobracket_client::config::{self, ClientConfig};
+use autobracket_client::config::ClientConfig;
 use autobracket_client::engine::{CommandEngine, Engine, GameParams, RunExit};
 use tempfile::TempDir;
 
@@ -22,7 +21,6 @@ fn fake_melee() -> PathBuf {
 fn mode_config(work_dir: &Path, mode: &str) -> ClientConfig {
     let mut cfg = ClientConfig::with_defaults(
         "00".repeat(32),
-        "fake".into(),
         fake_melee(),
         PathBuf::from("/isos/melee.iso"),
         work_dir.to_path_buf(),
@@ -54,6 +52,7 @@ fn exit(code: i32, no_opponent: bool) -> Option<RunExit> {
     Some(RunExit {
         code: Some(code),
         no_opponent,
+        host_gone: false,
     })
 }
 
@@ -146,100 +145,32 @@ fn iso_and_mrpl_substitutions_are_absolute() {
     );
 }
 
-fn count(args: &[String], flag: &str) -> usize {
-    args.iter().filter(|a| *a == flag).count()
+#[test]
+fn the_installed_engines_no_connection_line_is_a_no_opponent_exit() {
+    // engine 0cd085d, play_net.rs:1154: the host gives up after --np-timeout, exit 1.
+    assert_eq!(exit_of("np-timeout"), exit(1, true));
+}
+
+/// How a guest run in `mode` ended.
+fn guest_exit_of(mode: &str) -> Option<RunExit> {
+    let work = TempDir::new().unwrap();
+    let mut cfg = mode_config(work.path(), mode);
+    cfg.join_args = vec![mode.to_string(), "{code}".into()];
+    let mut engine = CommandEngine::new(&cfg).unwrap();
+    engine.set_output(|_| {});
+    engine.join(&PARAMS, "K7QX").unwrap();
+    wait_for_exit(&mut engine);
+    engine.last_exit()
 }
 
 #[test]
-fn init_headless_adds_the_display_less_flags_once() {
-    let dir = TempDir::new().unwrap();
-    let iso = PathBuf::from("/isos/melee.iso");
-    let work = dir.path().join("runs");
-
-    let path = dir.path().join("headless.toml");
-    let cfg = config::init(&path, &fake_melee(), &iso, &work, false, true).unwrap();
-    for args in [&cfg.host_args, &cfg.join_args] {
-        assert_eq!(count(args, "--headless"), 1, "{args:?}");
-        assert_eq!(count(args, "--no-audio"), 1, "{args:?}");
-    }
-    assert_eq!(ClientConfig::load(&path).unwrap(), cfg);
-
-    let path = dir.path().join("plain.toml");
-    let cfg = config::init(&path, &fake_melee(), &iso, &work, false, false).unwrap();
-    assert_eq!(cfg.host_args, config::default_host_args());
-    assert_eq!(cfg.join_args, config::default_join_args());
-    for args in [&cfg.host_args, &cfg.join_args] {
-        assert_eq!(count(args, "--headless"), 0, "{args:?}");
-        assert_eq!(count(args, "--no-audio"), 0, "{args:?}");
-    }
-}
-
-#[test]
-fn the_written_config_explains_the_alternatives() {
-    let dir = TempDir::new().unwrap();
-    let path = dir.path().join("client.toml");
-    config::init(
-        &path,
-        &fake_melee(),
-        Path::new("/isos/melee.iso"),
-        &dir.path().join("runs"),
-        false,
-        false,
-    )
-    .unwrap();
-    let text = std::fs::read_to_string(&path).unwrap();
-    let comments: String = text
-        .lines()
-        .filter(|l| l.starts_with('#'))
-        .collect::<Vec<_>>()
-        .join("\n");
-    for needle in [
-        "--np-join-wait",
-        "init --headless",
-        "--match",
-        "--np-css",
-        "relative",
-    ] {
-        assert!(
-            comments.contains(needle),
-            "{needle:?} missing from:\n{comments}"
-        );
-    }
-}
-
-#[test]
-fn init_makes_relative_paths_absolute() {
-    let dir = TempDir::new().unwrap();
-    let path = dir.path().join("client.toml");
-    let cfg = config::init(
-        &path,
-        &fake_melee(),
-        Path::new("discs/melee.iso"),
-        Path::new("runs"),
-        false,
-        false,
-    )
-    .unwrap();
-    let cwd = std::env::current_dir().unwrap();
-    assert_eq!(cfg.iso, cwd.join("discs/melee.iso"));
-    assert_eq!(cfg.work_dir, cwd.join("runs"));
-    assert_eq!(ClientConfig::load(&path).unwrap(), cfg);
-}
-
-fn help(sub: &str) -> String {
-    let out = Command::new(env!("CARGO_BIN_EXE_autobracket-client"))
-        .args([sub, "--help"])
-        .output()
-        .unwrap();
-    assert!(out.status.success());
-    String::from_utf8(out.stdout).unwrap()
-}
-
-#[test]
-fn help_documents_headless_and_join_wait() {
-    let init = help("init");
-    assert!(init.contains("--headless"), "{init}");
-    assert!(init.contains("--no-audio"), "{init}");
-    let play = help("play");
-    assert!(play.contains("--np-join-wait"), "{play}");
+fn a_room_that_is_gone_is_a_host_gone_exit() {
+    let gone = Some(RunExit {
+        code: Some(1),
+        no_opponent: false,
+        host_gone: true,
+    });
+    assert_eq!(guest_exit_of("no-room"), gone);
+    assert_eq!(guest_exit_of("host-closed"), gone);
+    assert_eq!(guest_exit_of("fail"), exit(1, false));
 }

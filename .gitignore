@@ -4,3 +4,12 @@ replays/
 *.iso
 .superpowers/
 .playwright-mcp/
+# Secrets and local configs: never commit a key or a filled-in server config.
+*.key
+/autobracket.toml
+auto.crt
+auto.key
+# Replays and engine recordings.
+*.slp
+*.slpz
+*.mrpl

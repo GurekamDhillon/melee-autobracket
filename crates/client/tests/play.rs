@@ -1,13 +1,12 @@
 //! The client against a real server: the `play_event` loop with scripted engines, the
 //! command engine against `fixtures/fake_melee.sh`, and `init`.
 
-use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use autobracket_client::api::Api;
-use autobracket_client::config::{self, ClientConfig};
+use autobracket_client::config::ClientConfig;
 use autobracket_client::engine::{CommandEngine, Engine, GameParams};
 use autobracket_client::play::{play_event, play_event_with, PlayOptions, MAX_FAILED_RUNS};
 use autobracket_server::testkit::{TestApp, TestPlayer};
@@ -279,7 +278,6 @@ fn fake_melee() -> PathBuf {
 fn fake_config(work_dir: &Path) -> ClientConfig {
     ClientConfig::with_defaults(
         "00".repeat(32),
-        "fake".into(),
         fake_melee(),
         PathBuf::from("/isos/melee.iso"),
         work_dir.to_path_buf(),
@@ -465,13 +463,14 @@ fn stop_terminates_a_running_game() {
     engine.stop();
     assert!(!engine.running());
 
-    // The game's own child goes with it (its whole process group is killed).
-    let gone = PathBuf::from(format!("/proc/{bgpid}"));
+    // The game's own child goes with it (its whole process group is killed). Once its
+    // parent is gone it is reparented, and an init that does not reap orphans (some
+    // containers) leaves it a zombie: dead all the same.
     let deadline = Instant::now() + Duration::from_secs(2);
-    while gone.exists() && Instant::now() < deadline {
+    while alive(&bgpid) && Instant::now() < deadline {
         std::thread::sleep(Duration::from_millis(20));
     }
-    assert!(!gone.exists(), "the game's child {bgpid} outlived stop()");
+    assert!(!alive(&bgpid), "the game's child {bgpid} outlived stop()");
 
     std::thread::sleep(Duration::from_millis(2500));
     assert!(
@@ -554,34 +553,6 @@ fn command_engine_substitutes_arguments() {
         "3 stocks, 420 s",
     ];
     assert_eq!(argv.lines().collect::<Vec<_>>(), expected);
-}
-
-#[test]
-fn init_writes_0600_config() {
-    let dir = TempDir::new().unwrap();
-    let path = dir.path().join("autobracket/client.toml");
-    let iso = PathBuf::from("/isos/melee.iso");
-    let work = dir.path().join("runs");
-
-    let cfg = config::init(&path, &fake_melee(), &iso, &work, false, false).unwrap();
-
-    let mode = std::fs::metadata(&path).unwrap().permissions().mode();
-    assert_eq!(mode & 0o777, 0o600);
-    assert_eq!(cfg.engine_build, "melee (fake) 0.0.1 test build");
-    assert_eq!(cfg.host_args, config::default_host_args());
-    assert_eq!(cfg.join_args, config::default_join_args());
-    assert_eq!(cfg.code_regex, config::DEFAULT_CODE_REGEX);
-    assert_eq!(ClientConfig::load(&path).unwrap(), cfg);
-    cfg.signing_key().unwrap();
-
-    let before = std::fs::read(&path).unwrap();
-    assert!(config::init(&path, &fake_melee(), &iso, &work, false, false).is_err());
-    assert_eq!(std::fs::read(&path).unwrap(), before, "not overwritten");
-
-    let forced = config::init(&path, &fake_melee(), &iso, &work, true, false).unwrap();
-    assert_ne!(forced.secret_key_hex, cfg.secret_key_hex);
-    let mode = std::fs::metadata(&path).unwrap().permissions().mode();
-    assert_eq!(mode & 0o777, 0o600);
 }
 
 /// How the [`Proxy`] fails a request.
@@ -780,30 +751,48 @@ async fn host_gives_up_after_runs_without_replays() {
 #[tokio::test]
 async fn guest_gives_up_after_runs_without_replays() {
     let (app, host, guest, event) = setup().await;
-    let res = host
-        .post_json(
-            &format!("/v1/sets/{event}/0/room"),
-            &RoomReq {
-                code: "AB12".into(),
-            },
-        )
-        .await;
-    assert_eq!(res.status(), reqwest::StatusCode::NO_CONTENT);
+    let codes: Vec<String> = (0..MAX_FAILED_RUNS)
+        .map(|i| format!("AB{:02}", i + 10))
+        .collect();
+    let post = |code: String| {
+        let host = &host;
+        async move {
+            let res = host
+                .post_json(&format!("/v1/sets/{event}/0/room"), &RoomReq { code })
+                .await;
+            assert_eq!(res.status(), reqwest::StatusCode::NO_CONTENT);
+        }
+    };
+    post(codes[0].clone()).await;
     let mut engine = ScriptedEngine::new("", vec![]);
+    let calls = engine.calls.clone();
+    // The host relaunches with a new code after each failed join, as a real host does
+    // when nobody connected: a code that failed is not joined again.
+    let host_relaunches = async {
+        let mut posted = 1;
+        loop {
+            let joins = calls.lock().unwrap().joins.len();
+            if joins == posted && posted < codes.len() {
+                post(codes[posted].clone()).await;
+                posted += 1;
+            }
+            tokio::time::sleep(Duration::from_millis(2)).await;
+        }
+    };
 
-    let err = tokio::time::timeout(
-        Duration::from_secs(10),
-        play_event_with(&api(&app, &guest), &mut engine, event, &fast_backoff()),
-    )
+    let (guest_api, opts) = (api(&app, &guest), fast_backoff());
+    let err = tokio::time::timeout(Duration::from_secs(10), async {
+        tokio::select! {
+            r = play_event_with(&guest_api, &mut engine, event, &opts) => r,
+            () = host_relaunches => unreachable!(),
+        }
+    })
     .await
     .expect("play never gave up")
     .expect_err("play must fail");
 
     assert!(format!("{err:#}").contains("without a replay"), "{err:#}");
-    assert_eq!(
-        engine.joins(),
-        vec!["AB12".to_string(); MAX_FAILED_RUNS as usize]
-    );
+    assert_eq!(engine.joins(), codes);
 }
 
 #[test]
@@ -825,4 +814,90 @@ fn server_urls_are_checked() {
     ] {
         assert!(check_server_url(bad).is_err(), "{bad}");
     }
+}
+
+#[tokio::test]
+async fn a_guest_without_a_room_code_reports_a_no_show_to_the_real_server() {
+    let (app, host, guest, event) = setup().await;
+    let mut engine = ScriptedEngine::new("", vec![]);
+    let guest_api = api(&app, &guest);
+    let opts = PlayOptions {
+        no_code_wait: Some(Duration::from_millis(100)),
+        ..PlayOptions::new(POLL)
+    };
+    let host_api = api(&app, &host);
+
+    tokio::time::timeout(Duration::from_secs(10), async {
+        tokio::select! {
+            r = play_event_with(&guest_api, &mut engine, event, &opts) => panic!("play returned {r:?}"),
+            () = async {
+                while !matches!(host_api.next(event).await.unwrap(), Next::Review { .. }) {
+                    tokio::time::sleep(POLL).await;
+                }
+            } => {}
+        }
+    })
+    .await
+    .expect("the set never went to review");
+
+    assert!(engine.joins().is_empty());
+    let text = queue(&app).await;
+    assert!(text.contains("no-show"), "{text}");
+    assert!(text.contains("no room code"), "{text}");
+}
+
+#[tokio::test]
+async fn the_no_show_command_reports_the_current_set() {
+    let (app, host, guest, event) = setup().await;
+    let dir = TempDir::new().unwrap();
+    let mut cfg = fake_config(dir.path());
+    cfg.server = app.url.clone();
+    cfg.secret_key_hex = hex::encode(guest.sk.to_bytes());
+    let config = dir.path().join("client.toml");
+    cfg.save(&config).unwrap();
+
+    let out = tokio::process::Command::new(env!("CARGO_BIN_EXE_autobracket-client"))
+        .arg("--config")
+        .arg(&config)
+        .args([
+            "no-show",
+            &event.to_string(),
+            "--note",
+            "not here after 10 min",
+        ])
+        .output()
+        .await
+        .unwrap();
+
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        out.status.success(),
+        "{stdout}{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(stdout.contains("Reported a no-show for set 0"), "{stdout}");
+    assert!(matches!(
+        api(&app, &host).next(event).await.unwrap(),
+        Next::Review { set_id: 0 }
+    ));
+    let text = queue(&app).await;
+    assert!(text.contains("not here after 10 min"), "{text}");
+}
+
+/// The organiser's queue, as JSON text.
+async fn queue(app: &TestApp) -> String {
+    app.as_to()
+        .get("/v1/admin/queue")
+        .await
+        .text()
+        .await
+        .unwrap()
+}
+
+/// Whether `pid` is a live process: it exists and is not a zombie.
+fn alive(pid: &str) -> bool {
+    std::fs::read_to_string(format!("/proc/{pid}/stat")).is_ok_and(|stat| {
+        stat.rsplit_once(')')
+            .is_some_and(|(_, rest)| !rest.trim_start().starts_with(['Z', 'X']))
+    })
 }

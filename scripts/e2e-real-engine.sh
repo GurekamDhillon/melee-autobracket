@@ -173,10 +173,10 @@ paths, np_port, host_match, guest_match, mode = sys.argv[1:3], sys.argv[3], sys.
 common_tail = ["--np-lan", "127.0.0.1", "--np-bind", "127.0.0.1",
                "--record", "{mrpl}", "--slp", "auto",
                "--time-secs", "{timer_secs}", "--max-frames", "9000"]
-host = ["play", "--iso", "{iso}", "--headless", "--no-audio",
+host = ["play", "--iso", "{iso}", "--verify-disc", "--headless", "--no-audio",
         "--netplay", "host", "--np-server", "{relay}", "--np-port", np_port,
         "--match", host_match, "--np-seed", "4242"] + common_tail
-join = ["play", "--iso", "{iso}", "--headless", "--no-audio",
+join = ["play", "--iso", "{iso}", "--verify-disc", "--headless", "--no-audio",
         "--netplay", "join", "{code}", "--np-server", "{relay}",
         "--match", guest_match] + common_tail
 for path in paths:
@@ -187,7 +187,7 @@ for path in paths:
         cfg["join_args"] += ["--headless", "--no-audio"]
     else:
         cfg["host_args"], cfg["join_args"] = host, join
-    # TOML basic strings and string arrays are valid JSON literals.
+    # TOML basic strings, integers, booleans and string arrays are valid JSON literals.
     out = "".join(f"{k} = {json.dumps(v)}\n" for k, v in cfg.items())
     with open(path, "w") as f:  # keeps the file's 0600 mode
         f.write(out)

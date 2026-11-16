@@ -1,20 +1,34 @@
 //! Running the game. [`Engine`] is what the play loop needs; [`CommandEngine`] runs the
 //! real `melee` binary.
+//!
+//! How a run ended is read from what the engine printed (checked against the engine at
+//! commit 0cd085d, branch port/candidate12, `rust/melee/src/play.rs` and `play_net.rs`):
+//! - A host nobody joined within `--np-timeout` (default 60 s) prints
+//!   `play: netplay host: no connection after N s (...)` and exits 1. Builds with
+//!   `--np-join-wait` (engine branch port/np-nameentry) print `play: netplay: no opponent
+//!   joined` and exit 5. Either line means nobody joined; the exit code alone never does.
+//! - A guest whose code names no room prints `play: netplay guest: no room with that code`;
+//!   one whose host closed the room, `play: netplay guest: The host closed the room`. Both
+//!   exit 1. Neither is the guest's own failure.
+//! - Exit 4 only with `--verify-disc`: the disc image is not NTSC 1.02 Melee.
+//! - Exit 2: a usage error (no `--iso`, a bad display option, a bad offline `--match`).
+//!   Unknown flags are ignored, not refused.
 
 use std::fs::{File, OpenOptions};
-use std::io::{ErrorKind, Read};
+use std::io::{ErrorKind, Read, Seek, SeekFrom};
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::{bail, Context};
 use regex::Regex;
 
 use crate::config::ClientConfig;
+use crate::session::{self, ProcId, Record};
 
 /// The set's rules and relay, the same for both peers.
 pub struct GameParams<'a> {
@@ -23,13 +37,21 @@ pub struct GameParams<'a> {
     pub timer_secs: u32,
 }
 
-/// The line the engine prints on stderr when it was hosting and no guest joined within its
-/// `--np-join-wait` (it then exits 5, but only this line decides a no-show).
+/// The line an engine with `--np-join-wait` prints when it was hosting and no guest joined
+/// in time (it then exits 5).
 pub const NO_OPPONENT_LINE: &str = "play: netplay: no opponent joined";
-/// The engine's exit status when its disc check failed: the configured `iso` is not a
-/// usable game image.
+/// The start of the line the installed engine (0cd085d) prints when it was hosting and no
+/// guest connected within `--np-timeout` (it then exits 1): `play_net.rs:1154`.
+pub const HOST_NO_CONNECTION_PREFIX: &str = "play: netplay host: no connection after ";
+/// Lines a guest's engine prints when the room it was sent to is gone: `melee_relay`'s
+/// `ERR no room with that code`, and the host's `BYE`.
+pub const HOST_GONE_LINES: [&str; 2] = [
+    "play: netplay guest: no room with that code",
+    "play: netplay guest: The host closed the room",
+];
+/// The engine's exit status when `--verify-disc` found the disc image unusable.
 pub const DISC_CHECK_EXIT_CODE: i32 = 4;
-/// The engine's exit status for a usage error, such as an argument it does not know.
+/// The engine's exit status for a usage error.
 pub const USAGE_EXIT_CODE: i32 = 2;
 /// How many lines of the log [`RunSetup::log_tail`] holds.
 const LOG_TAIL_LINES: usize = 10;
@@ -37,11 +59,13 @@ const LOG_TAIL_LINES: usize = 10;
 /// How a run ended.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct RunExit {
-    /// The exit status; `None` when the process was ended by a signal.
+    /// The exit status; `None` when the process was ended by a signal, or was adopted from
+    /// an earlier `play` (its status cannot be known).
     pub code: Option<i32>,
-    /// The game gave up because nobody joined: it printed [`NO_OPPONENT_LINE`]. The exit
-    /// code alone never decides this.
+    /// A host run that ended because nobody joined (one of the engine's lines for it).
     pub no_opponent: bool,
+    /// A guest run that ended because the room was gone (one of [`HOST_GONE_LINES`]).
+    pub host_gone: bool,
 }
 
 /// What the last run was started with, for explaining a failure caused by the player's
@@ -83,6 +107,20 @@ pub trait Engine {
     fn last_setup(&self) -> RunSetup {
         RunSetup::default()
     }
+    /// The directory run directories go in, if this engine has one; `play` keeps its lock
+    /// and session file there.
+    fn work_dir(&self) -> Option<PathBuf> {
+        None
+    }
+    /// The current run's process, for the session file.
+    fn process(&self) -> Option<ProcId> {
+        None
+    }
+    /// Takes over the still-running game `record` describes, as if this engine had started
+    /// it. `false` (and nothing changes) unless it is provably that process.
+    fn adopt(&mut self, _record: &Record) -> anyhow::Result<bool> {
+        Ok(false)
+    }
 }
 
 /// Runs `{melee}` with `host_args` or `join_args`. Each argument has `{iso}`, `{relay}`,
@@ -111,10 +149,21 @@ type Output = Arc<dyn Fn(&str) + Send + Sync>;
 /// How often the log is checked for new output.
 const TAIL_INTERVAL: Duration = Duration::from_millis(50);
 
+/// The game process of a run.
+enum Proc {
+    /// Started by this engine.
+    Child(Child),
+    /// Started by an earlier `play` and taken over; not this process's child, so its exit
+    /// status is unknown and it is watched through `/proc`.
+    Adopted,
+}
+
 struct Run {
     dir: PathBuf,
     /// `None` once the process has exited.
-    child: Option<Child>,
+    proc: Option<Proc>,
+    /// The process, as recorded in the session file.
+    id: Option<ProcId>,
     /// Room codes found in the process's output.
     codes: Receiver<String>,
     code: Option<String>,
@@ -207,24 +256,34 @@ impl CommandEngine {
             .process_group(0)
             .spawn()
             .with_context(|| format!("starting {}", self.melee.display()))?;
+        // Read before anything waits on the child, so even a run that has already exited
+        // is still there to read (as a zombie).
+        let id = ProcId::of(child.id());
+        let (codes, done) = self.follow(log_reader);
+        self.run = Some(Run {
+            dir,
+            proc: Some(Proc::Child(child)),
+            id,
+            codes,
+            code: None,
+            done,
+        });
+        Ok(())
+    }
+
+    /// Starts a thread following `log` from its current position.
+    fn follow(&self, log: File) -> (Receiver<String>, Arc<AtomicBool>) {
         let (tx, codes) = mpsc::channel();
         let done = Arc::new(AtomicBool::new(false));
         let tail = Tail {
-            file: log_reader,
+            file: log,
             regex: self.code_regex.clone(),
             output: self.output.clone(),
             codes: tx,
             done: done.clone(),
         };
         std::thread::spawn(move || tail.run());
-        self.run = Some(Run {
-            dir,
-            child: Some(child),
-            codes,
-            code: None,
-            done,
-        });
-        Ok(())
+        (codes, done)
     }
 
     /// Creates the first free `{work_dir}/run-{n}/`, counting from 1.
@@ -271,28 +330,32 @@ impl Engine for CommandEngine {
         let Some(run) = self.run.as_mut() else {
             return false;
         };
-        let Some(child) = run.child.as_mut() else {
-            return false;
-        };
-        match child.try_wait() {
-            Ok(None) => true,
-            Ok(Some(status)) => {
-                if !status.success() {
-                    eprintln!("the game exited with {status}");
+        let code = match run.proc.as_mut() {
+            None => return false,
+            Some(Proc::Child(child)) => match child.try_wait() {
+                Ok(None) => return true,
+                Ok(Some(status)) => {
+                    if !status.success() {
+                        eprintln!("the game exited with {status}");
+                    }
+                    status.code()
                 }
-                run.child = None;
-                run.done.store(true, Ordering::Release);
-                self.last_exit = Some(run_exit(status.code(), &run.dir));
-                false
+                Err(e) => {
+                    eprintln!("checking on the game: {e}");
+                    None
+                }
+            },
+            Some(Proc::Adopted) => {
+                if run.id.as_ref().is_some_and(ProcId::is_running) {
+                    return true;
+                }
+                None
             }
-            Err(e) => {
-                eprintln!("checking on the game: {e}");
-                run.child = None;
-                run.done.store(true, Ordering::Release);
-                self.last_exit = Some(run_exit(None, &run.dir));
-                false
-            }
-        }
+        };
+        run.proc = None;
+        run.done.store(true, Ordering::Release);
+        self.last_exit = Some(run_exit(code, &run.dir));
+        false
     }
 
     fn take_replays(&mut self) -> anyhow::Result<Vec<PathBuf>> {
@@ -302,26 +365,32 @@ impl Engine for CommandEngine {
         let Some(run) = self.run.take() else {
             return Ok(Vec::new());
         };
-        let mut replays = Vec::new();
-        for entry in
-            std::fs::read_dir(&run.dir).with_context(|| format!("reading {}", run.dir.display()))?
-        {
-            let path = entry?.path();
-            if path.extension().is_some_and(|e| e == "slp") && path.is_file() {
-                replays.push(path);
-            }
-        }
-        // `Game_<UTC timestamp>.slp`, so name order is time order.
-        replays.sort();
-        Ok(replays)
+        session::replays_in(&run.dir)
     }
 
     fn stop(&mut self) {
         self.last_exit = None;
         if let Some(mut run) = self.run.take() {
-            if let Some(child) = run.child.as_mut() {
-                kill_group(child);
-                let _ = child.wait();
+            match run.proc.as_mut() {
+                Some(Proc::Child(child)) => {
+                    kill_group(child);
+                    let _ = child.wait();
+                }
+                Some(Proc::Adopted) => {
+                    if let Some(id) = run.id.as_ref().filter(|id| id.is_running()) {
+                        // SAFETY: `killpg` only sends a signal. The identity was checked
+                        // just above, so this is still the game's own group.
+                        unsafe {
+                            libc::killpg(id.pgid, libc::SIGKILL);
+                        }
+                        // Not this process's child: wait for it to go, briefly.
+                        let deadline = Instant::now() + Duration::from_secs(2);
+                        while id.is_running() && Instant::now() < deadline {
+                            std::thread::sleep(Duration::from_millis(20));
+                        }
+                    }
+                }
+                None => {}
             }
         }
     }
@@ -361,19 +430,66 @@ impl Engine for CommandEngine {
             log_tail: tail,
         }
     }
+
+    fn work_dir(&self) -> Option<PathBuf> {
+        Some(self.work_dir.clone())
+    }
+
+    fn process(&self) -> Option<ProcId> {
+        self.run.as_ref().and_then(|r| r.id.clone())
+    }
+
+    fn adopt(&mut self, record: &Record) -> anyhow::Result<bool> {
+        if self.running() || !record.process.is_running_in(&record.run_dir) {
+            return Ok(false);
+        }
+        let log_path = record.run_dir.join("engine.log");
+        let mut log =
+            File::open(&log_path).with_context(|| format!("opening {}", log_path.display()))?;
+        // What it printed before: only its room code is wanted (it may not have reached
+        // the server yet). Then follow the log from here on.
+        let mut before = Vec::new();
+        log.read_to_end(&mut before)
+            .with_context(|| format!("reading {}", log_path.display()))?;
+        let code = String::from_utf8_lossy(&before)
+            .lines()
+            .find_map(|l| capture_code(&self.code_regex, l));
+        log.seek(SeekFrom::End(0))
+            .with_context(|| format!("reading {}", log_path.display()))?;
+        let (codes, done) = self.follow(log);
+        self.last_exit = None;
+        self.last_run = Some((record.run_dir.clone(), Vec::new()));
+        self.run = Some(Run {
+            dir: record.run_dir.clone(),
+            proc: Some(Proc::Adopted),
+            id: Some(record.process.clone()),
+            codes,
+            code,
+            done,
+        });
+        Ok(true)
+    }
 }
 
 /// How a run in `dir` that exited with `code` ended, from its `engine.log`.
 fn run_exit(code: Option<i32>, dir: &Path) -> RunExit {
-    let printed = std::fs::read(dir.join("engine.log")).is_ok_and(|log| {
-        String::from_utf8_lossy(&log)
-            .lines()
-            .any(|l| l.trim_end() == NO_OPPONENT_LINE)
-    });
-    RunExit {
+    let log = std::fs::read(dir.join("engine.log"))
+        .map(|b| String::from_utf8_lossy(&b).into_owned())
+        .unwrap_or_default();
+    let mut exit = RunExit {
         code,
-        no_opponent: printed,
+        no_opponent: false,
+        host_gone: false,
+    };
+    for line in log.lines().map(str::trim_end) {
+        if line == NO_OPPONENT_LINE || line.starts_with(HOST_NO_CONNECTION_PREFIX) {
+            exit.no_opponent = true;
+        }
+        if HOST_GONE_LINES.contains(&line) {
+            exit.host_gone = true;
+        }
     }
+    exit
 }
 
 impl Drop for CommandEngine {
@@ -403,6 +519,13 @@ fn kill_group(child: &mut Child) {
             let _ = child.kill();
         }
     }
+}
+
+fn capture_code(regex: &Regex, line: &str) -> Option<String> {
+    let c = regex.captures(line)?;
+    c.get(1)
+        .or_else(|| c.get(0))
+        .map(|m| m.as_str().to_string())
 }
 
 /// Follows a run's `engine.log`: forwards each line and sends each room code found.
@@ -453,10 +576,8 @@ impl Tail {
         let line = String::from_utf8_lossy(raw);
         let line = line.trim_end_matches(['\n', '\r']);
         (self.output)(line);
-        if let Some(c) = self.regex.captures(line) {
-            if let Some(code) = c.get(1).or_else(|| c.get(0)) {
-                let _ = self.codes.send(code.as_str().to_string());
-            }
+        if let Some(code) = capture_code(&self.regex, line) {
+            let _ = self.codes.send(code);
         }
     }
 }

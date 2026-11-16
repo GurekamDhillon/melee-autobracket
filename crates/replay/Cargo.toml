@@ -2,6 +2,8 @@
 name = "replay"
 edition.workspace = true
 version.workspace = true
+rust-version.workspace = true
+publish = false
 
 [features]
 # Exposes `testkit::SlpBuilder` so other crates can fabricate replays in their tests.

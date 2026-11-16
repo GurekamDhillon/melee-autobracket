@@ -1,7 +1,13 @@
 # Real-engine end-to-end run
 
-Date: 2026-11-15. Machine: the dev server (8 cores, 22 GB RAM, no GPU, no display: neither
-`DISPLAY` nor `WAYLAND_DISPLAY` is set).
+Date: 2026-11-15. Machine: the development server (8 cores, 22 GB RAM, no GPU, no display:
+neither `DISPLAY` nor `WAYLAND_DISPLAY` is set). Every path in this record (`/home/gd/...`) is
+from that development machine; substitute your own.
+
+This is the record of one run at one commit. The section "Defects found" says which defects
+are fixed or still open as of the final fix wave (2026-11-15); the rest describes the code as
+it was then (e.g. the client templates have since gained `--verify-disc`, and `init --match`
+writes the `--match` start).
 
 | | |
 |---|---|
@@ -92,7 +98,7 @@ Server (`deploy/autobracket.example.toml` defaults): `bind`, `db_path`, `replay_
 (only head-room; slpcheck takes ~2.4 s); `[ruleset] timer_secs = 60, best_of = 1, best_of_finals = 1`
 to match the scripted game. Nothing else.
 
-Client `host_args` / `join_args` (defaults in `crates/client/src/config.rs:55-85`):
+Client `host_args` / `join_args` (the defaults in `crates/client/src/config.rs` at that commit):
 
 | default flag | --match run (default mode) | why |
 |---|---|---|
@@ -102,7 +108,7 @@ Client `host_args` / `join_args` (defaults in `crates/client/src/config.rs:55-85
 | (none) | `--match falcon,32` (host) / `--match fox` (guest) | Picks fighters and stage without menus. |
 | `--stocks {stocks}` | dropped (kept would also work) | Experiment D3: `--stocks 4 --time-secs 60` with `--match` plays the same 4-stock / 60 s game (`np_rules=s4,t60`), replay judged identically. Without `--stocks` the scene is still `match=stock;stocks=4`. |
 | `--time-secs {timer_secs}` | kept | The guest's value is replaced by the host's anyway (`the host's rules: ... time 60 s`). |
-| (none) | `--np-lan 127.0.0.1 --np-bind 127.0.0.1` | Keeps all traffic on loopback as required here. Without them (D2, D3) the host advertised the machine's public address (`dialling 192.99.42.92:...`) and it still connected on this machine. |
+| (none) | `--np-lan 127.0.0.1 --np-bind 127.0.0.1` | Keeps all traffic on loopback as required here. Without them (D2, D3) the host advertised the machine's public address (`dialling <public address>:...`) and it still connected on this machine. |
 | (none) | `--np-port 51712`, `--np-seed 4242`, `--max-frames 9000` | Recipe fidelity and a hard stop; not required. |
 
 Pad scripts differ per role, so they cannot go in the shared templates: each client process gets its
@@ -280,52 +286,49 @@ was `counted` / `Verified` / `Match`, event complete, `Champion` / `Eliminated`.
 
 ## Defects found
 
-Severity is for a real tournament.
+Severity is for a real tournament. Status as of the final fix wave (2026-11-15).
 
 1. **Engine panic on the name-entry screen, reachable from the netplay character select
-   (engine; medium).** Experiment D2: the client's default templates (`--np-css
-   --quit-after-matches 1`) plus `--headless --no-audio`, with the fight pad scripts. The lockstep
-   menus went `css` -> `menu` (tick 439) -> `css` -> `menu` (tick 1011) -> name entry, and both
-   peers aborted identically (exit 134):
+   (engine; medium). OPEN in the installed engine (0cd085d); fixed on engine branch
+   `port/np-nameentry`, which also adds `--np-no-name-entry`.** Experiment D2: the client's
+   default templates (`--np-css --quit-after-matches 1`) plus `--headless --no-audio`, with the
+   fight pad scripts. The lockstep menus went `css` -> `menu` (tick 439) -> `css` -> `menu`
+   (tick 1011) -> name entry, and both peers aborted identically (exit 134):
    `thread 'main' panicked at melee_modes/src/tu/mnnamenew.rs:1842:13: index out of bounds: the len is 8 but the index is 8`
    in `mnNameNew_MainInput` -> `WriteCharactersForNameAtIndex` (`(*nametag).namedata[idx]` with no
    bound on `idx`). Because the menus run in lockstep, one player's input crashes both games. A
    real player can reach name entry from the CSS. Crash reports:
    `crashlogs/crash-20261116-005909-1705083.log` (host) and `-1705097.log` (guest).
-2. **A no-show never reaches the organiser (server; medium).** Nothing on the server times out a
-   `ready` set whose game is never played. When the guest never joins, the host client relaunches
-   (each run times out after the engine's 60 s `--np-timeout`), and after
-   `MAX_FAILED_RUNS = 4` runs (`crates/client/src/play.rs:20`, bail at `:150`) `play` exits with an
-   error, while the set stays `ready` with no queue item. Seen in (a3). The organiser has to notice
-   by watching the bracket.
-3. **The server logs nothing about the tournament (server; medium for operations).** Across every
-   run `server.log` held only `listening on 127.0.0.1:18311`: no registrations, room codes,
-   uploads, verdicts, queue items or re-simulation times. The worker prints only on errors
-   (`crates/server/src/worker.rs:27`, `:140`, `:171`). To get the timeline above I had to poll SQLite.
-4. **`verifier_build` is stamped on games that were never re-simulated (server; low).**
-   `crates/server/src/worker.rs:164`: `Pre::Final(v) => (v, None, ResimOutcome::Skipped, st.resim.build())`.
-   The `Illegal` and `Single` games carry `verifier_build = melee (rust) 0.1.0 development build+339fd9aabad8`
-   with `resim_json = "Skipped"`, and `quarantine list` shows it too, which reads as if that build
-   checked them.
-5. **No judged/counted timestamp; upload times in whole seconds (server schema; low).**
-   `crates/server/migrations/0001_init.sql` `games` has no time of verdict, and `uploads.uploaded_at`
-   is in whole seconds. You cannot audit from the database how long judging took.
-6. **The engine runs in the client's working directory (client; low).** `crates/client/src/engine.rs:142`
-   spawns the game without `current_dir`, so anything the engine writes relative to its working
-   directory (its `crashlogs/` folder) goes to wherever the player started `autobracket-client`,
-   not the run directory. In D2 the crash reports landed in the cwd; `engine.log` only says
-   `crash report written to crashlogs/...`.
-7. **Killing `play` (SIGTERM / Ctrl+C) leaves no hint about the game it leaves running (client;
-   low).** The game keeps running and writes its replay to `work/run-N/` (good, intentional), but
-   `report_unfinished` (`crates/client/src/play.rs:196`) runs only when `run` returns an error,
-   not on a signal, and `CommandEngine::drop` does not run on a signal either. In (a) the guest's
-   `play.log` ends at `Joining room ...`. The player is not told the `upload` command, and an
-   upload after `upload_timeout_secs` is refused anyway (409, (a3)).
-8. **An awarded set reports a 0-0 score (server; cosmetic).** After `award --slot 0` the set is
-   `done` with `wins0 = wins1 = 0`, so `scores` says `[0, [0, 0]]` next to `Done {winner: 0}`.
-9. **README inaccuracies (docs; low).** The README says the whole `.slp` files differ because
-   each peer stamps its own start time, but every real pair here was byte-identical. It also says
-   re-simulation runs at "roughly 40x realtime", but measured here it was about 22x.
+   Client side: `init` now warns about it and `init --match FIGHTER[,STAGE]` writes the
+   `--match` start.
+2. **A no-show never reaches the organiser (server and client; medium). FIXED.** At the time,
+   nothing on the server timed out a `ready` set whose game was never played, and the client
+   gave up after `MAX_FAILED_RUNS` runs without telling anyone (seen in (a3)). Now the server
+   has a no-show route and flags idle sets (`set_stall_secs`), and the client reports a
+   no-show when the installed engine prints `netplay host: no connection after N s` twice,
+   when a guest has had no room code for `no_code_wait_secs`, and on `autobracket-client
+   no-show`. Its own repeated failures are reported as `client-failure`.
+3. **The server logs nothing about the tournament (server; medium for operations). FIXED.**
+   At the time `server.log` held only `listening on 127.0.0.1:18311`. The server now logs one
+   line per registration, room code (never the code), upload, verdict, queue item and
+   re-simulation, with timings.
+4. **`verifier_build` was stamped on games that were never re-simulated (server; low).
+   FIXED.** It is now recorded only when the engine actually re-simulated the game.
+5. **No judged/counted timestamp; upload times in whole seconds (server schema; low). PARTLY
+   FIXED.** `games.judged_at` was added (migration 0002); `uploads.uploaded_at` is still whole
+   seconds.
+6. **The engine ran in the client's working directory (client; low). FIXED.** Each game now
+   runs in its own run directory, so its `crashlogs/` land there.
+7. **Killing `play` left no hint about the game it left running (client; low). FIXED.** On
+   SIGINT/SIGTERM `play` prints the run directory and the `upload` command. Since the final
+   fix wave, running `play` again takes the game over (or uploads the replay of a game that
+   ended in the meantime) instead of starting a second one.
+8. **An awarded set reported a bare 0-0 score (server; cosmetic). FIXED.** The event view
+   carries `decided_by` and the page tags such sets "awarded" or "DQ"; the score still counts
+   only the games played before the decision.
+9. **README inaccuracies (docs; low). FIXED.** The README said the whole `.slp` files differ
+   by start time (every real pair here was byte-identical) and gave a re-simulation speed of
+   about 40x realtime (measured: about 20x).
 
 Not defects, noted for operators: the client calls the first set "Set 0" (bracket ids start at 0);
 `GET /v1/events/{id}` has no champion field (the page computes one); `resolve replay` and

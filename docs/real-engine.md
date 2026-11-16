@@ -3,7 +3,8 @@
 What happens when the verifier runs against the real game engine and real replay files rather
 than the fake engine script and fabricated replays. Measured on 2026-11-15 on the VPS ("server",
 8 vCPU, Debian 13). The tests are in `crates/server/tests/real_engine.rs`. Every test is
-`#[ignore]`, so a plain `cargo test` skips them.
+`#[ignore]`, so a plain `cargo test` skips them. The paths below (`~`, `/home/gd/...`) are from
+that development machine; substitute your own.
 
 ## Engine and inputs
 
@@ -502,8 +503,9 @@ file) and add it, in lowercase, to the ruleset:
 allowed_gecko = ["<64 lowercase hex characters>"]
 ```
 
-An entry in uppercase, or with spaces, never matches. `proto::ruleset::is_gecko_hash` checks the
-shape of an entry (config validation does not call it yet).
+An entry in uppercase, or with spaces, never matches, so the server refuses one: the ruleset is
+checked (`Ruleset::validate`, which uses `proto::ruleset::is_gecko_hash` for every entry) at
+start-up and when an event is created.
 
 ## What this means for running an event
 
@@ -513,7 +515,7 @@ shape of an entry (config validation does not call it yet).
   Here that was checked on the replay files of two real games (a clean one and one with 40 ms
   lag and 5 % packet loss): `pre_judge`, then the real `Slpcheck`, then `finish`, called
   directly by `pre_judge_then_finish_is_verified`. That is not the full loop through a running
-  server and clients; `docs/real-engine-e2e.md` on the main branch covers that.
+  server and clients; `docs/real-engine-e2e.md` covers that.
 - **What goes to the organiser:** a game where only one player uploaded (`Single`). Also a game
   that ended by disconnect or by both players quitting without a winner (`Undecided`), a game
   with the wrong rules, stage, ports or a Gecko list that is not on the allow-list (`Illegal`),
@@ -524,8 +526,9 @@ shape of an entry (config validation does not call it yet).
   is already per replay.
 - **A misconfigured verifier is caught (F2, fixed):** a missing, unreadable or too-small disc
   image, or an engine that cannot run, stops the server (`in_process`) or `verify-worker` at start-up with the
-  path in the error. A disc that disappears later makes games `PeerOnly`, not
-  `VerifiedInexact`.
+  path in the error. A disc that disappears later makes games `PeerOnly` (counted, and shown
+  in the event's `unverified_games`), or with `strict_resim = true` sends them to the organiser
+  as `VerifierUnavailable`; never `VerifiedInexact`.
 - **How long verification takes:** about 1 s of one core per 20 s of game time (about 19x real
   time). A typical 3-minute game is checked in about 10 s. A full 8-minute timeout game takes
   about 25 s. A 32-player double-elimination night of about 150 games is about 25 minutes of one

@@ -5,10 +5,16 @@ Wants=network-online.target
 
 [Service]
 ExecStart=/usr/local/bin/autobracket serve --config /etc/autobracket/autobracket.toml
+# The engine's relative files (its crashlogs/ folder) and any relative path in the config
+# land here, the service's own state directory, not in the read-only /.
+WorkingDirectory=/var/lib/autobracket
 Restart=always
 RestartSec=2
 # Log level (tracing filter); logs go to stderr, i.e. the journal.
 Environment=AUTOBRACKET_LOG=info
+# DynamicUser: the service runs as a fresh unprivileged user. An in_process verifier's
+# engine and disc image must be readable by that user (e.g. world-readable files under
+# /opt/melee); ProtectHome hides home directories entirely.
 DynamicUser=yes
 StateDirectory=autobracket
 NoNewPrivileges=yes

@@ -1,7 +1,7 @@
 //! Signed calls to the bracket server, one method per route.
 
 use std::fmt;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::Context;
 use proto::{
@@ -65,6 +65,67 @@ fn transport(what: &str, e: &reqwest::Error) -> anyhow::Error {
     .into()
 }
 
+/// A warning when `server` is plain `http://` to a host that is not this machine: requests
+/// and answers (room codes, the relay address the game connects to) cross the network
+/// unauthenticated and in the clear.
+pub fn insecure_server_warning(server: &str) -> Option<String> {
+    let url = reqwest::Url::parse(server).ok()?;
+    if url.scheme() != "http" {
+        return None;
+    }
+    let host = url.host_str()?;
+    let ip = host.trim_start_matches('[').trim_end_matches(']');
+    let loopback = host.eq_ignore_ascii_case("localhost")
+        || ip
+            .parse::<std::net::IpAddr>()
+            .is_ok_and(|ip| ip.is_loopback());
+    (!loopback).then(|| {
+        format!(
+            "warning: {server} is plain http; anyone on the path can read your room codes and \
+             change what the server tells your client. Ask the organiser for an https:// address."
+        )
+    })
+}
+
+/// How long a call may take.
+#[derive(Clone, Copy, Debug)]
+pub struct Timeouts {
+    /// To open the connection.
+    pub connect: Duration,
+    /// For a whole request, answer included.
+    pub request: Duration,
+    /// For a whole replay upload.
+    pub upload: Duration,
+}
+
+impl Default for Timeouts {
+    /// 10 s to connect, 30 s per request, 120 s per replay upload.
+    fn default() -> Self {
+        Timeouts {
+            connect: Duration::from_secs(10),
+            request: Duration::from_secs(30),
+            upload: Duration::from_secs(120),
+        }
+    }
+}
+
+/// Why a no-show is reported: the opponent did not turn up (`no-show`), or this client
+/// could not get a game going (`client-failure`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NoShowKind {
+    NoShow,
+    ClientFailure,
+}
+
+impl NoShowKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            NoShowKind::NoShow => "no-show",
+            NoShowKind::ClientFailure => "client-failure",
+        }
+    }
+}
+
 /// Checks that `server` is an absolute `http://` or `https://` URL with a host.
 pub fn check_server_url(server: &str) -> anyhow::Result<()> {
     let url = reqwest::Url::parse(server).with_context(|| {
@@ -81,16 +142,34 @@ pub struct Api {
     sk: SigningKey,
     engine_build: String,
     http: reqwest::Client,
+    upload_timeout: Duration,
 }
 
 impl Api {
-    /// `server` is the base URL, e.g. `http://127.0.0.1:8080`.
+    /// `server` is the base URL, e.g. `http://127.0.0.1:8080`; `engine_build` is sent at
+    /// sign-up and with each replay. Uses the default [`Timeouts`].
     pub fn new(server: &str, sk: SigningKey, engine_build: &str) -> Self {
+        Self::with_timeouts(server, sk, engine_build, Timeouts::default())
+    }
+
+    pub fn with_timeouts(
+        server: &str,
+        sk: SigningKey,
+        engine_build: &str,
+        timeouts: Timeouts,
+    ) -> Self {
+        let http = reqwest::Client::builder()
+            .connect_timeout(timeouts.connect)
+            .timeout(timeouts.request)
+            .build()
+            // Fails only if the TLS backend cannot start: nothing a caller could act on.
+            .expect("building the HTTP client");
         Api {
             base: server.trim_end_matches('/').to_string(),
             sk,
             engine_build: engine_build.to_string(),
-            http: reqwest::Client::new(),
+            http,
+            upload_timeout: timeouts.upload,
         }
     }
 
@@ -136,23 +215,29 @@ impl Api {
             .map(drop)
     }
 
-    /// `POST /v1/sets/{event}/{set}/no-show`: the opponent never turned up. On success the
-    /// set goes to the organiser's review. The server answers `409` when the set is already
-    /// in review, not ready, or has a game in progress; a server without the route, `404`.
+    /// `POST /v1/sets/{event}/{set}/no-show`: the set cannot be played, for `kind`'s reason.
+    /// On success the set goes to the organiser's review. The server answers `409` when the
+    /// set is already in review, not ready, or has a game in progress, or (for `no-show`)
+    /// when a room code was posted moments ago; a server without the route, `404`.
     pub async fn report_no_show(
         &self,
         event: i64,
         set: u32,
         detail: Option<&str>,
+        kind: NoShowKind,
     ) -> anyhow::Result<()> {
         #[derive(Serialize)]
         struct NoShowReq<'a> {
             #[serde(skip_serializing_if = "Option::is_none")]
             detail: Option<&'a str>,
+            kind: &'static str,
         }
         self.post_json(
             &format!("/v1/sets/{event}/{set}/no-show"),
-            &NoShowReq { detail },
+            &NoShowReq {
+                detail,
+                kind: kind.as_str(),
+            },
         )
         .await
         .map(drop)
@@ -169,11 +254,12 @@ impl Api {
     ) -> anyhow::Result<StatusCode> {
         let path = format!("/v1/sets/{event}/{set}/games/{n}/replay");
         let res = self
-            .send(
+            .send_with(
                 Method::POST,
                 &path,
                 slp,
                 &[("x-ab-build", self.engine_build.as_str())],
+                Some(self.upload_timeout),
             )
             .await?;
         Ok(res.status())
@@ -206,13 +292,26 @@ impl Api {
         .await
     }
 
-    /// Signs and sends a request; a non-2xx status becomes an [`ApiError`].
     async fn send(
         &self,
         method: Method,
         path_and_query: &str,
         body: Vec<u8>,
         headers: &[(&str, &str)],
+    ) -> anyhow::Result<reqwest::Response> {
+        self.send_with(method, path_and_query, body, headers, None)
+            .await
+    }
+
+    /// Signs and sends a request (with its own `timeout`, if given); a non-2xx status
+    /// becomes an [`ApiError`].
+    async fn send_with(
+        &self,
+        method: Method,
+        path_and_query: &str,
+        body: Vec<u8>,
+        headers: &[(&str, &str)],
+        timeout: Option<Duration>,
     ) -> anyhow::Result<reqwest::Response> {
         let h = sign_request(&self.sk, method.as_str(), path_and_query, now_unix(), &body);
         let url = format!("{}{path_and_query}", self.base);
@@ -226,6 +325,9 @@ impl Api {
         for (name, value) in headers {
             req = req.header(*name, *value);
         }
+        if let Some(t) = timeout {
+            req = req.timeout(t);
+        }
         let res = req
             .body(body)
             .send()
@@ -236,8 +338,9 @@ impl Api {
             return Ok(res);
         }
         let text = res.text().await.unwrap_or_default();
-        let message = serde_json::from_str::<serde_json::Value>(&text)
-            .ok()
+        let json = serde_json::from_str::<serde_json::Value>(&text).ok();
+        let mut message = json
+            .as_ref()
             .and_then(|v| v.get("error")?.as_str().map(String::from))
             .unwrap_or_else(|| {
                 let text = text.trim();
@@ -247,6 +350,30 @@ impl Api {
                     text.to_string()
                 }
             });
+        if status == StatusCode::UNAUTHORIZED && message.starts_with("clock skew") {
+            message = format!(
+                "YOUR COMPUTER'S CLOCK IS WRONG. The server says: {message}. Set this \
+                 computer's date and time correctly (turn on automatic time), then try again"
+            );
+        }
+        if let Some(accepted) = json
+            .as_ref()
+            .and_then(|v| v.get("accepted")?.as_array().cloned())
+        {
+            let list: Vec<String> = accepted
+                .iter()
+                .filter_map(|b| b.as_str().map(|b| format!("{b:?}")))
+                .collect();
+            message = format!(
+                "{message}. Your engine build is {:?}; this server accepts: {}",
+                self.engine_build,
+                if list.is_empty() {
+                    "(none listed)".to_string()
+                } else {
+                    list.join(", ")
+                }
+            );
+        }
         Err(ApiError {
             status: Some(status),
             message,

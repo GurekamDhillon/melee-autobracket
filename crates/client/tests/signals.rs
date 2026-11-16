@@ -35,6 +35,16 @@ impl Drop for ClientGuard {
     }
 }
 
+/// A sparse file of the smallest size `play` accepts as a disc image.
+fn disc(dir: &Path) -> PathBuf {
+    let path = dir.join("melee.iso");
+    std::fs::File::create(&path)
+        .unwrap()
+        .set_len(autobracket_client::config::MIN_DISC_BYTES)
+        .unwrap();
+    path
+}
+
 fn fake_melee() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/fake_melee.sh")
 }
@@ -50,9 +60,8 @@ async fn interrupted_play_leaves_guidance(signal: i32, expected_status: i32) {
     let work = dir.path().join("work");
     let mut cfg = ClientConfig::with_defaults(
         "07".repeat(32),
-        "fake".into(),
         fake_melee(),
-        PathBuf::from("/isos/melee.iso"),
+        disc(dir.path()),
         work.clone(),
     );
     cfg.server = stub.url.clone();
@@ -126,4 +135,63 @@ async fn sigterm_leaves_the_game_running_and_says_how_to_upload() {
 #[tokio::test]
 async fn sigint_leaves_the_game_running_and_says_how_to_upload() {
     interrupted_play_leaves_guidance(libc::SIGINT, 130).await;
+}
+
+#[tokio::test]
+async fn a_second_play_on_the_same_work_directory_is_refused() {
+    let stub = Stub::start(|req| match (req.method.as_str(), req.path.as_str()) {
+        ("GET", p) if p.starts_with("/v1/me/next") => (200, json(&host_play())),
+        ("POST", "/v1/sets/1/0/room") => (204, String::new()),
+        _ => (404, r#"{"error":"not found"}"#.into()),
+    })
+    .await;
+    let dir = TempDir::new().unwrap();
+    let work = dir.path().join("work");
+    let mut cfg = ClientConfig::with_defaults(
+        "07".repeat(32),
+        fake_melee(),
+        disc(dir.path()),
+        work.clone(),
+    );
+    cfg.server = stub.url.clone();
+    cfg.host_args = vec!["sleepy".into()];
+    let config = dir.path().join("client.toml");
+    cfg.save(&config).unwrap();
+    let play = || {
+        Command::new(env!("CARGO_BIN_EXE_autobracket-client"))
+            .arg("--config")
+            .arg(&config)
+            .args(["play", "1", "--poll-secs", "1"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap()
+    };
+    let mut first = ClientGuard(play());
+    let mut game = GameGuard(None);
+    let run = work.join("run-1");
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while stub.requests("POST", "/room").is_empty() || !run.join("pid").exists() {
+        assert!(Instant::now() < deadline, "the game never started");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    game.0 = std::fs::read_to_string(run.join("pid"))
+        .ok()
+        .and_then(|p| p.trim().parse().ok());
+
+    let second = play().wait_with_output().unwrap();
+
+    let stderr = String::from_utf8_lossy(&second.stderr);
+    assert!(!second.status.success());
+    assert!(stderr.contains("already running"), "{stderr}");
+    assert!(
+        stderr.contains(&format!("pid {}", first.0.id())),
+        "{stderr}"
+    );
+    assert!(
+        first.0.try_wait().unwrap().is_none(),
+        "the first play stopped"
+    );
+    assert!(!work.join("run-2").exists(), "a second game was started");
 }

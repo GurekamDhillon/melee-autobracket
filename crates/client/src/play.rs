@@ -1,16 +1,27 @@
 //! The play loop: follow the server's `Next`, run the game, hand over the room code and
 //! upload the replays.
+//!
+//! What keeps a live game safe:
+//! - A game is stopped only when the server offers a different set, or the player is out
+//!   of the event. A set in review keeps its game running; the replay is uploaded when it
+//!   ends (the server takes it as evidence).
+//! - The game the client started is recorded in `{work_dir}/session.json`, and only one
+//!   `play` may use a work directory (`play.lock`). A restarted `play` takes over a game
+//!   still running instead of starting another, and uploads the replays of one that ended
+//!   while `play` was not running, before anything else.
 
 use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-use anyhow::Context;
+use anyhow::{bail, Context};
 use proto::{Next, Role};
 use reqwest::StatusCode;
 
-use crate::api::{is_retryable, Api, ApiError};
+use crate::api::{is_retryable, Api, ApiError, NoShowKind};
 use crate::engine::{Engine, GameParams, RunExit, DISC_CHECK_EXIT_CODE, USAGE_EXIT_CODE};
+use crate::rules::{describe_ruleset, valid_relay, valid_room_code};
+use crate::session::{self, Loaded, Record, SessionFile};
 
 /// How long the host waits for the game to print its room code.
 const ROOM_CODE_WAIT: Duration = Duration::from_secs(60);
@@ -21,6 +32,8 @@ pub const MAX_FAILED_RUNS: u32 = 4;
 /// Consecutive host runs of one game that may end with nobody joining before `play`
 /// reports a no-show.
 pub const NO_SHOW_STRIKES: u32 = 2;
+/// How many times a no-show report refused for a fresh room code is tried again.
+const NO_SHOW_RETRIES: u32 = 8;
 
 /// Timing of the play loop.
 #[derive(Clone, Debug)]
@@ -32,6 +45,13 @@ pub struct PlayOptions {
     pub launch_backoff: Duration,
     /// Longest wait between retries while the server is unreachable.
     pub retry_cap: Duration,
+    /// A guest with no usable room code for this long reports a no-show; `None` never does.
+    pub no_code_wait: Option<Duration>,
+    /// Wait before trying again a no-show report refused because a room code was posted
+    /// moments ago.
+    pub no_show_retry: Duration,
+    /// Accept a `HOST:PORT` room code (direct connect).
+    pub allow_direct_connect: bool,
 }
 
 impl PlayOptions {
@@ -40,16 +60,40 @@ impl PlayOptions {
             poll,
             launch_backoff: Duration::from_secs(5),
             retry_cap: Duration::from_secs(30),
+            no_code_wait: Some(Duration::from_secs(
+                crate::config::DEFAULT_NO_CODE_WAIT_SECS,
+            )),
+            no_show_retry: Duration::from_secs(15),
+            allow_direct_connect: false,
         }
     }
 }
 
 /// The run the engine was started for.
-#[derive(Clone, Copy)]
+#[derive(Clone, Debug, PartialEq)]
 struct Launch {
+    event: i64,
     set_id: u32,
     game_no: u8,
     host: bool,
+    /// The code a guest joined with.
+    code: Option<String>,
+}
+
+impl Launch {
+    fn of(record: &Record) -> Self {
+        Launch {
+            event: record.event,
+            set_id: record.set_id,
+            game_no: record.game_no,
+            host: record.host,
+            code: None,
+        }
+    }
+
+    fn is(&self, set_id: u32, game_no: u8) -> bool {
+        self.set_id == set_id && self.game_no == game_no
+    }
 }
 
 /// A replay collected from a finished run and not yet accepted or refused by the server.
@@ -58,11 +102,61 @@ struct Pending {
     path: PathBuf,
 }
 
-/// State that outlives a failed loop, for telling the player what was left unfinished.
+/// State that outlives a failed loop, for telling the player what was left unfinished,
+/// and its copy on disk.
 #[derive(Default)]
 struct Session {
     launched: Option<Launch>,
     pending: Vec<Pending>,
+    file: Option<SessionFile>,
+    /// What `file` holds.
+    record: Option<Record>,
+}
+
+impl Session {
+    /// Records a run just started, if the engine can say which process it is.
+    fn started(&mut self, engine: &dyn Engine, launch: Launch) {
+        if let (Some(file), Some(run_dir), Some(process)) =
+            (&self.file, engine.run_dir(), engine.process())
+        {
+            let record = Record {
+                event: launch.event,
+                set_id: launch.set_id,
+                game_no: launch.game_no,
+                host: launch.host,
+                run_dir,
+                process,
+                code_posted: false,
+                handled: Vec::new(),
+            };
+            if let Err(e) = file.save(&record) {
+                eprintln!("warning: {e:#}");
+            }
+            self.record = Some(record);
+        }
+        self.launched = Some(launch);
+    }
+
+    fn update(&mut self, change: impl FnOnce(&mut Record)) {
+        if let (Some(file), Some(record)) = (&self.file, self.record.as_mut()) {
+            change(record);
+            if let Err(e) = file.save(record) {
+                eprintln!("warning: {e:#}");
+            }
+        }
+    }
+
+    fn code_posted(&self) -> bool {
+        self.record.as_ref().is_some_and(|r| r.code_posted)
+    }
+
+    /// Forgets the recorded run: it was stopped, or everything it left is dealt with.
+    fn clear(&mut self) {
+        if let Some(file) = &self.file {
+            file.clear();
+        }
+        self.record = None;
+    }
 }
 
 /// Prints each status line once, until it changes.
@@ -127,21 +221,34 @@ impl Net {
     }
 }
 
+/// The server refused the request (a 4xx other than 401, which means this client's key or
+/// clock is wrong and nothing will work until it is fixed).
+fn refused(e: &anyhow::Error) -> Option<&ApiError> {
+    e.downcast_ref::<ApiError>().filter(|err| {
+        err.status
+            .is_some_and(|s| s.is_client_error() && s != StatusCode::UNAUTHORIZED)
+    })
+}
+
 /// How a finished run ended, as far as relaunching is concerned.
 enum Outcome {
     Replay,
     /// A host run that ended because nobody joined.
     NoOpponent,
+    /// A guest run that ended because the host's room was gone.
+    HostGone,
     /// Ended without a replay for any other reason; how it exited, if known.
     Failed(Option<RunExit>),
 }
 
 impl Outcome {
-    fn of(launch: Launch, produced_replay: bool, exit: Option<RunExit>) -> Self {
+    fn of(launch: &Launch, produced_replay: bool, exit: Option<RunExit>) -> Self {
         if produced_replay {
             Outcome::Replay
         } else if launch.host && exit.is_some_and(|e| e.no_opponent) {
             Outcome::NoOpponent
+        } else if !launch.host && exit.is_some_and(|e| e.host_gone) {
+            Outcome::HostGone
         } else {
             Outcome::Failed(exit)
         }
@@ -153,7 +260,8 @@ enum After {
     Continue,
     /// Report a no-show with this detail, then keep going.
     ReportNoShow(String),
-    /// Report the stuck set with `detail`, then end `play` with `error`.
+    /// Report the stuck set with `detail` (this client's own failure), then end `play`
+    /// with `error`.
     GiveUp {
         error: anyhow::Error,
         detail: String,
@@ -171,21 +279,48 @@ struct Failures {
 }
 
 impl Failures {
+    fn new(base: Duration) -> Self {
+        Failures {
+            base,
+            game: None,
+            count: 0,
+            no_shows: 0,
+            retry_at: None,
+        }
+    }
+
+    fn for_game(&mut self, set_id: u32, game_no: u8) {
+        if self.game != Some((set_id, game_no)) {
+            *self = Failures::new(self.base);
+            self.game = Some((set_id, game_no));
+        }
+    }
+
+    /// Forgets every failure: the set went to the organiser.
+    fn reset(&mut self) {
+        *self = Failures::new(self.base);
+    }
+
+    /// Holds off relaunching this game until `until`, without counting a failure.
+    fn hold(&mut self, set_id: u32, game_no: u8, until: Instant) {
+        self.for_game(set_id, game_no);
+        self.retry_at = Some(until);
+    }
+
     /// Records how a run of `launch` ended: a no-show to report after [`NO_SHOW_STRIKES`]
     /// runs nobody joined, and giving up after [`MAX_FAILED_RUNS`] other failed runs in a row.
-    fn record(&mut self, launch: Launch, outcome: Outcome, relay: &str) -> After {
-        let game = (launch.set_id, launch.game_no);
-        if self.game != Some(game) {
-            self.game = Some(game);
-            self.count = 0;
-            self.no_shows = 0;
-        }
+    fn record(&mut self, launch: &Launch, outcome: Outcome, relay: &str) -> After {
+        self.for_game(launch.set_id, launch.game_no);
         let exit = match outcome {
             Outcome::Replay => {
-                self.game = None;
-                self.count = 0;
-                self.no_shows = 0;
-                self.retry_at = None;
+                self.reset();
+                return After::Continue;
+            }
+            Outcome::HostGone => {
+                println!(
+                    "The room for game {} is gone; waiting for a new room code",
+                    launch.game_no
+                );
                 return After::Continue;
             }
             Outcome::NoOpponent => {
@@ -221,10 +356,10 @@ impl Failures {
                     launch.set_id,
                     launch.game_no
                 ),
-                // Worded as this client's failure, not the opponent's.
                 detail: format!(
-                    "client could not complete a game: {MAX_FAILED_RUNS} runs without a \
-                     replay, {last}"
+                    "the reporting player's client could not complete game {}: \
+                     {MAX_FAILED_RUNS} runs without a replay, {last}",
+                    launch.game_no
                 ),
             };
         }
@@ -243,29 +378,58 @@ impl Failures {
     }
 }
 
+/// A no-show report the server refused because a room code was posted moments ago; tried
+/// again later, while no new game is started.
+struct LaterReport {
+    set_id: u32,
+    game_no: u8,
+    detail: String,
+    at: Instant,
+    tries: u32,
+}
+
+/// How long a guest has been without a usable room code, for its automatic report.
+struct CodeWait {
+    set_id: u32,
+    game_no: u8,
+    since: Instant,
+}
+
 /// An exit that means the player's own setup is broken and will not fix itself: the
-/// engine's disc check failed, or it refused its arguments. `play` stops at once, and
-/// nothing is reported to the organiser.
+/// engine's disc check failed, it refused its arguments, or it does not know the preset
+/// fighter. `play` stops at once, and nothing is reported to the organiser.
 fn setup_error(engine: &dyn Engine, exit: Option<RunExit>) -> Option<anyhow::Error> {
-    let code = exit?.code?;
+    let exit = exit?;
     let setup = engine.last_setup();
+    let log = match &setup.log {
+        Some(path) if !setup.log_tail.is_empty() => format!(
+            "\nLast lines of {}:\n  {}",
+            path.display(),
+            setup.log_tail.join("\n  ")
+        ),
+        _ => String::new(),
+    };
+    if setup
+        .log_tail
+        .iter()
+        .any(|l| l.contains("--match: unknown fighter"))
+    {
+        return Some(anyhow::anyhow!(
+            "the engine does not know the fighter or stage given with `--match` in \
+             `host_args` / `join_args` of the client config; fix it (e.g. `falcon`, `fox`, \
+             `marth`), then run `play` again.{log}"
+        ));
+    }
+    let code = exit.code?;
     if code == DISC_CHECK_EXIT_CODE {
         let iso = setup.iso.as_deref().unwrap_or("(unknown)");
         return Some(anyhow::anyhow!(
             "the engine's disc check failed (exit code {code}) for the disc image {iso}. \
              Check that `iso` in the client config points at your own NTSC 1.02 Melee \
-             image, then run `play` again"
+             image, then run `play` again.{log}"
         ));
     }
     if code == USAGE_EXIT_CODE {
-        let log = match &setup.log {
-            Some(path) if !setup.log_tail.is_empty() => format!(
-                "\nLast lines of {}:\n  {}",
-                path.display(),
-                setup.log_tail.join("\n  ")
-            ),
-            _ => String::new(),
-        };
         return Some(anyhow::anyhow!(
             "the engine refused its arguments (exit code {code}, a usage error). It was \
              started with the template {:?} (`host_args` or `join_args` in the client \
@@ -276,71 +440,50 @@ fn setup_error(engine: &dyn Engine, exit: Option<RunExit>) -> Option<anyhow::Err
     None
 }
 
-/// Acts on [`After`] for `launch`'s set.
-async fn settle(
-    api: &Api,
-    net: &mut Net,
-    event: i64,
-    launch: Launch,
-    after: After,
-) -> anyhow::Result<()> {
-    match after {
-        After::Continue => Ok(()),
-        After::ReportNoShow(detail) => {
-            if report_no_show(api, net, event, launch.set_id, &detail).await? {
-                println!(
-                    "Nobody joined set {} game {} after {NO_SHOW_STRIKES} tries; reported a \
-                     no-show to the organiser",
-                    launch.set_id, launch.game_no
-                );
-            }
-            Ok(())
-        }
-        After::GiveUp { error, detail } => {
-            match report_no_show(api, net, event, launch.set_id, &detail).await {
-                Ok(true) => println!("Reported set {} to the organiser: {detail}", launch.set_id),
-                Ok(false) => {}
-                Err(e) => eprintln!(
-                    "Could not report set {} to the organiser: {e:#}",
-                    launch.set_id
-                ),
-            }
-            Err(error)
-        }
-    }
+/// What became of a report.
+enum Reported {
+    Taken,
+    /// Refused because a room code was posted moments ago: worth trying again shortly.
+    TooSoon,
+    /// Refused for another reason, or the server has no such route.
+    NotTaken,
 }
 
-/// Reports a no-show, retrying while the server is unreachable. Whether the server took it:
-/// a `409` (the set is not in a state for it) or `404` (an older server) is logged and not
-/// an error.
-async fn report_no_show(
+/// Reports the set to the organiser, retrying while the server is unreachable. A `409` or
+/// `404` (an older server) is printed and not an error.
+async fn report(
     api: &Api,
     net: &mut Net,
     event: i64,
     set_id: u32,
     detail: &str,
-) -> anyhow::Result<bool> {
+    kind: NoShowKind,
+) -> anyhow::Result<Reported> {
     match net
-        .retry(|| api.report_no_show(event, set_id, Some(detail)))
+        .retry(|| api.report_no_show(event, set_id, Some(detail), kind))
         .await
     {
-        Ok(()) => Ok(true),
+        Ok(()) => Ok(Reported::Taken),
         Err(e) => match e.downcast_ref::<ApiError>() {
             Some(err) if err.status == Some(StatusCode::CONFLICT) => {
                 println!(
-                    "The server did not take the no-show report for set {set_id}: {}",
+                    "The server did not take the report for set {set_id}: {}",
                     err.message
                 );
-                Ok(false)
+                if kind == NoShowKind::NoShow && err.message.contains("room code was posted") {
+                    Ok(Reported::TooSoon)
+                } else {
+                    Ok(Reported::NotTaken)
+                }
             }
             Some(err) if err.status == Some(StatusCode::NOT_FOUND) => {
                 println!(
                     "This server cannot take no-show reports ({}); tell the organiser about set {set_id}",
                     err.message
                 );
-                Ok(false)
+                Ok(Reported::NotTaken)
             }
-            _ => Err(e.context(format!("reporting a no-show for set {set_id}"))),
+            _ => Err(e.context(format!("reporting set {set_id} to the organiser"))),
         },
     }
 }
@@ -371,6 +514,8 @@ pub async fn play_event_with(
 /// [`play_event_with`] that also stops when `stop` completes (on a signal, say): it stops
 /// polling, leaves a running game running, prints what was left unfinished as on a
 /// failure, and returns `None`.
+///
+/// Fails at once if another `play` holds the engine's work directory.
 pub async fn play_event_until(
     api: &Api,
     engine: &mut dyn Engine,
@@ -378,7 +523,12 @@ pub async fn play_event_until(
     opts: &PlayOptions,
     stop: impl Future<Output = ()>,
 ) -> anyhow::Result<Option<Next>> {
-    let mut session = Session::default();
+    let work_dir = engine.work_dir();
+    let _lock = work_dir.as_deref().map(session::lock).transpose()?;
+    let mut session = Session {
+        file: work_dir.as_deref().map(SessionFile::new),
+        ..Session::default()
+    };
     let result = tokio::select! {
         r = run(api, &mut *engine, event, opts, &mut session) => Some(r),
         () = stop => None,
@@ -396,6 +546,94 @@ pub async fn play_event_until(
     }
 }
 
+/// Before the first poll: takes over the game an earlier `play` left running, or uploads
+/// the replays of one that ended since.
+async fn recover(
+    api: &Api,
+    net: &mut Net,
+    engine: &mut dyn Engine,
+    event: i64,
+    s: &mut Session,
+) -> anyhow::Result<()> {
+    let Some(file) = s.file.clone() else {
+        return Ok(());
+    };
+    let record = match file.load() {
+        Loaded::None => return Ok(()),
+        Loaded::Corrupt(why) => {
+            eprintln!(
+                "warning: ignoring {}, which cannot be read ({why}); starting afresh",
+                file.path().display()
+            );
+            file.clear();
+            return Ok(());
+        }
+        Loaded::Record(r) => r,
+    };
+    let launch = Launch::of(&record);
+    let what = format!(
+        "the game for event {} set {} game {} ({})",
+        record.event,
+        record.set_id,
+        record.game_no,
+        record.run_dir.display()
+    );
+    if record.process.is_running_in(&record.run_dir) {
+        if record.event != event {
+            bail!(
+                "{what} from an earlier `play` is still running; run `autobracket-client play \
+                 {}` to finish it first",
+                record.event
+            );
+        }
+        if engine.adopt(&record)? {
+            println!(
+                "Taking over {what}, still running from an earlier `play`; its replay is \
+                 uploaded when it ends"
+            );
+            s.record = Some(record);
+            s.launched = Some(launch);
+            return Ok(());
+        }
+    }
+    let replays: Vec<PathBuf> = match session::replays_in(&record.run_dir) {
+        Ok(r) => r
+            .into_iter()
+            .filter(|p| !record.handled.contains(p))
+            .collect(),
+        Err(e) => {
+            eprintln!("warning: {e:#}");
+            Vec::new()
+        }
+    };
+    if replays.is_empty() {
+        println!("{what} ended while `play` was not running, with no replay left to upload");
+    } else {
+        println!("{what} ended while `play` was not running; uploading its replay");
+    }
+    s.record = Some(record);
+    s.pending.extend(replays.into_iter().map(|path| Pending {
+        launch: launch.clone(),
+        path,
+    }));
+    upload_pending(api, net, s).await?;
+    s.clear();
+    Ok(())
+}
+
+/// The play loop's state between polls.
+struct Loop {
+    status: Status,
+    net: Net,
+    failures: Failures,
+    later: Option<LaterReport>,
+    code_wait: Option<CodeWait>,
+    /// The code a guest's run failed with, per game: not joined again.
+    tried: Option<(u32, u8, String)>,
+    /// The set whose rules were last printed.
+    announced: Option<u32>,
+}
+
 async fn run(
     api: &Api,
     engine: &mut dyn Engine,
@@ -403,117 +641,454 @@ async fn run(
     opts: &PlayOptions,
     s: &mut Session,
 ) -> anyhow::Result<Next> {
-    let mut status = Status::default();
-    let mut net = Net {
-        first_delay: opts.poll.max(Duration::from_millis(10)).min(opts.retry_cap),
-        cap: opts.retry_cap,
-        down: false,
+    let mut l = Loop {
+        status: Status::default(),
+        net: Net {
+            first_delay: opts.poll.max(Duration::from_millis(10)).min(opts.retry_cap),
+            cap: opts.retry_cap,
+            down: false,
+        },
+        failures: Failures::new(opts.launch_backoff),
+        later: None,
+        code_wait: None,
+        tried: None,
+        announced: None,
     };
-    let mut failures = Failures {
-        base: opts.launch_backoff,
-        game: None,
-        count: 0,
-        no_shows: 0,
-        retry_at: None,
-    };
-    loop {
-        let next = net.retry(|| api.next(event)).await?;
-        let play_set = match &next {
-            Next::Play { set_id, .. } => Some(*set_id),
-            _ => None,
-        };
-        if let Some(launch) = s.launched.filter(|l| Some(l.set_id) != play_set) {
-            if engine.running() {
-                engine.stop();
-            } else {
-                // Finished before the set moved on: its replays still belong to that game.
-                collect(engine, launch, s)?;
-                upload_pending(api, &mut net, event, s).await?;
-            }
-            s.launched = None;
-        }
 
+    recover(api, &mut l.net, engine, event, s).await?;
+
+    loop {
+        let next = l.net.retry(|| api.next(event)).await?;
+        stop_if_moved_on(engine, &next, s);
+        let collected = finish_run(api, engine, opts, &next, s, &mut l).await?;
         match &next {
             Next::NotEntered | Next::Eliminated | Next::Champion => {
                 println!("{}", describe(&next));
                 return Ok(next);
             }
-            Next::Waiting | Next::Review { .. } => status.state(describe(&next)),
-            Next::Play {
-                set_id,
-                opponent_tag,
-                role,
-                relay,
-                room_code,
-                game_no,
-                stocks,
-                timer_secs,
-                awaiting_verdict,
-                ..
-            } => {
-                status.state(describe(&next));
-                let params = GameParams {
-                    relay,
-                    stocks: *stocks,
-                    timer_secs: *timer_secs,
-                };
-                let this_game = Launch {
-                    set_id: *set_id,
-                    game_no: *game_no,
-                    host: *role == Role::Host,
-                };
-                if engine.running() {
-                    // Playing; nothing to do until the game exits.
-                } else if let Some(launch) = s.launched.take() {
-                    let produced = collect(engine, launch, s)?;
-                    let exit = engine.last_exit();
-                    if !produced {
-                        if let Some(e) = setup_error(engine, exit) {
-                            return Err(e);
-                        }
-                    }
-                    let outcome = Outcome::of(launch, produced, exit);
-                    let after = failures.record(launch, outcome, relay);
-                    upload_pending(api, &mut net, event, s).await?;
-                    settle(api, &mut net, event, launch, after).await?;
-                    // Ask again before doing anything else: the server now knows about it.
-                } else if *awaiting_verdict {
-                    status.detail(format!("Game {game_no} uploaded; waiting for the verdict"));
-                } else if failures.waiting(*set_id, *game_no) {
-                    status.detail(format!("Waiting before starting game {game_no} again"));
-                } else if *role == Role::Host {
-                    println!("Starting game {game_no} as host");
-                    engine.host(&params)?;
-                    s.launched = Some(this_game);
-                    match wait_for_code(engine).await? {
-                        Some(code) => {
-                            net.retry(|| api.post_room(event, *set_id, &code)).await?;
-                            println!("Room code {code} sent");
-                        }
-                        None if engine.running() => {
-                            println!(
-                                "No room code from the game after {} s; stopping it",
-                                ROOM_CODE_WAIT.as_secs()
-                            );
-                            engine.stop();
-                            s.launched = None;
-                            let after = failures.record(this_game, Outcome::Failed(None), relay);
-                            settle(api, &mut net, event, this_game, after).await?;
-                        }
-                        // Exited before printing a code; collected on the next poll.
-                        None => {}
-                    }
-                } else if let Some(code) = room_code {
-                    println!("Joining room {code} for game {game_no}");
-                    engine.join(&params, code)?;
-                    s.launched = Some(this_game);
-                } else {
-                    status.detail(format!("Waiting for {opponent_tag} to send the room code"));
+            Next::Waiting => l.status.state(describe(&next)),
+            Next::Review { .. } => {
+                l.status.state(describe(&next));
+                // Whatever went wrong before, the organiser has it now.
+                l.failures.reset();
+                l.later = None;
+                l.code_wait = None;
+                if let Some(launch) = s.launched.as_ref().filter(|_| engine.running()) {
+                    l.status.detail(format!(
+                        "Game {} is still running; its replay is uploaded when it ends",
+                        launch.game_no
+                    ));
                 }
             }
+            Next::Play { .. } if collected => {
+                // Ask again before starting anything: the server knows about the run now.
+                l.status.state(describe(&next));
+            }
+            Next::Play { .. } => play(api, engine, event, opts, &next, s, &mut l).await?,
         }
         tokio::time::sleep(opts.poll).await;
     }
+}
+
+/// Stops the launched game if the server has moved on from its set: it offers a different
+/// set, or the player is out of the event. A set in review or a wait keeps the game.
+fn stop_if_moved_on(engine: &mut dyn Engine, next: &Next, s: &mut Session) {
+    let Some(launch) = s.launched.clone() else {
+        return;
+    };
+    let moved_on = match next {
+        Next::Play { set_id, .. } => *set_id != launch.set_id,
+        Next::NotEntered | Next::Eliminated | Next::Champion => true,
+        Next::Waiting | Next::Review { .. } => false,
+    };
+    if moved_on && engine.running() {
+        println!(
+            "Stopping the game for set {} game {}: the server has moved on",
+            launch.set_id, launch.game_no
+        );
+        engine.stop();
+        s.launched = None;
+        s.clear();
+    }
+}
+
+/// If the launched run has ended: uploads its replays (whatever the set's state), then, if
+/// the server still has that set in play, counts the run and reports what needs reporting.
+/// Whether there was such a run.
+async fn finish_run(
+    api: &Api,
+    engine: &mut dyn Engine,
+    opts: &PlayOptions,
+    next: &Next,
+    s: &mut Session,
+    l: &mut Loop,
+) -> anyhow::Result<bool> {
+    let Some(launch) = s.launched.clone().filter(|_| !engine.running()) else {
+        return Ok(false);
+    };
+    s.launched = None;
+    let produced = collect(engine, &launch, s)?;
+    let exit = engine.last_exit();
+    if !produced {
+        if let Some(e) = setup_error(engine, exit) {
+            return Err(e);
+        }
+    }
+    upload_pending(api, &mut l.net, s).await?;
+    s.clear();
+    let Next::Play { set_id, relay, .. } = next else {
+        return Ok(true);
+    };
+    if *set_id != launch.set_id {
+        return Ok(true);
+    }
+    if !produced && !launch.host {
+        if let Some(code) = &launch.code {
+            l.tried = Some((launch.set_id, launch.game_no, code.clone()));
+        }
+    }
+    match l
+        .failures
+        .record(&launch, Outcome::of(&launch, produced, exit), relay)
+    {
+        After::Continue => {}
+        After::ReportNoShow(detail) => {
+            let sent = report(
+                api,
+                &mut l.net,
+                launch.event,
+                launch.set_id,
+                &detail,
+                NoShowKind::NoShow,
+            )
+            .await?;
+            match sent {
+                Reported::Taken => println!(
+                    "Nobody joined set {} game {} after {NO_SHOW_STRIKES} tries; reported a \
+                     no-show to the organiser",
+                    launch.set_id, launch.game_no
+                ),
+                Reported::TooSoon => {
+                    let at = Instant::now() + opts.no_show_retry;
+                    l.failures.hold(launch.set_id, launch.game_no, at);
+                    l.later = Some(LaterReport {
+                        set_id: launch.set_id,
+                        game_no: launch.game_no,
+                        detail,
+                        at,
+                        tries: 1,
+                    });
+                }
+                Reported::NotTaken => {}
+            }
+        }
+        After::GiveUp { error, detail } => {
+            let kind = NoShowKind::ClientFailure;
+            match report(api, &mut l.net, launch.event, launch.set_id, &detail, kind).await {
+                Ok(Reported::Taken) => {
+                    println!("Reported set {} to the organiser: {detail}", launch.set_id)
+                }
+                Ok(_) => {}
+                Err(e) => eprintln!(
+                    "Could not report set {} to the organiser: {e:#}",
+                    launch.set_id
+                ),
+            }
+            return Err(error);
+        }
+    }
+    Ok(true)
+}
+
+/// Acts on `Next::Play`: starts or joins the game, or waits.
+async fn play(
+    api: &Api,
+    engine: &mut dyn Engine,
+    event: i64,
+    opts: &PlayOptions,
+    next: &Next,
+    s: &mut Session,
+    l: &mut Loop,
+) -> anyhow::Result<()> {
+    let Next::Play {
+        set_id,
+        opponent_tag,
+        role,
+        relay,
+        room_code,
+        game_no,
+        stocks,
+        timer_secs,
+        awaiting_verdict,
+        ..
+    } = next
+    else {
+        return Ok(());
+    };
+    let (set_id, game_no) = (*set_id, *game_no);
+    l.status.state(describe(next));
+    if l.announced != Some(set_id) {
+        l.announced = Some(set_id);
+        match l.net.retry(|| api.event(event)).await {
+            Ok(view) => println!("{}", describe_ruleset(&view.ruleset)),
+            Err(e) => eprintln!("Could not fetch the event's rules: {e:#}"),
+        }
+    }
+    if l.later
+        .as_ref()
+        .is_some_and(|r| !(r.set_id == set_id && r.game_no == game_no))
+    {
+        l.later = None;
+    }
+    let params = GameParams {
+        relay,
+        stocks: *stocks,
+        timer_secs: *timer_secs,
+    };
+    let this_game = Launch {
+        event,
+        set_id,
+        game_no,
+        host: *role == Role::Host,
+        code: None,
+    };
+    let hold = Instant::now() + opts.launch_backoff;
+
+    if let Some(launch) = s.launched.clone() {
+        // Playing, or the run ended after `finish_run` looked: it is collected on the next
+        // poll, and nothing new starts before then. A game taken over from an earlier
+        // `play` may not have had its room code sent yet.
+        if engine.running() && launch.host && launch.is(set_id, game_no) && !s.code_posted() {
+            if let Some(code) = engine.room_code(Duration::ZERO)? {
+                if !send_code(api, &mut l.net, s, &launch, &code).await? {
+                    stop_run(engine, s);
+                    l.failures.hold(set_id, game_no, hold);
+                }
+            }
+        }
+        return Ok(());
+    }
+    if *awaiting_verdict {
+        l.status
+            .detail(format!("Game {game_no} uploaded; waiting for the verdict"));
+        return Ok(());
+    }
+    if let Some(later) = l.later.as_mut() {
+        if Instant::now() < later.at {
+            l.status.detail(format!(
+                "Reporting the no-show for game {game_no} shortly (the server asks to wait \
+                 after a room code)"
+            ));
+            return Ok(());
+        }
+        let detail = later.detail.clone();
+        match report(api, &mut l.net, event, set_id, &detail, NoShowKind::NoShow).await? {
+            Reported::TooSoon if later.tries < NO_SHOW_RETRIES => {
+                later.tries += 1;
+                later.at = Instant::now() + opts.no_show_retry;
+                l.failures.hold(set_id, game_no, later.at);
+                return Ok(());
+            }
+            Reported::Taken => {
+                println!(
+                    "Nobody joined set {set_id} game {game_no}; reported a no-show to the \
+                     organiser"
+                );
+                l.later = None;
+                return Ok(());
+            }
+            _ => l.later = None,
+        }
+    }
+    if l.failures.waiting(set_id, game_no) {
+        l.status
+            .detail(format!("Waiting before starting game {game_no} again"));
+        return Ok(());
+    }
+    if !valid_relay(relay) {
+        bail!(
+            "the server gave the relay address {relay:?}, which is not HOST[:PORT]; tell the \
+             organiser"
+        );
+    }
+    if this_game.host {
+        println!("Starting game {game_no} as host");
+        engine.host(&params)?;
+        s.started(engine, this_game.clone());
+        match wait_for_code(engine).await? {
+            Some(code) => {
+                if !send_code(api, &mut l.net, s, &this_game, &code).await? {
+                    stop_run(engine, s);
+                    l.failures.hold(set_id, game_no, hold);
+                }
+            }
+            None if engine.running() => {
+                println!(
+                    "No room code from the game after {} s; stopping it",
+                    ROOM_CODE_WAIT.as_secs()
+                );
+                stop_run(engine, s);
+                if let After::GiveUp { error, .. } =
+                    l.failures.record(&this_game, Outcome::Failed(None), relay)
+                {
+                    return Err(error);
+                }
+            }
+            // Exited before printing a code; collected on the next poll.
+            None => {}
+        }
+        return Ok(());
+    }
+
+    // A guest: join a valid code not already tried for this game.
+    let usable = room_code
+        .as_deref()
+        .filter(|c| valid_room_code(c, opts.allow_direct_connect));
+    if let Some(code) = room_code.as_deref().filter(|_| usable.is_none()) {
+        l.status.detail(format!(
+            "The server passed on a room code that is not valid ({code:?}); not joining it"
+        ));
+    }
+    let stale = |c: &&str| {
+        l.tried
+            .as_ref()
+            .is_some_and(|(s, g, t)| *s == set_id && *g == game_no && t == c)
+    };
+    match usable.filter(|c| !stale(c)) {
+        Some(code) => {
+            println!("Joining room {code} for game {game_no}");
+            engine.join(&params, code)?;
+            s.started(
+                engine,
+                Launch {
+                    code: Some(code.to_string()),
+                    ..this_game
+                },
+            );
+            l.code_wait = None;
+        }
+        None => {
+            if usable.is_some() {
+                l.status.detail(format!(
+                    "Waiting for {opponent_tag} to send a new room code (the last one did not \
+                     work)"
+                ));
+            } else if room_code.is_none() {
+                l.status
+                    .detail(format!("Waiting for {opponent_tag} to send the room code"));
+            }
+            guest_waits(api, opts, event, set_id, game_no, l).await?;
+        }
+    }
+    Ok(())
+}
+
+fn stop_run(engine: &mut dyn Engine, s: &mut Session) {
+    engine.stop();
+    s.launched = None;
+    s.clear();
+}
+
+/// A guest without a usable room code: after [`PlayOptions::no_code_wait`] for this game,
+/// reports a no-show, then waits as long again before reporting again.
+async fn guest_waits(
+    api: &Api,
+    opts: &PlayOptions,
+    event: i64,
+    set_id: u32,
+    game_no: u8,
+    l: &mut Loop,
+) -> anyhow::Result<()> {
+    let Some(limit) = opts.no_code_wait else {
+        return Ok(());
+    };
+    let since = match &l.code_wait {
+        Some(w) if w.set_id == set_id && w.game_no == game_no => w.since,
+        _ => {
+            l.code_wait = Some(CodeWait {
+                set_id,
+                game_no,
+                since: Instant::now(),
+            });
+            return Ok(());
+        }
+    };
+    if since.elapsed() < limit {
+        return Ok(());
+    }
+    let detail = format!(
+        "no room code from the host for game {game_no} after {} s",
+        limit.as_secs()
+    );
+    let sent = report(api, &mut l.net, event, set_id, &detail, NoShowKind::NoShow).await?;
+    if let Reported::Taken = sent {
+        println!(
+            "No room code for set {set_id} game {game_no}; reported a no-show to the organiser"
+        );
+    }
+    l.code_wait = Some(CodeWait {
+        set_id,
+        game_no,
+        since: Instant::now(),
+    });
+    Ok(())
+}
+
+/// Hands the host's room code to the server. `false` if the server refused it (the set is
+/// not ready for it, say); the run should then be stopped.
+async fn send_code(
+    api: &Api,
+    net: &mut Net,
+    s: &mut Session,
+    launch: &Launch,
+    code: &str,
+) -> anyhow::Result<bool> {
+    match net
+        .retry(|| api.post_room(launch.event, launch.set_id, code))
+        .await
+    {
+        Ok(()) => {
+            println!("Room code {code} sent");
+            s.update(|r| r.code_posted = true);
+            Ok(true)
+        }
+        Err(e) => match refused(&e) {
+            Some(err) => {
+                println!(
+                    "The server did not take room code {code} for game {}: {}; stopping that game",
+                    launch.game_no, err.message
+                );
+                Ok(false)
+            }
+            None => Err(e),
+        },
+    }
+}
+
+/// Reports a no-show for this player's current set in `event` (the opponent did not show
+/// up). Returns what to tell the player.
+pub async fn report_current_no_show(
+    api: &Api,
+    event: i64,
+    note: Option<&str>,
+) -> anyhow::Result<String> {
+    let set_id = match api.next(event).await? {
+        Next::Play { set_id, .. } => set_id,
+        Next::Review { set_id } => {
+            return Ok(format!("Set {set_id} is already with the organiser"));
+        }
+        other => bail!(
+            "you have no set in play in event {event} ({})",
+            describe(&other)
+        ),
+    };
+    let detail = note.unwrap_or("opponent did not show up (reported by hand)");
+    api.report_no_show(event, set_id, Some(detail), NoShowKind::NoShow)
+        .await
+        .with_context(|| format!("reporting a no-show for set {set_id}"))?;
+    Ok(format!(
+        "Reported a no-show for set {set_id}; the organiser decides it"
+    ))
 }
 
 /// One status line for a `Next`, e.g. `Set 4 vs TAG — game 2 of best-of-3 (1-0) — you host`.
@@ -562,54 +1137,51 @@ async fn wait_for_code(engine: &mut dyn Engine) -> anyhow::Result<Option<String>
 }
 
 /// Queues the finished run's replays for upload as its game; whether there were any.
-fn collect(engine: &mut dyn Engine, launch: Launch, s: &mut Session) -> anyhow::Result<bool> {
+fn collect(engine: &mut dyn Engine, launch: &Launch, s: &mut Session) -> anyhow::Result<bool> {
     let replays = engine.take_replays()?;
     if replays.is_empty() {
         println!("Game {}: no replay produced", launch.game_no);
     }
     let produced = !replays.is_empty();
-    s.pending
-        .extend(replays.into_iter().map(|path| Pending { launch, path }));
+    s.pending.extend(replays.into_iter().map(|path| Pending {
+        launch: launch.clone(),
+        path,
+    }));
     Ok(produced)
 }
 
-/// Uploads the queued replays in order. A refused upload (`409`) is reported and dropped;
-/// a retryable failure is retried until it lands; any other failure leaves the replay
-/// queued and ends `play`.
-async fn upload_pending(
-    api: &Api,
-    net: &mut Net,
-    event: i64,
-    s: &mut Session,
-) -> anyhow::Result<()> {
+/// Uploads the queued replays in order. A retryable failure is retried until it lands; a
+/// refusal (any 4xx but 401) is printed with the command to try again by hand, the file is
+/// kept, and `play` goes on; anything else leaves the replay queued and ends `play`.
+async fn upload_pending(api: &Api, net: &mut Net, s: &mut Session) -> anyhow::Result<()> {
     while let Some(p) = s.pending.first() {
-        let Launch {
-            set_id, game_no: n, ..
-        } = p.launch;
-        let slp = read(&p.path).await?;
+        let (event, set_id, n) = (p.launch.event, p.launch.set_id, p.launch.game_no);
+        let path = p.path.clone();
+        let slp = read(&path).await?;
         let sent = net
             .retry(|| api.upload_replay(event, set_id, n, slp.clone()))
             .await;
         match sent {
             Ok(_) => println!("Uploaded game {n}"),
-            Err(e) => match e.downcast_ref::<ApiError>() {
-                Some(err) if err.status == Some(StatusCode::CONFLICT) => {
-                    println!(
-                        "Game {n}: {} not accepted: {}",
-                        p.path.display(),
-                        err.message
-                    );
-                }
-                _ => return Err(e.context(format!("uploading {}", p.path.display()))),
+            Err(e) => match refused(&e) {
+                Some(err) => println!(
+                    "Game {n}: the server did not accept {}: {}. The file is kept; to try \
+                     again: autobracket-client upload {event} {set_id} {n} {}",
+                    path.display(),
+                    err.message,
+                    path.display()
+                ),
+                None => return Err(e.context(format!("uploading {}", path.display()))),
             },
         }
         s.pending.remove(0);
+        s.update(|r| r.handled.push(path));
     }
     Ok(())
 }
 
 /// Tells the player about a game left running and replays not uploaded, with the command
-/// to upload each by hand.
+/// to upload each by hand. The session file is left in place for the next `play`.
 fn report_unfinished(engine: &mut dyn Engine, event: i64, s: &mut Session) {
     if let Some(launch) = s.launched.take() {
         if engine.running() {
@@ -617,22 +1189,25 @@ fn report_unfinished(engine: &mut dyn Engine, event: i64, s: &mut Session) {
                 format!(" (its replay goes in {})", d.display())
             });
             eprintln!(
-                "The game for set {} game {} is still running{dir}. When it ends, upload its \
-                 replay with: autobracket-client upload {event} {} {} FILE",
-                launch.set_id, launch.game_no, launch.set_id, launch.game_no
+                "The game for set {} game {} is still running{dir}. Run `autobracket-client \
+                 play {event}` again to take it over and upload its replay when it ends, or \
+                 upload it by hand: autobracket-client upload {} {} {} FILE",
+                launch.set_id, launch.game_no, launch.event, launch.set_id, launch.game_no
             );
         } else {
             let dir = engine.run_dir();
             match engine.take_replays() {
-                Ok(replays) => s
-                    .pending
-                    .extend(replays.into_iter().map(|path| Pending { launch, path })),
+                Ok(replays) => s.pending.extend(replays.into_iter().map(|path| Pending {
+                    launch: launch.clone(),
+                    path,
+                })),
                 Err(e) => eprintln!(
                     "Could not list the replays of set {} game {} ({e:#}); look for .slp files \
-                     in {} and upload them with: autobracket-client upload {event} {} {} FILE",
+                     in {} and upload them with: autobracket-client upload {} {} {} FILE",
                     launch.set_id,
                     launch.game_no,
                     dir.map_or_else(|| "its run directory".into(), |d| d.display().to_string()),
+                    launch.event,
                     launch.set_id,
                     launch.game_no
                 ),
@@ -641,9 +1216,10 @@ fn report_unfinished(engine: &mut dyn Engine, event: i64, s: &mut Session) {
     }
     for p in &s.pending {
         eprintln!(
-            "Replay for set {} game {} not uploaded: autobracket-client upload {event} {} {} {}",
+            "Replay for set {} game {} not uploaded: autobracket-client upload {} {} {} {}",
             p.launch.set_id,
             p.launch.game_no,
+            p.launch.event,
             p.launch.set_id,
             p.launch.game_no,
             p.path.display()

@@ -76,6 +76,16 @@ impl Stub {
             .count()
     }
 
+    /// The path of every request so far, in the order they arrived.
+    pub fn paths(&self) -> Vec<String> {
+        self.log
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|r| r.path.clone())
+            .collect()
+    }
+
     /// How many `GET /v1/me/next` polls came after the first request whose path ends with
     /// `suffix` (0 if there was none yet).
     pub fn polls_after(&self, suffix: &str) -> usize {
