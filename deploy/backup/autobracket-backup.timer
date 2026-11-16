@@ -1,0 +1,14 @@
+[Unit]
+Description=Nightly autobracket local backup
+
+[Timer]
+# Every night at 03:30 local time, plus up to 30 minutes of random delay.
+OnCalendar=*-*-* 03:30:00
+RandomizedDelaySec=30m
+# A night missed (machine off, or the time passed while the timer was inactive) is made up
+# for at the next boot/start.
+Persistent=true
+Unit=autobracket-backup.service
+
+[Install]
+WantedBy=timers.target
