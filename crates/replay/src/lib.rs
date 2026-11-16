@@ -80,6 +80,10 @@ pub enum ReplayError {
     BadEventSizes,
     #[error("replay has no usable Game Start event")]
     MissingGameStart,
+    /// A second Game Start, a second Game End, or a Post-Frame Update after Game End: a file
+    /// the engine and this reader could read as different games.
+    #[error("replay has a second Game Start or Game End, or frames after Game End")]
+    UnexpectedEvent,
 }
 
 pub fn parse(file: &[u8]) -> Result<ReplayFacts, ReplayError> {
@@ -96,12 +100,17 @@ pub fn parse(file: &[u8]) -> Result<ReplayFacts, ReplayError> {
     let mut gecko = Vec::new();
     let mut last_frame = i32::MIN;
     let mut end = None;
+    let mut seen_end = false;
     // Latest leader update per player index: (frame, stocks, percent).
     let mut latest: [Option<(i32, u8, f32)>; 4] = [None; 4];
 
     for event in events {
         let (code, ev) = event?;
         match code {
+            // The engine keeps the last Game Start and never reads Game End: refuse any file
+            // where that could differ from what is judged here.
+            GAME_START => return Err(ReplayError::UnexpectedEvent),
+            POST_FRAME | GAME_END if seen_end => return Err(ReplayError::UnexpectedEvent),
             POST_FRAME => {
                 let Some(pf) = events::post_frame(ev) else {
                     continue;
@@ -114,6 +123,7 @@ pub fn parse(file: &[u8]) -> Result<ReplayFacts, ReplayError> {
                 }
             }
             GAME_END => {
+                seen_end = true;
                 if let Some((method, lras)) = events::game_end(ev) {
                     end = Some(GameEnd {
                         method,

@@ -78,7 +78,14 @@ fn stored_files(app: &TestApp) -> Vec<PathBuf> {
 
 /// A started 2-player single elimination event: `(app, host, guest, event)`.
 async fn two_player() -> (TestApp, TestPlayer, TestPlayer, i64) {
-    let app = TestApp::spawn(|_| {}).await;
+    two_player_with(|_| {}).await
+}
+
+/// [`two_player`] on a server configured by `edit`.
+async fn two_player_with(
+    edit: impl FnOnce(&mut autobracket_server::Config),
+) -> (TestApp, TestPlayer, TestPlayer, i64) {
+    let app = TestApp::spawn(edit).await;
     let host = app.player("Alice").await;
     let guest = app.player("Bob").await;
     let event = app
@@ -258,7 +265,12 @@ async fn room_code_flow() {
     );
     assert_eq!(play_state(&guest, event).await.0.as_deref(), Some("AB12"));
 
-    // A direct host:port address is also accepted.
+    // A direct host:port address is also accepted, where the server allows it.
+    assert_eq!(
+        room(&host, event, 0, "10.0.0.5:51600").await,
+        StatusCode::BAD_REQUEST
+    );
+    let (_app, host, guest, event) = two_player_with(|c| c.allow_direct_connect = true).await;
     assert_eq!(
         room(&host, event, 0, "10.0.0.5:51600").await,
         StatusCode::NO_CONTENT
@@ -271,7 +283,7 @@ async fn room_code_flow() {
 
 #[tokio::test]
 async fn room_code_validation() {
-    let (_app, host, _guest, event) = two_player().await;
+    let (_app, host, _guest, event) = two_player_with(|c| c.allow_direct_connect = true).await;
     let longest_host = format!("{}:51600", "a".repeat(253));
     for good in [
         "KQ7X",
@@ -539,13 +551,13 @@ async fn first_upload_clears_code_and_sets_awaiting() {
     assert_eq!(state, "uploading");
     assert!(first.is_some());
 
-    // The second upload of the game does not clear a code posted for the next game.
-    assert_eq!(room(&host, event, 0, "AB12").await, StatusCode::NO_CONTENT);
+    // No new code while the game awaits its second upload (the host would start it again).
+    assert_eq!(room(&host, event, 0, "AB12").await, StatusCode::CONFLICT);
     assert_eq!(
         upload(&guest, event, 0, 1, simple_game(1, START_A)).await,
         StatusCode::ACCEPTED
     );
-    assert_eq!(play_state(&guest, event).await, (Some("AB12".into()), true));
+    assert_eq!(play_state(&guest, event).await, (None, true));
     let slots: Vec<i64> = sqlx::query_scalar("SELECT slot FROM uploads ORDER BY slot")
         .fetch_all(&app.state.db)
         .await
@@ -619,4 +631,297 @@ async fn outsider_is_403() {
     );
     assert!(stored_files(&app).is_empty());
     assert_eq!(next(&outsider, event).await, Next::NotEntered);
+}
+
+/// `host:port` codes (a direct connection to the host) are refused unless the server allows them.
+#[tokio::test]
+async fn direct_connect_is_off_by_default() {
+    let (_app, host, _guest, event) = two_player().await;
+    let res = host
+        .post_json(
+            &format!("/v1/sets/{event}/0/room"),
+            &RoomReq {
+                code: "relay.gsd.sh:51600".into(),
+            },
+        )
+        .await;
+    assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+    let body: Value = res.json().await.unwrap();
+    assert!(body["error"].as_str().unwrap().contains("direct"), "{body}");
+    assert_eq!(room(&host, event, 0, "KQ7X").await, StatusCode::NO_CONTENT);
+}
+
+/// A host whose upload went in cannot hand out a new code until the game is judged.
+#[tokio::test]
+async fn room_code_is_refused_while_a_game_is_in_progress() {
+    let (app, host, guest, event) = two_player().await;
+    assert_eq!(room(&host, event, 0, "KQ7X").await, StatusCode::NO_CONTENT);
+    assert_eq!(
+        upload(&guest, event, 0, 1, simple_game(1, START_B)).await,
+        StatusCode::ACCEPTED
+    );
+    assert_eq!(room(&host, event, 0, "AB12").await, StatusCode::CONFLICT);
+    // Judging too.
+    sqlx::query("UPDATE games SET state = 'judging'")
+        .execute(&app.state.db)
+        .await
+        .unwrap();
+    assert_eq!(room(&host, event, 0, "AB12").await, StatusCode::CONFLICT);
+    // Once the game is decided, the next game's code is welcome.
+    sqlx::query("UPDATE games SET state = 'counted'")
+        .execute(&app.state.db)
+        .await
+        .unwrap();
+    assert_eq!(room(&host, event, 0, "AB12").await, StatusCode::NO_CONTENT);
+}
+
+async fn no_show(p: &TestPlayer, event: i64, set: u32, body: Value) -> reqwest::Response {
+    p.post_json(&format!("/v1/sets/{event}/{set}/no-show"), &body)
+        .await
+}
+
+async fn queue_reasons(app: &TestApp) -> Vec<(String, String)> {
+    sqlx::query_as("SELECT reason, state FROM queue ORDER BY id")
+        .fetch_all(&app.state.db)
+        .await
+        .unwrap()
+}
+
+/// A guest may still be joining a freshly posted room: a `no-show` within the grace period is
+/// refused; `client-failure` (the reporter's own client gave up) has no grace period.
+#[tokio::test]
+async fn no_show_grace_period_after_a_room_code() {
+    let (app, host, guest, event) = two_player_with(|c| c.no_show_grace_secs = 90).await;
+    // No code posted yet: a no-show is fine at once... but first the code.
+    assert_eq!(room(&host, event, 0, "KQ7X").await, StatusCode::NO_CONTENT);
+    for body in [
+        json!({}),
+        json!({"kind": "no-show"}),
+        json!({"detail": "gone"}),
+    ] {
+        let res = no_show(&host, event, 0, body.clone()).await;
+        assert_eq!(res.status(), StatusCode::CONFLICT, "{body}");
+        let err: Value = res.json().await.unwrap();
+        assert_eq!(
+            err,
+            json!({"error": "a room code was posted less than 90 seconds ago"})
+        );
+    }
+    // An unknown kind is a bad request.
+    let res = no_show(&guest, event, 0, json!({"kind": "rage-quit"})).await;
+    assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+    assert!(queue_reasons(&app).await.is_empty());
+
+    // Once the grace period has passed, the report goes through.
+    sqlx::query("UPDATE sets SET room_posted_at = room_posted_at - 91")
+        .execute(&app.state.db)
+        .await
+        .unwrap();
+    let res = no_show(&host, event, 0, json!({"kind": "no-show"})).await;
+    assert_eq!(res.status(), StatusCode::NO_CONTENT);
+    assert_eq!(
+        queue_reasons(&app).await,
+        vec![("no-show".into(), "open".into())]
+    );
+}
+
+#[tokio::test]
+async fn client_failure_has_no_grace_period() {
+    let (app, host, _guest, event) = two_player_with(|c| c.no_show_grace_secs = 90).await;
+    assert_eq!(room(&host, event, 0, "KQ7X").await, StatusCode::NO_CONTENT);
+    let res = no_show(
+        &host,
+        event,
+        0,
+        json!({"kind": "client-failure", "detail": "engine exited 1 four times"}),
+    )
+    .await;
+    assert_eq!(res.status(), StatusCode::NO_CONTENT);
+    assert_eq!(
+        queue_reasons(&app).await,
+        vec![("client-failure".into(), "open".into())]
+    );
+    let detail: String = sqlx::query_scalar("SELECT detail FROM queue")
+        .fetch_one(&app.state.db)
+        .await
+        .unwrap();
+    assert!(detail.contains("slot 0"), "{detail}");
+    assert!(detail.contains("engine exited 1 four times"), "{detail}");
+    assert_eq!(next(&host, event).await, Next::Review { set_id: 0 });
+}
+
+/// Reports `kind` on set 0 (grace period off) and checks the set went to review.
+async fn report(app: &TestApp, p: &TestPlayer, event: i64, kind: &str) {
+    let res = no_show(p, event, 0, json!({ "kind": kind })).await;
+    assert_eq!(res.status(), StatusCode::NO_CONTENT, "{kind}");
+    let state: String = sqlx::query_scalar("SELECT state FROM sets WHERE set_id = 0")
+        .fetch_one(&app.state.db)
+        .await
+        .unwrap();
+    assert_eq!(state, "review");
+}
+
+/// After a no-show report (or a stall flag, or a client failure) the game that was in fact
+/// played is still uploaded: judged as evidence, never counted.
+#[tokio::test]
+async fn review_for_a_no_show_still_takes_the_played_game() {
+    for kind in ["no-show", "client-failure", "stalled"] {
+        let (app, host, guest, event) = two_player().await;
+        if kind == "stalled" {
+            // As the worker's stall check does it.
+            sqlx::query("UPDATE sets SET state = 'review' WHERE set_id = 0")
+                .execute(&app.state.db)
+                .await
+                .unwrap();
+            sqlx::query(
+                "INSERT INTO queue (event_id, set_id, reason, state, created_at)
+                 VALUES (?, 0, 'stalled', 'open', 0)",
+            )
+            .bind(event)
+            .execute(&app.state.db)
+            .await
+            .unwrap();
+        } else {
+            report(&app, &guest, event, kind).await;
+        }
+
+        // The wrong game number is still refused.
+        assert_eq!(
+            upload(&host, event, 0, 2, simple_game(1, START_A)).await,
+            StatusCode::CONFLICT,
+            "{kind}"
+        );
+        assert_eq!(
+            upload(&host, event, 0, 1, b"nope".to_vec()).await,
+            StatusCode::BAD_REQUEST,
+            "{kind}"
+        );
+        assert_eq!(
+            upload(&host, event, 0, 1, simple_game(1, START_A)).await,
+            StatusCode::ACCEPTED,
+            "{kind}"
+        );
+        // Idempotent, and one file per slot.
+        assert_eq!(
+            upload(&host, event, 0, 1, simple_game(1, START_A)).await,
+            StatusCode::OK,
+            "{kind}"
+        );
+        assert_eq!(
+            upload(&host, event, 0, 1, simple_game(2, START_A)).await,
+            StatusCode::CONFLICT,
+            "{kind}"
+        );
+        assert_eq!(
+            upload(&guest, event, 0, 1, simple_game(1, START_B)).await,
+            StatusCode::ACCEPTED,
+            "{kind}"
+        );
+        // Both players are still told to wait for the organiser.
+        assert_eq!(next(&host, event).await, Next::Review { set_id: 0 });
+
+        autobracket_server::worker::judge_due(&app.state)
+            .await
+            .unwrap();
+        // The verdict is stored, the game voided, and nothing counts.
+        let (state, verdict): (String, Option<String>) =
+            sqlx::query_as("SELECT state, verdict_json FROM games")
+                .fetch_one(&app.state.db)
+                .await
+                .unwrap();
+        assert_eq!(state, "void", "{kind}");
+        assert!(verdict.is_some(), "{kind}");
+        let (set_state, wins0, wins1): (String, i64, i64) =
+            sqlx::query_as("SELECT state, wins0, wins1 FROM sets WHERE set_id = 0")
+                .fetch_one(&app.state.db)
+                .await
+                .unwrap();
+        assert_eq!(
+            (set_state.as_str(), wins0, wins1),
+            ("review", 0, 0),
+            "{kind}"
+        );
+        assert_eq!(
+            queue_reasons(&app).await,
+            vec![(kind.to_owned(), "open".to_owned())]
+        );
+
+        // A retry of either file after the verdict is still a no-op, and no second game
+        // opens for this review.
+        assert_eq!(
+            upload(&guest, event, 0, 1, simple_game(1, START_B)).await,
+            StatusCode::OK,
+            "{kind}"
+        );
+        assert_eq!(count(&app, "SELECT COUNT(*) FROM games").await, 1);
+        assert!(
+            stored_files(&app)
+                .iter()
+                .all(|f| f.extension().is_some_and(|e| e == "slp")),
+            "no temporary files are left behind"
+        );
+    }
+}
+
+/// A set in review for a verdict (the organiser must look at the games already uploaded)
+/// takes no further uploads.
+#[tokio::test]
+async fn review_for_a_verdict_takes_no_upload() {
+    let (app, host, guest, event) = two_player().await;
+    // Two uploads that disagree on the winner.
+    assert_eq!(
+        upload(&host, event, 0, 1, simple_game(1, START_A)).await,
+        StatusCode::ACCEPTED
+    );
+    assert_eq!(
+        upload(&guest, event, 0, 1, simple_game(2, START_B)).await,
+        StatusCode::ACCEPTED
+    );
+    autobracket_server::worker::judge_due(&app.state)
+        .await
+        .unwrap();
+    assert_eq!(next(&host, event).await, Next::Review { set_id: 0 });
+    let reasons = queue_reasons(&app).await;
+    assert_eq!(reasons.len(), 1);
+    assert!(!["no-show", "stalled", "client-failure"].contains(&reasons[0].0.as_str()));
+    assert_eq!(
+        upload(&host, event, 0, 1, simple_game(1, START_A)).await,
+        StatusCode::CONFLICT
+    );
+    // Mixed: a no-show item next to a verdict item still takes nothing.
+    sqlx::query(
+        "INSERT INTO queue (event_id, set_id, reason, state, created_at)
+         VALUES (?, 0, 'no-show', 'open', 0)",
+    )
+    .bind(event)
+    .execute(&app.state.db)
+    .await
+    .unwrap();
+    assert_eq!(
+        upload(&host, event, 0, 1, simple_game(1, START_A)).await,
+        StatusCode::CONFLICT
+    );
+}
+
+/// Temporary files of refused or repeated uploads are removed.
+#[tokio::test]
+async fn refused_uploads_leave_no_temporary_files() {
+    let (app, host, _guest, event) = two_player().await;
+    let file = simple_game(1, START_A);
+    assert_eq!(
+        upload(&host, event, 0, 1, file.clone()).await,
+        StatusCode::ACCEPTED
+    );
+    assert_eq!(upload(&host, event, 0, 1, file).await, StatusCode::OK);
+    assert_eq!(
+        upload(&host, event, 0, 1, simple_game(2, START_A)).await,
+        StatusCode::CONFLICT
+    );
+    assert_eq!(
+        upload(&host, event, 0, 2, simple_game(2, START_A)).await,
+        StatusCode::CONFLICT
+    );
+    let files = stored_files(&app);
+    assert_eq!(files.len(), 1, "{files:?}");
+    assert!(files[0].ends_with("0.slp"), "{files:?}");
 }

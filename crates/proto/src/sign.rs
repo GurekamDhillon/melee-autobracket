@@ -60,6 +60,15 @@ pub fn sign_request(
     }
 }
 
+/// The checks that need no body: every header is well formed (the key a valid Ed25519
+/// point) and the signed time is within [`MAX_SKEW_SECS`] of `now_unix`. Returns the signer's
+/// verifying key as lowercase hex. A server makes these checks before reading the body; the
+/// signature itself is checked by [`verify_request`].
+pub fn check_headers(h: &SignedHeaders, now_unix: i64) -> Result<String, SignError> {
+    let (key, _) = parse_headers(h, now_unix)?;
+    Ok(hex::encode(key.to_bytes()))
+}
+
 /// Checks the headers against the request and the caller's clock; on success
 /// returns the signer's verifying key as lowercase hex.
 pub fn verify_request(
@@ -69,20 +78,23 @@ pub fn verify_request(
     now_unix: i64,
     body: &[u8],
 ) -> Result<String, SignError> {
+    let (key, sig) = parse_headers(h, now_unix)?;
+    let msg = canonical(method, path_and_query, &h.time, &h.nonce, body);
+    key.verify_strict(msg.as_bytes(), &sig)
+        .map_err(|_| SignError::BadSignature)?;
+    Ok(hex::encode(key.to_bytes()))
+}
+
+fn parse_headers(h: &SignedHeaders, now_unix: i64) -> Result<(VerifyingKey, Signature), SignError> {
     let key_bytes: [u8; 32] = decode_fixed(&h.key)?;
     let sig_bytes: [u8; 64] = decode_fixed(&h.sig)?;
     let _: [u8; 16] = decode_fixed(&h.nonce)?;
     let time: i64 = h.time.parse().map_err(|_| SignError::Malformed)?;
     let key = VerifyingKey::from_bytes(&key_bytes).map_err(|_| SignError::Malformed)?;
-
     if now_unix.abs_diff(time) > MAX_SKEW_SECS as u64 {
         return Err(SignError::Skew);
     }
-
-    let msg = canonical(method, path_and_query, &h.time, &h.nonce, body);
-    key.verify_strict(msg.as_bytes(), &Signature::from_bytes(&sig_bytes))
-        .map_err(|_| SignError::BadSignature)?;
-    Ok(hex::encode(key_bytes))
+    Ok((key, Signature::from_bytes(&sig_bytes)))
 }
 
 fn decode_fixed<const N: usize>(s: &str) -> Result<[u8; N], SignError> {

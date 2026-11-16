@@ -2,7 +2,6 @@
 //! directory, and signing HTTP clients for organisers and players.
 
 use std::collections::VecDeque;
-use std::net::SocketAddr;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 
@@ -31,8 +30,9 @@ pub struct TestApp {
 }
 
 impl TestApp {
-    /// Spawns with [`NoResim`]. Rate limits are raised out of reach and the background worker
-    /// is off (tests judge with [`crate::worker::judge_due`]) unless `edit` changes them.
+    /// Spawns with [`NoResim`]. Rate limits are raised out of reach, the no-show grace period
+    /// after a room code is off, and the background worker is off (tests judge with
+    /// [`crate::worker::judge_due`]) unless `edit` changes them.
     pub async fn spawn(edit: impl FnOnce(&mut Config)) -> Self {
         Self::spawn_with(edit, Arc::new(NoResim)).await
     }
@@ -47,6 +47,7 @@ impl TestApp {
         cfg.rate_per_sec = 1_000_000;
         cfg.rate_burst = 1_000_000;
         cfg.worker_enabled = false;
+        cfg.no_show_grace_secs = 0;
         edit(&mut cfg);
 
         let (app, state) = build_app(cfg, resim).await.expect("build app");
@@ -54,14 +55,8 @@ impl TestApp {
             .await
             .expect("bind");
         let addr = listener.local_addr().expect("local addr");
-        let server = tokio::spawn(async move {
-            axum::serve(
-                listener,
-                app.into_make_service_with_connect_info::<SocketAddr>(),
-            )
-            .await
-            .expect("serve");
-        });
+        let max_connections = state.cfg.max_connections;
+        let server = tokio::spawn(crate::serve(listener, app, max_connections));
         state.tasks.add(server.abort_handle());
         TestApp {
             url: format!("http://{addr}"),

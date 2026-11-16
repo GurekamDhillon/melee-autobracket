@@ -466,3 +466,68 @@ fn every_truncation_and_mutation_is_safe() {
         }
     }
 }
+
+/// Game End payload: method 2 (GAME!), no LRAS initiator, ports 1 and 2 occupied.
+fn game_end_payload() -> Vec<u8> {
+    vec![2, 0xFF, 0, 0, 0xFF, 0xFF]
+}
+
+/// Game Start's declared size, read from a built file's size table.
+fn game_start_size() -> usize {
+    let built = simple_game(1, "t");
+    let raw = raw_element(&built).unwrap();
+    let table = &raw[2..1 + usize::from(raw[1])];
+    let entry = table.chunks(3).find(|e| e[0] == 0x36).unwrap();
+    usize::from(u16::from_be_bytes([entry[1], entry[2]]))
+}
+
+/// The engine keeps the last Game Start it reads, we judged the first: a file with two is refused.
+#[test]
+fn second_game_start_is_rejected() {
+    let file = SlpBuilder::new()
+        .player(1, 2, PlayerKind::Human)
+        .player(2, 9, PlayerKind::Human)
+        .event(0x36, vec![0; game_start_size()])
+        .frame(10, 1, 4, 0.0)
+        .frame(10, 2, 3, 0.0)
+        .end(2, None)
+        .build();
+    assert_eq!(parse(&file), Err(ReplayError::UnexpectedEvent));
+}
+
+#[test]
+fn second_game_end_is_rejected() {
+    let file = SlpBuilder::new()
+        .player(1, 2, PlayerKind::Human)
+        .player(2, 9, PlayerKind::Human)
+        .event(0x39, game_end_payload())
+        .end(2, None)
+        .build();
+    assert_eq!(parse(&file), Err(ReplayError::UnexpectedEvent));
+}
+
+#[test]
+fn frames_after_game_end_are_rejected() {
+    let file = SlpBuilder::new()
+        .player(1, 2, PlayerKind::Human)
+        .player(2, 9, PlayerKind::Human)
+        .event(0x39, game_end_payload())
+        .frame(10, 1, 4, 0.0)
+        .frame(10, 2, 3, 0.0)
+        .build();
+    assert_eq!(parse(&file), Err(ReplayError::UnexpectedEvent));
+}
+
+/// Events other than frames may follow Game End; one Game End after the frames is the norm.
+#[test]
+fn other_events_after_game_end_are_accepted() {
+    let file = SlpBuilder::new()
+        .player(1, 2, PlayerKind::Human)
+        .player(2, 9, PlayerKind::Human)
+        .event(0x39, game_end_payload())
+        .event(0x42, vec![1, 2, 3])
+        .build();
+    let f = parse(&file).unwrap();
+    assert_eq!(f.end.map(|e| e.method), Some(2));
+    assert!(parse(&simple_game(1, "t")).is_ok());
+}

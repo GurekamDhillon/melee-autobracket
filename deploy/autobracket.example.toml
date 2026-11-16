@@ -39,6 +39,14 @@ max_replay_bytes = 16777216
 rate_per_sec = 20
 # Requests one IP address may make in a burst before being limited.
 rate_burst = 40
+# Most connections served at once; more wait to be accepted (every connection is closed after 30 s idle).
+max_connections = 512
+# Reverse proxies whose X-Forwarded-For names the client, as CIDRs (nginx in Docker: ["172.16.0.0/12"]).
+trusted_proxies = []
+# Seconds after a room code is posted during which a "no-show" report is refused (the guest may still be joining).
+no_show_grace_secs = 90
+# Accept HOST:PORT room codes (a direct connection to the host, for LAN events; reveals addresses).
+allow_direct_connect = false
 
 [verifier]
 # "in_process" runs the engine here, "external" waits for `autobracket verify-worker`, "off" skips

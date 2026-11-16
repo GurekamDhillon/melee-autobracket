@@ -137,3 +137,33 @@ fn ruleset_partial() {
         }
     );
 }
+
+/// The checks a server can make before reading the body: header shape and clock skew.
+#[test]
+fn check_headers_before_the_body() {
+    let sk = key();
+    let h = sign_request(&sk, "POST", "/v1/players", NOW, BODY);
+    let key_hex = hex::encode(sk.verifying_key().to_bytes());
+    assert_eq!(check_headers(&h, NOW), Ok(key_hex.clone()));
+    assert_eq!(check_headers(&h, NOW - 120), Ok(key_hex));
+    assert_eq!(check_headers(&h, NOW + 121), Err(SignError::Skew));
+    // A time in the future is as wrong as one in the past.
+    assert_eq!(check_headers(&h, NOW - 121), Err(SignError::Skew));
+
+    let mut bad_nonce = h.clone();
+    bad_nonce.nonce.push('0');
+    assert_eq!(check_headers(&bad_nonce, NOW), Err(SignError::Malformed));
+    let mut bad_time = h.clone();
+    bad_time.time = "soon".into();
+    assert_eq!(check_headers(&bad_time, NOW), Err(SignError::Malformed));
+    let mut bad_sig = h.clone();
+    bad_sig.sig = "xy".repeat(64);
+    assert_eq!(check_headers(&bad_sig, NOW), Err(SignError::Malformed));
+
+    // A valid shape says nothing about the signature: the body is checked afterwards.
+    assert_eq!(check_headers(&h, NOW), Ok(h.key.clone()));
+    assert_eq!(
+        verify_request(&h, "POST", "/v1/players", NOW, b"other"),
+        Err(SignError::BadSignature)
+    );
+}

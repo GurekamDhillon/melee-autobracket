@@ -7,5 +7,7 @@ pub mod types;
 
 pub use ed25519_dalek::{SigningKey, VerifyingKey};
 pub use ruleset::Ruleset;
-pub use sign::{canonical, sign_request, verify_request, SignError, SignedHeaders, MAX_SKEW_SECS};
+pub use sign::{
+    canonical, check_headers, sign_request, verify_request, SignError, SignedHeaders, MAX_SKEW_SECS,
+};
 pub use types::*;

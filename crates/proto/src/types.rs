@@ -103,6 +103,31 @@ pub struct NoShowReq {
     /// characters or line separators (the server answers 400 otherwise).
     #[serde(default)]
     pub detail: Option<String>,
+    /// What happened; the organiser queue item's reason. Absent means `NoShow`.
+    #[serde(default)]
+    pub kind: NoShowKind,
+}
+
+/// Why a player reports that a set cannot be played.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Default)]
+#[serde(rename_all = "kebab-case")]
+pub enum NoShowKind {
+    /// `"no-show"`: the opponent never joined. Refused for `no_show_grace_secs` after a room
+    /// code is posted.
+    #[default]
+    NoShow,
+    /// `"client-failure"`: the reporter's own client could not complete a game.
+    ClientFailure,
+}
+
+impl NoShowKind {
+    /// The JSON value, which is also the organiser queue reason.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            NoShowKind::NoShow => "no-show",
+            NoShowKind::ClientFailure => "client-failure",
+        }
+    }
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]

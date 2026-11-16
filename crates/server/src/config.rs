@@ -57,6 +57,20 @@ pub struct Config {
     /// tests that drive judging themselves turn it off, in code.
     #[serde(skip_deserializing, default = "default_worker_enabled")]
     pub worker_enabled: bool,
+    // --- API surface (final fix wave, engineer B) ---
+    /// Most connections served at once; further ones wait to be accepted.
+    #[serde(default = "default_max_connections")]
+    pub max_connections: usize,
+    /// Reverse proxies (CIDRs) whose `X-Forwarded-For` names the client. Empty: the TCP peer
+    /// is the client.
+    #[serde(default)]
+    pub trusted_proxies: Vec<String>,
+    /// Seconds after a room code is posted during which a `no-show` report is refused.
+    #[serde(default = "default_no_show_grace_secs")]
+    pub no_show_grace_secs: u64,
+    /// Accept `host:port` room codes (direct connection, for LAN events).
+    #[serde(default)]
+    pub allow_direct_connect: bool,
 }
 
 #[derive(Deserialize, Clone, Debug)]
@@ -124,6 +138,10 @@ impl Config {
             verifier: VerifierConfig::default(),
             ruleset: Ruleset::default(),
             worker_enabled: default_worker_enabled(),
+            max_connections: default_max_connections(),
+            trusted_proxies: Vec::new(),
+            no_show_grace_secs: default_no_show_grace_secs(),
+            allow_direct_connect: false,
         }
     }
 
@@ -182,6 +200,16 @@ impl Config {
         if v.jobs == 0 {
             bail!("verifier.jobs must be at least 1");
         }
+        self.validate_api()?;
+        Ok(())
+    }
+
+    /// The API surface keys: `max_connections`, `trusted_proxies`.
+    fn validate_api(&self) -> anyhow::Result<()> {
+        if self.max_connections == 0 {
+            bail!("max_connections must be at least 1");
+        }
+        crate::net::parse_cidrs(&self.trusted_proxies).context("trusted_proxies")?;
         Ok(())
     }
 
@@ -244,6 +272,14 @@ fn default_rate_burst() -> u32 {
 
 fn default_worker_enabled() -> bool {
     true
+}
+
+fn default_max_connections() -> usize {
+    512
+}
+
+fn default_no_show_grace_secs() -> u64 {
+    90
 }
 
 #[cfg(test)]
@@ -423,6 +459,40 @@ mod tests {
         assert!(!cfg.build_accepted("melee 1.3.0+bbbbbbbbbbbb"));
         assert!(!cfg.build_accepted("melee 1.2.1+0123456789ab"));
         assert!(!cfg.build_accepted("melee 1.2"));
+    }
+
+    #[test]
+    fn api_keys_default_and_parse() {
+        let cfg = Config::parse(&format!("to_keys = [\"{KEY}\"]\n")).unwrap();
+        assert_eq!(cfg.max_connections, 512);
+        assert!(cfg.trusted_proxies.is_empty());
+        assert_eq!(cfg.no_show_grace_secs, 90);
+        assert!(!cfg.allow_direct_connect);
+        let cfg = Config::parse(&format!(
+            "to_keys = [\"{KEY}\"]\nmax_connections = 8\ntrusted_proxies = [\"172.16.0.0/12\", \"::1/128\", \"10.0.0.1\"]\nno_show_grace_secs = 0\nallow_direct_connect = true\n"
+        ))
+        .unwrap();
+        assert_eq!(cfg.max_connections, 8);
+        assert_eq!(cfg.trusted_proxies.len(), 3);
+        assert_eq!(cfg.no_show_grace_secs, 0);
+        assert!(cfg.allow_direct_connect);
+    }
+
+    #[test]
+    fn rejects_bad_api_keys() {
+        let err = rejection("max_connections = 0");
+        assert!(err.contains("max_connections"), "{err}");
+        for bad in [
+            "172.16.0.0/33",
+            "nonsense",
+            "10.0.0.0/",
+            "::1/129",
+            "1.2.3.4/-1",
+        ] {
+            let err = rejection(&format!("trusted_proxies = [\"10.0.0.0/8\", \"{bad}\"]"));
+            assert!(err.contains("trusted_proxies"), "{bad}: {err}");
+            assert!(err.contains(bad), "the entry is named: {err}");
+        }
     }
 
     #[test]
