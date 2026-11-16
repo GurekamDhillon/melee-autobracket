@@ -6,12 +6,13 @@
 //! can never choose how it is checked (no `none`, no HMAC with a public key).
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use jsonwebtoken::jwk::{AlgorithmParameters, EllipticCurve, Jwk, KeyAlgorithm};
 use jsonwebtoken::{Algorithm, DecodingKey, Validation};
 use serde::Deserialize;
-use tokio::sync::Mutex;
 
 use crate::config::IdentityConfig;
 
@@ -68,17 +69,39 @@ struct Cache {
 }
 
 /// The JWKS cache. One per server; cheap to share behind an `Arc`.
+///
+/// Requests whose key is cached never wait on the network: a stale key set is refreshed in
+/// the background while the cached keys keep answering. Only a request that needs keys the
+/// cache does not have (none fetched yet, or an unknown `kid`) waits for a fetch, and fetches
+/// happen one at a time.
 pub struct Jwks {
+    inner: Arc<Inner>,
+}
+
+struct Inner {
     client: reqwest::Client,
-    cache: Mutex<Cache>,
+    /// Held only to read or update, never across a fetch.
+    cache: std::sync::Mutex<Cache>,
+    /// Held across a fetch, so there is one fetch at a time.
+    fetch: tokio::sync::Mutex<()>,
+    /// A background refresh is running.
+    refreshing: AtomicBool,
 }
 
 impl Jwks {
     pub fn new() -> anyhow::Result<Self> {
-        let client = reqwest::Client::builder().timeout(FETCH_TIMEOUT).build()?;
+        let client = reqwest::Client::builder()
+            .timeout(FETCH_TIMEOUT)
+            // The configured URL is the one fetched (validation allows only https there).
+            .redirect(reqwest::redirect::Policy::none())
+            .build()?;
         Ok(Jwks {
-            client,
-            cache: Mutex::default(),
+            inner: Arc::new(Inner {
+                client,
+                cache: std::sync::Mutex::default(),
+                fetch: tokio::sync::Mutex::new(()),
+                refreshing: AtomicBool::new(false),
+            }),
         })
     }
 
@@ -101,40 +124,87 @@ impl Jwks {
 
     /// The key named `kid`, fetching the key set when needed.
     async fn key(&self, cfg: &IdentityConfig, kid: &str) -> Result<Key, TokenError> {
-        // Held across a fetch, so concurrent requests wait for one fetch instead of each
-        // making their own.
-        let mut cache = self.cache.lock().await;
-        let stale = cache.fetched_at.is_none_or(|t| t.elapsed() >= CACHE_TTL);
-        let may_retry = cache
-            .failed_at
-            .is_none_or(|t| t.elapsed() >= RETRY_AFTER_FAILURE);
-        let mut fetched = false;
-        if stale && may_retry {
-            self.refresh(&mut cache, cfg).await;
-            fetched = true;
+        let url = cfg.jwks_url();
+        // Fast path: a cached key, refreshed in the background once stale.
+        {
+            let cache = self.inner.lock_cache();
+            if let (Some(fetched_at), Some(key)) = (cache.fetched_at, cache.keys.get(kid)) {
+                let key = key.clone();
+                let due = fetched_at.elapsed() >= CACHE_TTL && cache.may_retry();
+                drop(cache);
+                if due {
+                    self.refresh_in_background(url);
+                }
+                return Ok(key);
+            }
         }
-        if let Some(key) = cache.keys.get(kid) {
-            return Ok(key.clone());
-        }
-        if cache.fetched_at.is_none() {
-            return Err(TokenError::Unavailable);
-        }
-        let may_refetch = cache
-            .refetched_at
-            .is_none_or(|t| t.elapsed() >= UNKNOWN_KID_REFETCH);
-        if !fetched && may_refetch {
-            cache.refetched_at = Some(Instant::now());
-            self.refresh(&mut cache, cfg).await;
+
+        // Slow path: no keys yet, or an unknown kid. One fetch at a time; look again once it
+        // is our turn, since the fetch before ours may have brought the key.
+        let _turn = self.inner.fetch.lock().await;
+        let fetch = {
+            let mut cache = self.inner.lock_cache();
             if let Some(key) = cache.keys.get(kid) {
                 return Ok(key.clone());
             }
+            if cache.fetched_at.is_none() {
+                cache.may_retry()
+            } else if cache
+                .refetched_at
+                .is_none_or(|t| t.elapsed() >= UNKNOWN_KID_REFETCH)
+            {
+                cache.refetched_at = Some(Instant::now());
+                true
+            } else {
+                false
+            }
+        };
+        if fetch {
+            self.inner.refresh(&url).await;
         }
-        Err(TokenError::Invalid)
+        let cache = self.inner.lock_cache();
+        match cache.keys.get(kid) {
+            Some(key) => Ok(key.clone()),
+            None if cache.fetched_at.is_none() => Err(TokenError::Unavailable),
+            None => Err(TokenError::Invalid),
+        }
     }
 
-    /// Fetches the key set into `cache`; on failure keeps what it had.
-    async fn refresh(&self, cache: &mut Cache, cfg: &IdentityConfig) {
-        match self.fetch(&cfg.jwks_url()).await {
+    /// Starts a refresh of the key set unless one is already running.
+    fn refresh_in_background(&self, url: String) {
+        if self.inner.refreshing.swap(true, Ordering::SeqCst) {
+            return;
+        }
+        let inner = self.inner.clone();
+        tokio::spawn(async move {
+            {
+                let _turn = inner.fetch.lock().await;
+                inner.refresh(&url).await;
+            }
+            inner.refreshing.store(false, Ordering::SeqCst);
+        });
+    }
+}
+
+impl Cache {
+    /// Whether a fetch may be tried: none failed in the last [`RETRY_AFTER_FAILURE`].
+    fn may_retry(&self) -> bool {
+        self.failed_at
+            .is_none_or(|t| t.elapsed() >= RETRY_AFTER_FAILURE)
+    }
+}
+
+impl Inner {
+    fn lock_cache(&self) -> std::sync::MutexGuard<'_, Cache> {
+        self.cache.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// Fetches the key set into the cache; on failure keeps what it had. The cache lock is
+    /// not held while fetching.
+    async fn refresh(&self, url: &str) {
+        let fetched = self.fetch(url).await;
+        let mut cache = self.lock_cache();
+        match fetched {
             Ok(keys) => {
                 if keys.is_empty() {
                     tracing::warn!("the JWKS has no usable RS256 or EdDSA key");
@@ -151,7 +221,10 @@ impl Jwks {
     }
 
     async fn fetch(&self, url: &str) -> anyhow::Result<HashMap<String, Key>> {
-        let mut res = self.client.get(url).send().await?.error_for_status()?;
+        let mut res = self.client.get(url).send().await?;
+        if !res.status().is_success() {
+            anyhow::bail!("the JWKS answered {}", res.status());
+        }
         let mut body = Vec::new();
         while let Some(chunk) = res.chunk().await? {
             if body.len() + chunk.len() > MAX_JWKS_BYTES {
@@ -376,5 +449,157 @@ mod tests {
         kids.sort();
         assert_eq!(kids, ["ok"]);
         assert!(parse_jwks(b"not json").is_err());
+    }
+
+    // --- Fetching: a local JWKS server with one Ed25519 key, `kid "e1"` ---
+
+    use std::sync::atomic::AtomicUsize;
+
+    use base64::Engine;
+    use ed25519_dalek::Signer;
+
+    struct Idp {
+        url: String,
+        key: ed25519_dalek::SigningKey,
+        fetches: Arc<AtomicUsize>,
+        /// When set, `/keys` answers 500.
+        down: Arc<AtomicBool>,
+    }
+
+    /// Serves `/keys` (the JWKS) and `/redirect` (302 to `/keys`).
+    async fn idp() -> Idp {
+        let key = ed25519_dalek::SigningKey::from_bytes(&[7; 32]);
+        let b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD;
+        let doc = serde_json::json!({"keys": [{
+            "kty": "OKP", "crv": "Ed25519", "kid": "e1", "alg": "EdDSA",
+            "x": b64.encode(key.verifying_key().to_bytes()),
+        }]});
+        let fetches = Arc::new(AtomicUsize::new(0));
+        let down = Arc::new(AtomicBool::new(false));
+        let (f, d) = (fetches.clone(), down.clone());
+        let router = axum::Router::new()
+            .route(
+                "/keys",
+                axum::routing::get(move || {
+                    f.fetch_add(1, Ordering::SeqCst);
+                    let res = if d.load(Ordering::SeqCst) {
+                        Err(axum::http::StatusCode::INTERNAL_SERVER_ERROR)
+                    } else {
+                        Ok(axum::Json(doc.clone()))
+                    };
+                    async move { res }
+                }),
+            )
+            .route(
+                "/redirect",
+                axum::routing::get(|| async { axum::response::Redirect::to("/keys") }),
+            );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+        Idp {
+            url: format!("http://{addr}"),
+            key,
+            fetches,
+            down,
+        }
+    }
+
+    fn ed_token(key: &ed25519_dalek::SigningKey, alg: &str, now: i64) -> String {
+        let b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD;
+        let header = serde_json::json!({"alg": alg, "kid": "e1"});
+        let claims = serde_json::json!({
+            "iss": "https://auth.test", "aud": "client-test", "sub": "u1", "exp": now + 600,
+        });
+        let input = format!(
+            "{}.{}",
+            b64.encode(header.to_string()),
+            b64.encode(claims.to_string())
+        );
+        let sig = key.sign(input.as_bytes()).to_bytes();
+        format!("{input}.{}", b64.encode(sig))
+    }
+
+    fn cfg_at(url: String) -> IdentityConfig {
+        let mut cfg = cfg();
+        cfg.jwks_url = Some(url);
+        cfg
+    }
+
+    /// Pretends the key set was fetched two hours ago.
+    fn age(jwks: &Jwks) {
+        let mut cache = jwks.inner.cache.lock().unwrap();
+        cache.fetched_at = Instant::now().checked_sub(Duration::from_secs(7200));
+    }
+
+    /// Once keys are cached, a stale set is refreshed in the background: the request is
+    /// answered from the cache at once, also while the identity provider is down.
+    #[tokio::test]
+    async fn stale_keys_are_served_while_refreshing() {
+        let idp = idp().await;
+        let cfg = cfg_at(format!("{}/keys", idp.url));
+        let jwks = Jwks::new().unwrap();
+        let now = crate::db::now_unix();
+        let token = ed_token(&idp.key, "EdDSA", now);
+        assert!(jwks.verify(&cfg, &token, now).await.is_ok());
+        assert_eq!(idp.fetches.load(Ordering::SeqCst), 1);
+
+        age(&jwks);
+        assert!(jwks.verify(&cfg, &token, now).await.is_ok());
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while idp.fetches.load(Ordering::SeqCst) < 2 {
+            assert!(Instant::now() < deadline, "no background refresh");
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+
+        // Down, and the refresh is slow to fail: the cached key still answers at once.
+        idp.down.store(true, Ordering::SeqCst);
+        // Let the background refresh finish so it is not still marked as running.
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        age(&jwks);
+        let started = Instant::now();
+        assert!(jwks.verify(&cfg, &token, now).await.is_ok());
+        assert!(started.elapsed() < Duration::from_secs(1));
+    }
+
+    /// Redirects are not followed: the configured URL is the one fetched.
+    #[tokio::test]
+    async fn redirects_are_not_followed() {
+        let idp = idp().await;
+        let now = crate::db::now_unix();
+        let token = ed_token(&idp.key, "EdDSA", now);
+        let jwks = Jwks::new().unwrap();
+        let cfg = cfg_at(format!("{}/redirect", idp.url));
+        assert_eq!(
+            jwks.verify(&cfg, &token, now).await,
+            Err(TokenError::Unavailable)
+        );
+        assert_eq!(idp.fetches.load(Ordering::SeqCst), 0);
+    }
+
+    /// HS256 keyed with the Ed25519 public key bytes is refused (algorithm confusion).
+    #[tokio::test]
+    async fn hs256_with_the_ed25519_key_is_refused() {
+        use hmac::{Hmac, Mac};
+        let idp = idp().await;
+        let cfg = cfg_at(format!("{}/keys", idp.url));
+        let jwks = Jwks::new().unwrap();
+        let now = crate::db::now_unix();
+        assert!(jwks
+            .verify(&cfg, &ed_token(&idp.key, "EdDSA", now), now)
+            .await
+            .is_ok());
+        let b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD;
+        let good = ed_token(&idp.key, "EdDSA", now);
+        let payload = good.split('.').nth(1).unwrap();
+        let input = format!("{}.{payload}", b64.encode(r#"{"alg":"HS256","kid":"e1"}"#));
+        let mut mac =
+            Hmac::<sha2::Sha256>::new_from_slice(&idp.key.verifying_key().to_bytes()).unwrap();
+        mac.update(input.as_bytes());
+        let forged = format!("{input}.{}", b64.encode(mac.finalize().into_bytes()));
+        assert_eq!(
+            jwks.verify(&cfg, &forged, now).await,
+            Err(TokenError::Invalid)
+        );
     }
 }

@@ -126,6 +126,53 @@ fn csrf_ok(parts: &Parts, cfg: &IdentityConfig) -> bool {
         && header(&parts.headers, "origin") == Some(cfg.public_origin.as_str())
 }
 
+/// How often (seconds) a signed-in account's `last_seen_at` is written.
+const LAST_SEEN_REFRESH_SECS: i64 = 300;
+/// How far in the future (seconds) a token's `auth_time` may lie (clock skew).
+const AUTH_TIME_LEEWAY_SECS: i64 = 60;
+
+fn deleted() -> ApiError {
+    ApiError::new(StatusCode::UNAUTHORIZED, "this account was deleted")
+}
+
+fn disabled() -> ApiError {
+    ApiError::new(StatusCode::FORBIDDEN, "this account is disabled")
+}
+
+async fn is_tombstoned(conn: &mut sqlx::SqliteConnection, sub: &str) -> Result<bool, ApiError> {
+    let found: Option<i64> =
+        sqlx::query_scalar("SELECT 1 FROM account_tombstones WHERE sub_sha256 = ?")
+            .bind(sha256_hex(sub))
+            .fetch_optional(conn)
+            .await?;
+    Ok(found.is_some())
+}
+
+/// Creates the account of `sub`, or sets its `last_seen_at` to `now`; returns its id. The
+/// tombstone and `disabled_at` are checked again inside the write transaction, so a removal
+/// hook cannot slip between the check and the insert.
+async fn touch_account(state: &AppState, sub: &str, now: i64) -> Result<i64, ApiError> {
+    let mut tx = begin_write(&state.db).await?;
+    if is_tombstoned(&mut tx, sub).await? {
+        return Err(deleted());
+    }
+    let (id, disabled_at): (i64, Option<i64>) = sqlx::query_as(
+        "INSERT INTO accounts (sub, created_at, last_seen_at) VALUES (?, ?, ?)
+         ON CONFLICT (sub) DO UPDATE SET last_seen_at = excluded.last_seen_at
+         RETURNING id, disabled_at",
+    )
+    .bind(sub)
+    .bind(now)
+    .bind(now)
+    .fetch_one(&mut *tx)
+    .await?;
+    if disabled_at.is_some() {
+        return Err(disabled());
+    }
+    tx.commit().await?;
+    Ok(id)
+}
+
 impl FromRequestParts<AppState> for WebUser {
     type Rejection = ApiError;
 
@@ -136,30 +183,18 @@ impl FromRequestParts<AppState> for WebUser {
         let now = now_unix();
         let claims = verified_claims(parts, state, cfg, now).await?;
 
-        // One write transaction, so a removal hook cannot slip between the tombstone check
-        // and the account insert.
-        let mut tx = begin_write(&state.db).await?;
-        let tombstoned: Option<i64> =
-            sqlx::query_scalar("SELECT 1 FROM account_tombstones WHERE sub_sha256 = ?")
-                .bind(sha256_hex(&claims.sub))
-                .fetch_optional(&mut *tx)
-                .await?;
-        if tombstoned.is_some() {
-            return Err(ApiError::new(
-                StatusCode::UNAUTHORIZED,
-                "this account was deleted",
-            ));
+        // Reads first, on a plain connection: most requests write nothing.
+        let mut conn = state.db.acquire().await?;
+        if is_tombstoned(&mut conn, &claims.sub).await? {
+            return Err(deleted());
         }
-        let disabled: Option<Option<i64>> =
-            sqlx::query_scalar("SELECT disabled_at FROM accounts WHERE sub = ?")
+        let row: Option<(i64, Option<i64>, i64)> =
+            sqlx::query_as("SELECT id, disabled_at, last_seen_at FROM accounts WHERE sub = ?")
                 .bind(&claims.sub)
-                .fetch_optional(&mut *tx)
+                .fetch_optional(&mut *conn)
                 .await?;
-        if matches!(disabled, Some(Some(_))) {
-            return Err(ApiError::new(
-                StatusCode::FORBIDDEN,
-                "this account is disabled",
-            ));
+        if matches!(row, Some((_, Some(_), _))) {
+            return Err(disabled());
         }
         if !csrf_ok(parts, cfg) {
             return Err(ApiError::new(
@@ -167,25 +202,21 @@ impl FromRequestParts<AppState> for WebUser {
                 "cross-site request refused",
             ));
         }
-        let account_id: i64 = sqlx::query_scalar(
-            "INSERT INTO accounts (sub, created_at, last_seen_at) VALUES (?, ?, ?)
-             ON CONFLICT (sub) DO UPDATE SET last_seen_at = excluded.last_seen_at
-             RETURNING id",
-        )
-        .bind(&claims.sub)
-        .bind(now)
-        .bind(now)
-        .fetch_one(&mut *tx)
-        .await?;
+        let account_id = match row {
+            Some((id, _, seen)) if now.saturating_sub(seen) < LAST_SEEN_REFRESH_SECS => id,
+            _ => {
+                drop(conn);
+                touch_account(state, &claims.sub, now).await?
+            }
+        };
         let display_name: Option<String> = sqlx::query_scalar(
             "SELECT COALESCE(p.global_name, p.username) FROM accounts a
              JOIN discord_profiles p ON p.discord_id = a.discord_id WHERE a.id = ?",
         )
         .bind(account_id)
-        .fetch_optional(&mut *tx)
+        .fetch_optional(&state.db)
         .await?
         .flatten();
-        tx.commit().await?;
         Ok(WebUser {
             account_id,
             sub: claims.sub,
@@ -209,9 +240,10 @@ impl FromRequestParts<AppState> for AdminUser {
             return Err(ApiError::new(StatusCode::FORBIDDEN, "not an organiser"));
         }
         let max_age = i64::try_from(cfg.admin_max_auth_age_secs).unwrap_or(i64::MAX);
-        let recent = user
-            .auth_time
-            .is_some_and(|t| now_unix().saturating_sub(t) <= max_age);
+        let now = now_unix();
+        let recent = user.auth_time.is_some_and(|t| {
+            t <= now.saturating_add(AUTH_TIME_LEEWAY_SECS) && now.saturating_sub(t) <= max_age
+        });
         if !user.amr.iter().any(|m| m == "mfa") || !recent {
             return Err(ApiError(
                 StatusCode::FORBIDDEN,
@@ -229,7 +261,8 @@ impl FromRequestParts<AppState> for AdminUser {
 /// Checks a Zitadel `zitadel-signature` header (`t=<unix>,v1=<hex>[,v1=<hex>…]`, parts in any
 /// order, spaces allowed) over the raw `body` with `key`: HMAC-SHA256 of `"<t>.<body>"`,
 /// compared in constant time, `t` within [`HOOK_MAX_SKEW_SECS`] of `now` either way. Returns
-/// `(t, v1)` of the matching signature, for the replay cache; `None` on any failure.
+/// `(t, v1)` of the matching signature for the replay cache, `v1` as lowercase hex whatever
+/// its spelling in the header; `None` on any failure.
 pub fn verify_hook(
     sig_header: Option<&str>,
     body: &[u8],
@@ -269,7 +302,8 @@ pub fn verify_hook(
         mac.clone()
             .verify_slice(&bytes)
             .ok()
-            .map(|()| (t, v1.to_owned()))
+            // Canonical lowercase hex: a re-spelled replay must hit the replay cache.
+            .map(|()| (t, hex::encode(&bytes)))
     })
 }
 
@@ -344,6 +378,32 @@ mod tests {
         );
     }
 
+    /// The returned `v1` is canonical lowercase hex, so a re-spelled replay hits the cache.
+    #[test]
+    fn verify_hook_returns_canonical_v1() {
+        let good = v1("k", NOW, BODY);
+        let mixed: String = good
+            .chars()
+            .enumerate()
+            .map(|(i, c)| {
+                if i % 2 == 0 {
+                    c.to_ascii_uppercase()
+                } else {
+                    c
+                }
+            })
+            .collect();
+        assert_ne!(mixed, good);
+        for spelled in [good.to_uppercase(), mixed] {
+            let header = format!("t={NOW},v1={spelled}");
+            assert_eq!(
+                verify_hook(Some(&header), BODY, "k", NOW),
+                Some((NOW, good.clone())),
+                "{spelled}"
+            );
+        }
+    }
+
     #[test]
     fn verify_hook_parts_reordered_and_spaced() {
         let good = v1("k", NOW, BODY);
@@ -351,6 +411,7 @@ mod tests {
             format!("v1={good},t={NOW}"),
             format!(" t = {NOW} , v1 = {good} "),
             format!("v1={good}, t={NOW}, v0=ignored"),
+            format!("t={NOW},v1={}", good.to_uppercase()),
         ] {
             assert_eq!(
                 verify_hook(Some(&header), BODY, "k", NOW),

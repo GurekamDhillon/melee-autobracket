@@ -59,6 +59,16 @@ async fn forged_identity_is_refused() {
     expect(res, StatusCode::UNAUTHORIZED, Some("not signed in")).await;
     let res = untrusted.web(&TestWeb::admin("u1")).get(ADMIN_PING).await;
     expect(res, StatusCode::UNAUTHORIZED, Some("not signed in")).await;
+    // Forwarding headers naming the trusted proxy change nothing: only the TCP peer counts.
+    let res = untrusted
+        .web(&TestWeb::admin("u1"))
+        .request(Method::GET, PING, &[])
+        .header("x-forwarded-for", "10.0.0.1")
+        .header("x-real-ip", "10.0.0.1")
+        .send()
+        .await
+        .unwrap();
+    expect(res, StatusCode::UNAUTHORIZED, Some("not signed in")).await;
     assert_eq!(accounts(&untrusted).await, 0);
 
     let app = TestApp::spawn_identity(|_| {}).await;
@@ -203,6 +213,18 @@ async fn admin_requires_exact_group_recent_mfa() {
         .await,
     );
 
+    // A sign-in time in the future (beyond clock skew) is not a recent sign-in.
+    let mut future = TestWeb::admin("u1");
+    future.auth_time_ago = -3600;
+    check_mfa_403(
+        expect(
+            app.web(&future).get(ADMIN_PING).await,
+            StatusCode::FORBIDDEN,
+            None,
+        )
+        .await,
+    );
+
     let mut old = TestWeb::admin("u1");
     old.auth_time_ago = 43_201;
     check_mfa_403(
@@ -320,6 +342,45 @@ async fn jwks_down_is_503() {
     )
     .await;
     assert_eq!(accounts(&app).await, 0);
+}
+
+/// `last_seen_at` is written when the account is created and then at most every 5 minutes.
+#[tokio::test]
+async fn last_seen_is_refreshed_only_when_stale() {
+    let app = TestApp::spawn_identity(|_| {}).await;
+    let web = app.web(&TestWeb::player("u1"));
+    expect(web.get(PING).await, StatusCode::NO_CONTENT, None).await;
+    let last_seen = |app: &TestApp| {
+        let db = app.state.db.clone();
+        async move {
+            sqlx::query_scalar::<_, i64>("SELECT last_seen_at FROM accounts WHERE sub = 'u1'")
+                .fetch_one(&db)
+                .await
+                .unwrap()
+        }
+    };
+    let now = autobracket_server::db::now_unix();
+    assert!(last_seen(&app).await >= now - 5);
+
+    // Recent: left alone.
+    let recent = now - 60;
+    sqlx::query("UPDATE accounts SET last_seen_at = ? WHERE sub = 'u1'")
+        .bind(recent)
+        .execute(&app.state.db)
+        .await
+        .unwrap();
+    expect(web.get(PING).await, StatusCode::NO_CONTENT, None).await;
+    assert_eq!(last_seen(&app).await, recent);
+
+    // Stale: refreshed.
+    sqlx::query("UPDATE accounts SET last_seen_at = ? WHERE sub = 'u1'")
+        .bind(now - 301)
+        .execute(&app.state.db)
+        .await
+        .unwrap();
+    expect(web.get(PING).await, StatusCode::NO_CONTENT, None).await;
+    assert!(last_seen(&app).await >= now - 5);
+    assert_eq!(accounts(&app).await, 1);
 }
 
 #[tokio::test]
