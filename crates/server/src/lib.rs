@@ -17,11 +17,18 @@ use tower::ServiceExt;
 use tower_governor::governor::GovernorConfigBuilder;
 use tower_governor::GovernorLayer;
 
+pub mod accounts;
+pub mod anonymise;
+pub mod audit;
 pub mod auth;
 pub mod config;
 pub mod db;
+pub mod identity;
 pub mod judge;
+pub mod jwks;
 pub mod lifecycle;
+pub mod link;
+pub mod live;
 pub mod logging;
 pub mod net;
 pub mod resim;
@@ -62,12 +69,14 @@ pub async fn build_app(cfg: Config, resim: Arc<dyn Resim>) -> anyhow::Result<(Ro
 
     // Replenish one request every 1/rate_per_sec seconds, per client address (`validate`
     // checked that both rates are positive and that `trusted_proxies` parses).
-    let trusted = net::parse_cidrs(&cfg.trusted_proxies).context("trusted_proxies")?;
+    let trusted: Arc<[net::Cidr]> = net::parse_cidrs(&cfg.trusted_proxies)
+        .context("trusted_proxies")?
+        .into();
     let governor = GovernorConfigBuilder::default()
         .per_nanosecond(1_000_000_000 / cfg.rate_per_sec)
         .burst_size(cfg.rate_burst)
         .key_extractor(net::ClientKey {
-            trusted: trusted.into(),
+            trusted: trusted.clone(),
         })
         .finish()
         .context("invalid rate limit: rate_per_sec and rate_burst must be positive")?;
@@ -81,6 +90,8 @@ pub async fn build_app(cfg: Config, resim: Arc<dyn Resim>) -> anyhow::Result<(Ro
         rejections: Arc::default(),
         started_at: db::now_unix(),
         peer_only_alarm: Arc::default(),
+        trusted,
+        jwks: Arc::new(jwks::Jwks::new().context("building the JWKS client")?),
     };
 
     if state.cfg.worker_enabled {
@@ -107,6 +118,7 @@ pub async fn build_app(cfg: Config, resim: Arc<dyn Resim>) -> anyhow::Result<(Ro
     state.tasks.add(trim.abort_handle());
 
     let app = routes::router()
+        .merge(identity::probe_router())
         .layer(GovernorLayer::new(governor))
         // Outermost, so the rate limiter's refusals are JSON too.
         .layer(axum::middleware::map_response(routes::json_errors))

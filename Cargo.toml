@@ -38,4 +38,8 @@ tempfile = "3"
 regex = "1"
 libc = "0.2"
 tracing = "0.1"
+# Identity (phase 2b): hook signatures, JWT encoding, ID-token verification. Pinned exactly.
+hmac = "=0.12.1"
+base64 = "=0.22.1"
+jsonwebtoken = { version = "=11.1.0", default-features = false, features = ["rust_crypto"] }
 tracing-subscriber = { version = "0.3", default-features = false, features = ["std", "fmt", "env-filter", "registry"] }

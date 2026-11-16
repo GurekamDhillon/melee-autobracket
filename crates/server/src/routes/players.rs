@@ -16,7 +16,7 @@ pub async fn register(State(state): State<AppState>, req: AnyKey) -> Result<Stat
             format!("invalid request body: {e}"),
         )
     })?;
-    if !valid_tag(&body.tag) {
+    if !crate::accounts::valid_tag(&body.tag) {
         return Err(ApiError::new(
             StatusCode::BAD_REQUEST,
             "tag must be 2-16 characters of A-Z, a-z, 0-9 or _",
@@ -24,11 +24,8 @@ pub async fn register(State(state): State<AppState>, req: AnyKey) -> Result<Stat
     }
 
     let mut tx = begin_write(&state.db).await?;
-    let existing: Option<String> = sqlx::query_scalar("SELECT key FROM players WHERE key = ?")
-        .bind(&req.key)
-        .fetch_optional(&mut *tx)
-        .await?;
-    if existing.is_some() {
+    // A key signs as at most one player: its own canonical key, or a linked one.
+    if crate::accounts::key_in_use(&mut tx, &req.key).await? {
         return Err(ApiError::new(
             StatusCode::CONFLICT,
             "key is already registered",
@@ -81,9 +78,4 @@ pub async fn register(State(state): State<AppState>, req: AnyKey) -> Result<Stat
     tx.commit().await?;
     tracing::info!(tag = %crate::logging::label(&body.tag), key = %key_prefix(&req.key), "player registered");
     Ok(StatusCode::CREATED)
-}
-
-/// `^[A-Za-z0-9_]{2,16}$`
-fn valid_tag(tag: &str) -> bool {
-    (2..=16).contains(&tag.len()) && tag.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_')
 }

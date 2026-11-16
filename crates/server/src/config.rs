@@ -75,6 +75,179 @@ pub struct Config {
     /// a MediaMTX WebRTC viewer). Only its origin ([`Config::stream_origin`]) may be framed.
     #[serde(default)]
     pub stream_url: Option<String>,
+    /// Web sign-in through Zitadel and oauth2-proxy (`/account/`, `/admin/`, the Zitadel
+    /// hooks). Absent: those routes are 404.
+    #[serde(default)]
+    pub identity: Option<IdentityConfig>,
+    /// Who runs this server, for the privacy and terms pages.
+    #[serde(default)]
+    pub site: SiteConfig,
+}
+
+/// The `[identity]` table. Secrets (`proxy_secret`, the hook keys) never appear in `Debug`.
+#[derive(Deserialize, Clone)]
+#[serde(deny_unknown_fields)]
+pub struct IdentityConfig {
+    /// `https://host[:port]`: the site's own origin, compared with `Origin` on writes.
+    pub public_origin: String,
+    /// `https://host[:port]`: the ID token's `iss`.
+    pub issuer: String,
+    /// The ID token's `aud` must contain it.
+    pub client_id: String,
+    /// The issuer's JWKS; default [`IdentityConfig::jwks_url`].
+    #[serde(default)]
+    pub jwks_url: Option<String>,
+    /// Groups come only from grants of this Zitadel project and organisation.
+    pub project_id: String,
+    pub org_id: String,
+    pub discord_idp_id: String,
+    /// Sent by nginx as `X-Autobracket-Proxy` on every request; at least 32 characters.
+    pub proxy_secret: String,
+    #[serde(default = "default_admin_group")]
+    pub admin_group: String,
+    /// How old (seconds) the sign-in behind an admin request may be.
+    #[serde(default = "default_admin_max_auth_age_secs")]
+    pub admin_max_auth_age_secs: u64,
+    pub sign_out_url: String,
+    /// Shown on the admin 403 for a sign-in without a second factor.
+    pub mfa_setup_url: String,
+    /// Peers (CIDRs) allowed to call `/hooks/zitadel/*`; empty allows any.
+    #[serde(default)]
+    pub hook_peers: Vec<String>,
+    pub hook_keys: HookKeys,
+}
+
+/// The signing keys of the Zitadel Actions v2 targets, one per hook.
+#[derive(Deserialize, Clone)]
+#[serde(deny_unknown_fields)]
+pub struct HookKeys {
+    pub idp_intent: String,
+    pub token: String,
+    pub user_events: String,
+}
+
+impl std::fmt::Debug for IdentityConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("IdentityConfig")
+            .field("public_origin", &self.public_origin)
+            .field("issuer", &self.issuer)
+            .field("client_id", &self.client_id)
+            .field("jwks_url", &self.jwks_url)
+            .field("project_id", &self.project_id)
+            .field("org_id", &self.org_id)
+            .field("discord_idp_id", &self.discord_idp_id)
+            .field("proxy_secret", &"<redacted>")
+            .field("admin_group", &self.admin_group)
+            .field("admin_max_auth_age_secs", &self.admin_max_auth_age_secs)
+            .field("sign_out_url", &self.sign_out_url)
+            .field("mfa_setup_url", &self.mfa_setup_url)
+            .field("hook_peers", &self.hook_peers)
+            .field("hook_keys", &self.hook_keys)
+            .finish()
+    }
+}
+
+impl std::fmt::Debug for HookKeys {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("HookKeys { <redacted> }")
+    }
+}
+
+impl IdentityConfig {
+    /// `jwks_url`, or by default `<issuer>/oauth/v2/keys`.
+    pub fn jwks_url(&self) -> String {
+        self.jwks_url
+            .clone()
+            .unwrap_or_else(|| format!("{}/oauth/v2/keys", self.issuer))
+    }
+
+    /// Rejects values the identity layer cannot run with, naming the field.
+    fn validate(&self) -> anyhow::Result<()> {
+        for (field, value) in [
+            ("public_origin", &self.public_origin),
+            ("issuer", &self.issuer),
+        ] {
+            if !is_https_origin(value) {
+                bail!(
+                    "identity.{field} must be an https origin with no path, \
+                     e.g. \"https://bracket.example.org\""
+                );
+            }
+        }
+        if let Some(url) = &self.jwks_url {
+            if !is_jwks_url(url) {
+                bail!(
+                    "identity.jwks_url must be an https URL (plain http only to a loopback \
+                     address)"
+                );
+            }
+        }
+        if self.proxy_secret.chars().count() < MIN_PROXY_SECRET_CHARS {
+            bail!("identity.proxy_secret must be at least {MIN_PROXY_SECRET_CHARS} characters");
+        }
+        for (field, value) in [
+            ("client_id", &self.client_id),
+            ("project_id", &self.project_id),
+            ("org_id", &self.org_id),
+            ("discord_idp_id", &self.discord_idp_id),
+            ("admin_group", &self.admin_group),
+            ("hook_keys.idp_intent", &self.hook_keys.idp_intent),
+            ("hook_keys.token", &self.hook_keys.token),
+            ("hook_keys.user_events", &self.hook_keys.user_events),
+        ] {
+            if value.trim().is_empty() {
+                bail!("identity.{field} must not be empty");
+            }
+        }
+        crate::net::parse_cidrs(&self.hook_peers).context("identity.hook_peers")?;
+        Ok(())
+    }
+}
+
+/// The `[site]` table: shown on the privacy and terms pages.
+#[derive(Deserialize, Clone, Debug, Default)]
+#[serde(deny_unknown_fields)]
+pub struct SiteConfig {
+    pub operator: Option<String>,
+    pub contact: Option<String>,
+}
+
+/// Shortest accepted `identity.proxy_secret`.
+const MIN_PROXY_SECRET_CHARS: usize = 32;
+
+/// `https://host[:port]` exactly as a browser sends it in `Origin`: lowercase, no default
+/// port, no path (not even `/`), credentials, query or fragment.
+fn is_https_origin(text: &str) -> bool {
+    let Ok(url) = reqwest::Url::parse(text) else {
+        return false;
+    };
+    url.scheme() == "https"
+        && url.host_str().is_some()
+        && url.origin().ascii_serialization() == text
+}
+
+/// An https URL with a host, or an http one to a loopback address (a JWKS on the same host).
+fn is_jwks_url(text: &str) -> bool {
+    let Ok(url) = reqwest::Url::parse(text) else {
+        return false;
+    };
+    if !url.username().is_empty() || url.password().is_some() {
+        return false;
+    }
+    let Some(host) = url.host_str() else {
+        return false;
+    };
+    let loopback = host == "localhost"
+        || host
+            .trim_start_matches('[')
+            .trim_end_matches(']')
+            .parse::<std::net::IpAddr>()
+            .is_ok_and(|ip| ip.is_loopback());
+    match url.scheme() {
+        "https" => true,
+        "http" => loopback,
+        _ => false,
+    }
 }
 
 #[derive(Deserialize, Clone, Debug)]
@@ -147,6 +320,8 @@ impl Config {
             no_show_grace_secs: default_no_show_grace_secs(),
             allow_direct_connect: false,
             stream_url: None,
+            identity: None,
+            site: SiteConfig::default(),
         }
     }
 
@@ -206,6 +381,15 @@ impl Config {
             bail!("verifier.jobs must be at least 1");
         }
         self.validate_api()?;
+        if let Some(identity) = &self.identity {
+            if self.trusted_proxies.is_empty() {
+                bail!(
+                    "trusted_proxies must name the reverse proxy when [identity] is set: \
+                     identity headers are accepted only from it"
+                );
+            }
+            identity.validate()?;
+        }
         Ok(())
     }
 
@@ -326,6 +510,14 @@ fn default_max_connections() -> usize {
 
 fn default_no_show_grace_secs() -> u64 {
     90
+}
+
+fn default_admin_group() -> String {
+    "autobracket-admins".into()
+}
+
+fn default_admin_max_auth_age_secs() -> u64 {
+    43_200
 }
 
 #[cfg(test)]
@@ -610,5 +802,176 @@ mod tests {
         assert_eq!(cfg.verifier.jobs, 4);
         assert_eq!(cfg.verifier.timeout_secs, 120);
         assert_eq!(cfg.ruleset.stocks, 3);
+    }
+
+    /// A valid `[identity]` configuration, with `trusted_proxies`.
+    fn identity_toml() -> String {
+        format!(
+            "to_keys = [\"{KEY}\"]\n\
+             trusted_proxies = [\"172.17.0.1/32\"]\n\
+             [identity]\n\
+             public_origin = \"https://bracket.example.org\"\n\
+             issuer = \"https://auth.example.org\"\n\
+             client_id = \"c1\"\n\
+             project_id = \"p1\"\n\
+             org_id = \"o1\"\n\
+             discord_idp_id = \"idp1\"\n\
+             proxy_secret = \"0123456789abcdef0123456789abcdef\"\n\
+             sign_out_url = \"/oauth2/sign_out\"\n\
+             mfa_setup_url = \"https://auth.example.org/mfa\"\n\
+             hook_peers = [\"10.203.48.0/28\"]\n\
+             [identity.hook_keys]\n\
+             idp_intent = \"ki\"\n\
+             token = \"kt\"\n\
+             user_events = \"ku\"\n"
+        )
+    }
+
+    /// The error chain of `identity_toml()` with the line starting `key =` replaced by
+    /// `line` (removed when `line` is empty).
+    fn identity_rejection(key: &str, line: &str) -> String {
+        let text: Vec<String> = identity_toml()
+            .lines()
+            .map(|l| {
+                if l.starts_with(&format!("{key} =")) {
+                    line.to_owned()
+                } else {
+                    l.to_owned()
+                }
+            })
+            .collect();
+        let text = text.join("\n");
+        assert_ne!(text, identity_toml().trim_end(), "{key} not found");
+        format!("{:#}", Config::parse(&text).expect_err(line))
+    }
+
+    #[test]
+    fn identity_parses_with_defaults() {
+        let cfg = Config::parse(&identity_toml()).unwrap();
+        let id = cfg.identity.as_ref().unwrap();
+        assert_eq!(id.admin_group, "autobracket-admins");
+        assert_eq!(id.admin_max_auth_age_secs, 43_200);
+        assert_eq!(id.jwks_url(), "https://auth.example.org/oauth/v2/keys");
+        assert_eq!(id.hook_keys.token, "kt");
+        assert_eq!(cfg.site.operator, None);
+        let debug = format!("{cfg:?}");
+        for secret in [
+            "0123456789abcdef0123456789abcdef",
+            "\"ki\"",
+            "\"kt\"",
+            "\"ku\"",
+        ] {
+            assert!(!debug.contains(secret), "Debug shows {secret}: {debug}");
+        }
+
+        let text = identity_toml().replace(
+            "[identity.hook_keys]",
+            "jwks_url = \"http://127.0.0.1:9/keys\"\n[identity.hook_keys]",
+        ) + "[site]\noperator = \"GD\"\ncontact = \"x@example.org\"\n";
+        let cfg = Config::parse(&text).unwrap();
+        assert_eq!(cfg.identity.unwrap().jwks_url(), "http://127.0.0.1:9/keys");
+        assert_eq!(cfg.site.operator.as_deref(), Some("GD"));
+        assert_eq!(cfg.site.contact.as_deref(), Some("x@example.org"));
+        // No identity table: no identity.
+        assert!(Config::parse(&format!("to_keys = [\"{KEY}\"]\n"))
+            .unwrap()
+            .identity
+            .is_none());
+    }
+
+    #[test]
+    fn identity_rejects_bad_values() {
+        let secret31 = "x".repeat(31);
+        let cases = [
+            (
+                "proxy_secret",
+                format!("proxy_secret = \"{secret31}\""),
+                "identity.proxy_secret",
+            ),
+            (
+                "trusted_proxies",
+                "trusted_proxies = []".into(),
+                "trusted_proxies",
+            ),
+            ("trusted_proxies", String::new(), "trusted_proxies"),
+            (
+                "public_origin",
+                "public_origin = \"http://x\"".into(),
+                "identity.public_origin",
+            ),
+            (
+                "public_origin",
+                "public_origin = \"https://bracket.example.org/app\"".into(),
+                "identity.public_origin",
+            ),
+            (
+                "public_origin",
+                "public_origin = \"https://bracket.example.org/\"".into(),
+                "identity.public_origin",
+            ),
+            (
+                "public_origin",
+                "public_origin = \"https://Bracket.example.org\"".into(),
+                "identity.public_origin",
+            ),
+            (
+                "issuer",
+                "issuer = \"https://auth.example.org/oidc\"".into(),
+                "identity.issuer",
+            ),
+            (
+                "issuer",
+                "issuer = \"auth.example.org\"".into(),
+                "identity.issuer",
+            ),
+            ("client_id", "client_id = \"\"".into(), "identity.client_id"),
+            (
+                "project_id",
+                "project_id = \"\"".into(),
+                "identity.project_id",
+            ),
+            ("org_id", "org_id = \" \"".into(), "identity.org_id"),
+            (
+                "discord_idp_id",
+                "discord_idp_id = \"\"".into(),
+                "identity.discord_idp_id",
+            ),
+            (
+                "idp_intent",
+                "idp_intent = \"\"".into(),
+                "identity.hook_keys.idp_intent",
+            ),
+            ("token", "token = \"\"".into(), "identity.hook_keys.token"),
+            (
+                "user_events",
+                "user_events = \"\"".into(),
+                "identity.hook_keys.user_events",
+            ),
+            (
+                "hook_peers",
+                "hook_peers = [\"10.0.0.0/8\", \"10.0.0.0/33\"]".into(),
+                "identity.hook_peers",
+            ),
+            ("proxy_secret", String::new(), "proxy_secret"),
+            ("hook_peers", "hook_peerz = []".into(), "hook_peerz"),
+        ];
+        for (key, line, field) in cases {
+            let err = identity_rejection(key, &line);
+            assert!(err.contains(field), "{line:?}: {err}");
+        }
+        for bad in [
+            "https://",
+            "ftp://auth.example.org/keys",
+            "http://auth.example.org/keys",
+            "http://10.0.0.1/keys",
+            "https://user:pw@auth.example.org/keys",
+        ] {
+            let text = identity_toml().replace(
+                "[identity.hook_keys]",
+                &format!("jwks_url = \"{bad}\"\n[identity.hook_keys]"),
+            );
+            let err = format!("{:#}", Config::parse(&text).expect_err(bad));
+            assert!(err.contains("identity.jwks_url"), "{bad}: {err}");
+        }
     }
 }
