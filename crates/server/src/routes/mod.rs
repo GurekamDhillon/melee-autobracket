@@ -4,7 +4,7 @@ use std::fmt::Display;
 
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
-use axum::routing::{get, post};
+use axum::routing::{delete, get, post};
 use axum::{Json, Router};
 use serde_json::{json, Value};
 
@@ -27,6 +27,10 @@ pub fn router() -> Router<AppState> {
         .route("/v1/events/{id}/entrants", post(events::signup))
         .route("/v1/admin/events", post(admin::create_event))
         .route("/v1/admin/events/{id}/start", post(admin::start_event))
+        .route(
+            "/v1/admin/events/{id}/entrants/{tag}",
+            delete(admin::remove_entrant),
+        )
         .route("/v1/admin/invites", post(admin::create_invite))
         .route("/v1/me/next", get(sets::next))
         .route("/v1/sets/{event}/{set}/room", post(sets::room))

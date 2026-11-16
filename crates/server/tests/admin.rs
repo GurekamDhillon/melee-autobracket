@@ -1063,3 +1063,286 @@ async fn cli_creates_event() {
     let err: Value = serde_json::from_slice(&out.stderr).unwrap();
     assert_eq!(err["error"], "no such event");
 }
+
+/// Runs `autobracket admin --server URL --key-file KEY ARGS...` as the organiser.
+async fn cli(app: &TestApp, args: &[&str]) -> std::process::Output {
+    let key_file = app.dir.path().join("cli-to.key");
+    if !key_file.exists() {
+        std::fs::write(&key_file, format!("{}\n", hex::encode(app.to.to_bytes()))).unwrap();
+    }
+    tokio::process::Command::new(env!("CARGO_BIN_EXE_autobracket"))
+        .args(["admin", "--server", &app.url, "--key-file"])
+        .arg(&key_file)
+        .args(args)
+        .output()
+        .await
+        .unwrap()
+}
+
+/// `queue list` prints a line per item with the players and what the evidence says, then the
+/// JSON.
+#[tokio::test]
+async fn cli_queue_list_summarises_each_item() {
+    let app = TestApp::spawn(|_| {}).await;
+    let ps = players(&app, 2).await;
+    let event = app
+        .started_event(Format::SingleElim, &[&ps[0], &ps[1]])
+        .await;
+    conflict(&app, event, 0, 1, &ps[0], &ps[1]).await;
+
+    let out = cli(&app, &["queue", "list"]).await;
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8(out.stdout).unwrap();
+    let (summary, json) = stdout.split_at(stdout.find("\n[").expect("JSON after the summary") + 1);
+    let lines: Vec<&str> = summary.lines().collect();
+    assert_eq!(lines.len(), 1, "{summary}");
+    let line = lines[0];
+    for part in [
+        "Conflicted",
+        "P0",
+        "P1",
+        "slot 0",
+        "slot 1",
+        "winner p1",
+        "winner p2",
+    ] {
+        assert!(line.contains(part), "{part:?} missing from {line:?}");
+    }
+    let items: Vec<QueueItem> = serde_json::from_str(json).unwrap();
+    assert_eq!(items.len(), 1);
+}
+
+/// `quarantine get ID SLOT --out FILE` saves a quarantined replay, and never overwrites a file.
+#[tokio::test]
+async fn cli_quarantine_get_saves_the_replay() {
+    let app = TestApp::spawn(|_| {}).await;
+    let ps = players(&app, 2).await;
+    let event = app
+        .started_event(Format::SingleElim, &[&ps[0], &ps[1]])
+        .await;
+    conflict(&app, event, 0, 1, &ps[0], &ps[1]).await;
+    let id: i64 = sqlx::query_scalar("SELECT id FROM quarantine")
+        .fetch_one(&app.state.db)
+        .await
+        .unwrap();
+    let stored: String = sqlx::query_scalar("SELECT path FROM uploads WHERE slot = 1")
+        .fetch_one(&app.state.db)
+        .await
+        .unwrap();
+
+    let dest = app.dir.path().join("guest.slp");
+    let dest_arg = dest.to_str().unwrap();
+    let out = cli(
+        &app,
+        &["quarantine", "get", &id.to_string(), "1", "--out", dest_arg],
+    )
+    .await;
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(
+        std::fs::read(&dest).unwrap(),
+        std::fs::read(&stored).unwrap()
+    );
+
+    // The file exists now: refused, and left alone.
+    let out = cli(
+        &app,
+        &["quarantine", "get", &id.to_string(), "0", "--out", dest_arg],
+    )
+    .await;
+    assert_eq!(out.status.code(), Some(1));
+    assert_eq!(
+        std::fs::read(&dest).unwrap(),
+        std::fs::read(&stored).unwrap()
+    );
+    // No such slot: the server's refusal, and no file.
+    let missing = app.dir.path().join("none.slp");
+    let out = cli(
+        &app,
+        &[
+            "quarantine",
+            "get",
+            &id.to_string(),
+            "2",
+            "--out",
+            missing.to_str().unwrap(),
+        ],
+    )
+    .await;
+    assert_eq!(out.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&out.stderr).contains("no such replay"));
+    assert!(!missing.exists());
+}
+
+/// A signed `DELETE` (the test client has no helper for it).
+async fn signed_delete(url: &str, sk: &SigningKey, path: &str) -> StatusCode {
+    let h = proto::sign_request(sk, "DELETE", path, autobracket_server::db::now_unix(), &[]);
+    reqwest::Client::new()
+        .delete(format!("{url}{path}"))
+        .header("x-ab-key", h.key)
+        .header("x-ab-time", h.time)
+        .header("x-ab-nonce", h.nonce)
+        .header("x-ab-sig", h.sig)
+        .send()
+        .await
+        .unwrap()
+        .status()
+}
+
+async fn entrant_seeds(app: &TestApp, event: i64) -> Vec<(String, i64)> {
+    sqlx::query_as(
+        "SELECT p.tag, n.seed FROM entrants n JOIN players p ON p.key = n.player_key
+         WHERE n.event_id = ? ORDER BY n.seed",
+    )
+    .bind(event)
+    .fetch_all(&app.state.db)
+    .await
+    .unwrap()
+}
+
+/// An organiser removes an entrant during sign-up; later seeds move up, so seeds stay
+/// contiguous. Not once the event has started.
+#[tokio::test]
+async fn entrant_remove_during_signup_only() {
+    let app = TestApp::spawn(|_| {}).await;
+    let ps = players(&app, 4).await;
+    let event = app.create_event(Format::SingleElim).await;
+    for p in &ps {
+        p.sign_up(event).await;
+    }
+    let to = app.as_to();
+    let delete = |event: i64, tag: &str| {
+        let path = format!("/v1/admin/events/{event}/entrants/{tag}");
+        let sk = app.to.clone();
+        let url = app.url.clone();
+        async move { signed_delete(&url, &sk, &path).await }
+    };
+
+    // Only an organiser may.
+    assert_eq!(
+        signed_delete(
+            &app.url,
+            &ps[0].sk,
+            &format!("/v1/admin/events/{event}/entrants/P1")
+        )
+        .await,
+        StatusCode::FORBIDDEN
+    );
+    assert_eq!(delete(event, "P1").await, StatusCode::NO_CONTENT);
+    assert_eq!(
+        entrant_seeds(&app, event).await,
+        vec![("P0".into(), 0), ("P2".into(), 1), ("P3".into(), 2)]
+    );
+    assert_eq!(delete(event, "P1").await, StatusCode::NOT_FOUND);
+    assert_eq!(delete(event, "Nobody").await, StatusCode::NOT_FOUND);
+    assert_eq!(delete(999, "P0").await, StatusCode::NOT_FOUND);
+
+    // The CLI does the same; a later sign-up takes the next seed.
+    let out = cli(&app, &["entrant", "remove", &event.to_string(), "P0"]).await;
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(
+        entrant_seeds(&app, event).await,
+        vec![("P2".into(), 0), ("P3".into(), 1)]
+    );
+    ps[1].sign_up(event).await;
+    assert_eq!(
+        entrant_seeds(&app, event).await,
+        vec![("P2".into(), 0), ("P3".into(), 1), ("P1".into(), 2)]
+    );
+
+    let res = to
+        .post_json(&format!("/v1/admin/events/{event}/start"), &json!({}))
+        .await;
+    assert_eq!(res.status(), StatusCode::OK);
+    assert_eq!(delete(event, "P2").await, StatusCode::CONFLICT);
+    assert_eq!(entrant_seeds(&app, event).await.len(), 3);
+}
+
+/// An organiser replays a game after one was counted: the set stays at 1-0 and the replayed
+/// game keeps its number, 2.
+#[tokio::test]
+async fn replay_after_a_counted_game_keeps_the_game_number() {
+    let app = TestApp::spawn(|_| {}).await;
+    let ps = players(&app, 2).await;
+    let event = app
+        .started_event(Format::SingleElim, &[&ps[0], &ps[1]])
+        .await;
+    play_game(&app, event, 0, 1, &ps[0], &ps[1], 1).await;
+    assert_eq!(set_row(&app, event, 0).await, ("ready".into(), 1, 0));
+    conflict(&app, event, 0, 2, &ps[0], &ps[1]).await;
+    assert_eq!(set_row(&app, event, 0).await, ("review".into(), 1, 0));
+    let item = queue(&app).await.remove(0);
+    assert_eq!(
+        resolve(&app, item.id, &Resolve::Replay).await,
+        StatusCode::NO_CONTENT
+    );
+    assert_eq!(set_row(&app, event, 0).await, ("ready".into(), 1, 0));
+    assert_eq!(game_states(&app, event, 0).await, vec!["counted", "void"]);
+    match next(&ps[0], event).await {
+        Next::Play { game_no, wins, .. } => assert_eq!((game_no, wins), (2, [1, 0])),
+        other => panic!("{other:?}"),
+    }
+    // Game 2 again; game 1 is not accepted any more.
+    assert_eq!(
+        upload(&ps[0], event, 0, 1, simple_game(1, START_A)).await,
+        StatusCode::CONFLICT
+    );
+    play_game(&app, event, 0, 2, &ps[0], &ps[1], 1).await;
+    assert_eq!(set_row(&app, event, 0).await, ("done".into(), 2, 0));
+}
+
+/// Disqualifications through the resolution route that leave two disqualified entrants
+/// facing each other: in double elimination both drop to the losers bracket, where their set
+/// is decided for slot 0 with a `double-dq` queue item.
+#[tokio::test]
+async fn double_dq_through_the_resolution_route() {
+    let app = TestApp::spawn(|_| {}).await;
+    let ps = players(&app, 4).await;
+    let refs: Vec<&TestPlayer> = ps.iter().collect();
+    let event = app.started_event(Format::DoubleElim, &refs).await;
+    for seed in [0u32, 1] {
+        let semi = set_with(&app, event, seed).await;
+        let [s0, s1] = seats(&app, event, semi).await;
+        conflict(&app, event, semi, 1, refs[s0 as usize], refs[s1 as usize]).await;
+        let item = queue(&app)
+            .await
+            .into_iter()
+            .find(|i| i.set_id == semi)
+            .unwrap();
+        let slot = if s0 == seed { 0 } else { 1 };
+        assert_eq!(
+            resolve(&app, item.id, &Resolve::Dq { slot }).await,
+            StatusCode::NO_CONTENT
+        );
+        assert!(decided_by(&app, event).await.contains(&(semi, "dq".into())));
+    }
+    // Seeds 0 and 1 met in the losers bracket, both disqualified.
+    let bracket = load_bracket(&app.state.db, event).await.unwrap();
+    let losers = bracket
+        .sets
+        .iter()
+        .find(|s| {
+            s.slots == [Slot::Entrant(0), Slot::Entrant(1)]
+                || s.slots == [Slot::Entrant(1), Slot::Entrant(0)]
+        })
+        .expect("the disqualified pair's set");
+    assert_eq!(losers.state, SetState::Done { winner: 0 });
+    assert!(decided_by(&app, event)
+        .await
+        .contains(&(losers.id, "double-dq".into())));
+    let items = queue(&app).await;
+    assert_eq!(items.len(), 1, "{items:?}");
+    assert_eq!(items[0].reason, "double-dq");
+    assert_eq!(items[0].set_id, losers.id);
+}

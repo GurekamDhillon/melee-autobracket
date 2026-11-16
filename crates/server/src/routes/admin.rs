@@ -68,6 +68,58 @@ pub async fn create_event(
     Ok((StatusCode::CREATED, Json(created)))
 }
 
+/// `DELETE /v1/admin/events/{id}/entrants/{tag}`: takes the player with `tag` out of an event
+/// that is still open for sign-up. Entrants seeded after them move up one seed, so the seeds
+/// stay contiguous. `404` for an unknown event or a player not entered, `409` once the event
+/// has started.
+pub async fn remove_entrant(
+    State(state): State<AppState>,
+    path: Result<Path<(i64, String)>, PathRejection>,
+    to: To,
+) -> Result<StatusCode, ApiError> {
+    let Path((event, tag)) =
+        path.map_err(|e| ApiError::new(StatusCode::BAD_REQUEST, e.to_string()))?;
+    let mut tx = begin_write(&state.db).await?;
+    let event_state: Option<String> = sqlx::query_scalar("SELECT state FROM events WHERE id = ?")
+        .bind(event)
+        .fetch_optional(&mut *tx)
+        .await?;
+    match event_state.as_deref() {
+        None => return Err(lifecycle::LifecycleError::NoSuchEvent.into()),
+        Some("signup") => {}
+        Some(_) => return Err(lifecycle::LifecycleError::AlreadyStarted.into()),
+    }
+    let entrant: Option<(String, i64)> = sqlx::query_as(
+        "SELECT n.player_key, n.seed FROM entrants n JOIN players p ON p.key = n.player_key
+         WHERE n.event_id = ? AND p.tag = ?",
+    )
+    .bind(event)
+    .bind(&tag)
+    .fetch_optional(&mut *tx)
+    .await?;
+    let (key, seed) =
+        entrant.ok_or_else(|| ApiError::new(StatusCode::NOT_FOUND, "no such entrant"))?;
+    sqlx::query("DELETE FROM entrants WHERE event_id = ? AND player_key = ?")
+        .bind(event)
+        .bind(&key)
+        .execute(&mut *tx)
+        .await?;
+    sqlx::query("UPDATE entrants SET seed = seed - 1 WHERE event_id = ? AND seed > ?")
+        .bind(event)
+        .bind(seed)
+        .execute(&mut *tx)
+        .await?;
+    tx.commit().await?;
+    tracing::info!(
+        event,
+        tag = %crate::logging::label(&tag),
+        seed,
+        to = %key_prefix(&to.key),
+        "entrant removed"
+    );
+    Ok(StatusCode::NO_CONTENT)
+}
+
 /// `POST /v1/admin/invites`: a fresh single-use registration code.
 pub async fn create_invite(
     State(state): State<AppState>,

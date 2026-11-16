@@ -114,12 +114,18 @@ pub async fn start_event(st: &AppState, event_id: i64) -> Result<(), LifecycleEr
     Ok(())
 }
 
-/// The stored bracket of a started event.
+/// The stored bracket of a started event, read on its own connection: only for a read that
+/// needs nothing else to be consistent with it (inside a transaction use
+/// [`load_bracket_on`]).
 pub async fn load_bracket(db: &SqlitePool, event_id: i64) -> Result<Bracket, LifecycleError> {
     let mut conn = db.acquire().await?;
     read_bracket(&mut conn, event_id).await
 }
 
+/// Overwrites the stored bracket outside any transaction: for tests that set up a bracket
+/// state directly. The server itself writes the bracket only inside the transaction that
+/// changes it.
+#[cfg(feature = "testkit")]
 pub async fn store_bracket(
     db: &SqlitePool,
     event_id: i64,
