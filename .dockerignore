@@ -13,3 +13,5 @@ docs/superpowers/
 **/*.slpz
 **/*.mrpl
 /autobracket.toml
+
+clipdetect/node_modules/

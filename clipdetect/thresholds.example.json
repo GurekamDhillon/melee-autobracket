@@ -1,0 +1,13 @@
+{
+  "comboMinHits": 5,
+  "comboMinPercent": 40,
+  "comboMaxHitstunGapFrames": 45,
+  "comboLargeHitFraction": 0.8,
+  "lowKillMaxPercent": 60,
+  "edgeguardEnabled": true,
+  "comebackMinStockDeficit": 2,
+  "zeroToDeathMaxStartPercent": 10,
+  "zeroToDeathMinHits": 2,
+  "padBeforeFrames": 120,
+  "padAfterFrames": 90
+}
