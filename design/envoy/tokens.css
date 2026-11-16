@@ -1,0 +1,97 @@
+/* Envoy UI kit tokens for the bracket page. Source: GD's Melee workspace, menu/out_envoy/UI-SPEC.md
+   (section 3, "Party pack") and menu/concepts/reunification-2026-10-06/c-atlas/tokens.css (Atlas).
+   Original work; fonts are SIL OFL 1.1 and are NOT bundled (load from Google Fonts or self-host).
+   The game has ONE theme per direction and no light/dark pair. Envoy is a dark-violet scene with
+   white "stickers". The light variant below is DERIVED (not in the game) for pages that need it. */
+
+:root {
+  /* ---- Envoy "Party pack" (game values, UI-SPEC 3.1) ---- */
+  --envoy-sunny: #FFD84A;        /* cursor, hovered sticker, ready, highlights */
+  --envoy-ink: #2A1A6E;          /* grape ink: every outline, hard shadow, text on white */
+  --envoy-white: #FFFFFF;        /* sticker faces */
+  --envoy-coral: #FF4D6D;        /* Player 1, warnings, stamps */
+  --envoy-lagoon: #00A99D;       /* Player 2 */
+  --envoy-lilac: #5A4C99;        /* quiet text on white */
+  --envoy-lilac-pale: #C9BFF5;   /* quiet text on ink or violet */
+  --envoy-coral-deep: #C2183F;   /* cannot-pay / error text */
+  --envoy-faded: #DAD7E8;        /* done, locked */
+  --envoy-cream: #FBF6DD;        /* dashed empty seat */
+  --envoy-violet: #4C3D9E;       /* scene base (scenery only, no outline) */
+  --envoy-violet-d: #33257C;     /* scene ground */
+  --envoy-track: #170E45;        /* bar track */
+  --envoy-veil: rgba(26, 16, 74, .86);   /* pause veil; .66-.70 behind a dialog */
+  --envoy-foil: linear-gradient(135deg, #FF8FB8, #FFE066, #8CF0C8, #7FD4FF, #C9A0FF, #FFB27A); /* only gradient */
+  /* family badge colours */
+  --envoy-fire: #FF7A1F; --envoy-lightning: #3E6BFF; --envoy-frost: #62CCF5; --envoy-wind: #86D63C;
+  --envoy-technique: #C866F2; --envoy-utility: #AEA8CC;
+  /* heat states */
+  --envoy-cold: #B9B2DE; --envoy-warm: #FFBE2E; --envoy-hot: #FF8A1F; --envoy-blazing: #FF4A1C;
+
+  /* ---- semantic aliases for the web page (dark = the game) ---- */
+  --bg: var(--envoy-violet);
+  --bg-ground: var(--envoy-violet-d);
+  --surface: var(--envoy-white);       /* sticker face */
+  --on-surface: var(--envoy-ink);
+  --on-surface-quiet: var(--envoy-lilac);
+  --on-bg: var(--envoy-white);
+  --on-bg-quiet: var(--envoy-lilac-pale);
+  --outline: var(--envoy-ink);
+  --accent: var(--envoy-sunny);        /* hover / focus / current */
+  --p1: var(--envoy-coral);
+  --p2: var(--envoy-lagoon);
+  --danger: var(--envoy-coral-deep);
+
+  /* ---- shape ---- */
+  --edge: 3px;                         /* sticker outline (2.5 pills, 2 name tags) */
+  --radius: 12px;                      /* general; 10 list rows; 9-11 pills; 13 tag */
+  --radius-row: 10px;
+  --shadow: 3px 4px 0 var(--envoy-ink);        /* hard, no blur */
+  --shadow-hover: 4px 6px 0 var(--envoy-ink);
+  --ring-hover: 0 0 0 3px var(--envoy-white);  /* hovered sticker: white ring outside edge */
+  --tilt-card: 3deg;                   /* idle cards -4..+4deg, rows <1.3deg alternating */
+  --tilt-row: 1deg;
+
+  /* ---- type (px in the game's 640x480 frame; scale with rem on the web) ---- */
+  --font-display: "Bricolage Grotesque", "Source Sans 3", system-ui, sans-serif; /* weight 800, tracking -0.02em */
+  --font-text: "Source Sans 3", system-ui, sans-serif;                            /* weight 700 */
+  --t-min: 11px; --t-strip: 13px; --t-hint: 12.5px; --t-row: 15px; --t-name: 16px;
+  --t-sticker: 24px; --t-title: 24px; --t-result: 30px; --t-percent: 40px;
+
+  /* ---- spacing: the game lays out on absolute 640x480 pixels; no named scale. Observed rhythm: ---- */
+  --sp-1: 4px; --sp-2: 8px; --sp-3: 12px; --sp-4: 16px; --sp-5: 24px;   /* 24 = screen margin, 26 hints */
+  --row-h: 28px; --row-h-big: 46px; --strip-h: 30px; --stagger: 2; /* frames between list items */
+
+  /* ---- motion: 60 fps frames -> ms (1 frame = 16.67 ms). Ease-out unless noted. ---- */
+  --m-hover: 67ms;       /* 4 frames: hover on/off, pointer slide */
+  --m-enter: 150ms;      /* 6+3 frames: scale .85 -> 1.04 -> 1, opacity 0 -> 1 */
+  --m-press: 100ms;      /* 2+4 frames: scale 1 -> .94 -> 1 */
+  --m-fade: 100ms;       /* 6 frames: others fade to 34% / screen leave / veil */
+  --m-burst: 117ms;      /* 4+3 frames: scale 0 -> 1.2 -> 1 */
+  --ease: cubic-bezier(.22, 1, .36, 1);  /* "ease out (fast start)"; spec only says ease out */
+}
+
+/* DERIVED LIGHT VARIANT: not in the game. Paper-light page, same ink, same sunny accent. */
+@media (prefers-color-scheme: light) {
+  :root:not([data-theme="dark"]) {
+    --bg: #F3F0FF; --bg-ground: #E6E1FA;
+    --on-bg: var(--envoy-ink); --on-bg-quiet: var(--envoy-lilac);
+    --surface: #FFFFFF; --on-surface: var(--envoy-ink);
+    --shadow: 3px 4px 0 var(--envoy-ink);
+  }
+}
+:root[data-theme="light"] {
+  --bg: #F3F0FF; --bg-ground: #E6E1FA; --on-bg: var(--envoy-ink); --on-bg-quiet: var(--envoy-lilac);
+}
+
+/* ---- Atlas kit (the engine's custom menus / LAB; dark only; chamfers, no curves) ---- */
+.atlas, :root[data-kit="atlas"] {
+  --atlas-ground: #0d1015; --atlas-ground2: #131820; --atlas-plate: #1a1f29; --atlas-plate2: #222836; --atlas-lift: #2e3648;
+  --atlas-edge: #06080b; --atlas-line: #323a4b; --atlas-line2: #4a5570;
+  --atlas-ivory: #f1ebdc; --atlas-text2: #c8c4b8; --atlas-muted: #9aa2b4; --atlas-dim: #6e768a; --atlas-ink: #0b0d12;
+  --atlas-ember: #ff7a3d; /* focus and the one action */ --atlas-jade: #4fd6aa; /* information, on */
+  --atlas-sun: #f2c14e; /* caution */ --atlas-rose: #ef4f7d; /* danger */
+  --atlas-p1: #f0504a; --atlas-p2: #4a90ff; --atlas-p3: #f3cf3e; --atlas-p4: #42d68b; --atlas-cpu: #8f98aa;
+  --atlas-chamfer: 8px; --atlas-chamfer-s: 5px; --atlas-chamfer-xs: 3px;
+  --atlas-m-focus: 80ms; --atlas-m-pane: 100ms; --atlas-m-tab: 120ms; --atlas-m-modal: 140ms; --atlas-m-note: 160ms;
+  --atlas-font-ui: "Source Sans 3", sans-serif; --atlas-font-cap: "Barlow Condensed", sans-serif; --atlas-font-num: "Hasklug", monospace;
+}
