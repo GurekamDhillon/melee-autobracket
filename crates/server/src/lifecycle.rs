@@ -184,18 +184,21 @@ pub async fn load_bracket_on(
 /// late apply cannot count a game twice.
 ///
 /// A counting verdict needs `winner_slot` (0 is the host). `verifier_build` is recorded on
-/// the game as the build that judged it.
+/// the game as the build that re-simulated it: `None` when no re-simulation ran (the
+/// verdicts decided before one: `Single`, `Conflicted`, `Illegal`, `Undecided`). The time of
+/// the verdict is recorded as `judged_at`, a late (voided) one included.
 pub async fn apply_verdict(
     st: &AppState,
     game_id: i64,
     v: &Verdict,
     winner_slot: Option<u8>,
     resim: &ResimOutcome,
-    verifier_build: &str,
+    verifier_build: Option<&str>,
 ) -> Result<(), LifecycleError> {
     let verdict_json = to_json(v)?;
     let resim_json = to_json(resim)?;
     let name = verdict_name(v);
+    let judged_at = now_unix();
     let mut tx = begin_write(&st.db).await?;
     let row: Option<(i64, i64, String, String)> = sqlx::query_as(
         "SELECT g.event_id, g.set_id, g.state, e.ruleset_json
@@ -224,11 +227,12 @@ pub async fn apply_verdict(
     if set_state.as_deref() != Some("ready") {
         sqlx::query(
             "UPDATE games SET state = 'void', winner_slot = NULL, verdict_json = ?,
-                 resim_json = ?, verifier_build = ? WHERE id = ?",
+                 resim_json = ?, verifier_build = ?, judged_at = ? WHERE id = ?",
         )
         .bind(&verdict_json)
         .bind(&resim_json)
         .bind(verifier_build)
+        .bind(judged_at)
         .bind(game_id)
         .execute(&mut *tx)
         .await?;
@@ -247,12 +251,13 @@ pub async fn apply_verdict(
         })?;
         sqlx::query(
             "UPDATE games SET state = 'counted', winner_slot = ?, verdict_json = ?,
-                 resim_json = ?, verifier_build = ? WHERE id = ?",
+                 resim_json = ?, verifier_build = ?, judged_at = ? WHERE id = ?",
         )
         .bind(slot)
         .bind(&verdict_json)
         .bind(&resim_json)
         .bind(verifier_build)
+        .bind(judged_at)
         .bind(game_id)
         .execute(&mut *tx)
         .await?;
@@ -284,16 +289,17 @@ pub async fn apply_verdict(
             ruleset.best_of
         };
         if wins >= i64::from(best_of / 2 + 1) {
-            award_on(&mut tx, event_id, bracket, set_id, slot).await?;
+            award_on(&mut tx, event_id, bracket, set_id, slot, None).await?;
         }
     } else {
         sqlx::query(
             "UPDATE games SET state = 'review', winner_slot = NULL, verdict_json = ?,
-                 resim_json = ?, verifier_build = ? WHERE id = ?",
+                 resim_json = ?, verifier_build = ?, judged_at = ? WHERE id = ?",
         )
         .bind(&verdict_json)
         .bind(&resim_json)
         .bind(verifier_build)
+        .bind(judged_at)
         .bind(game_id)
         .execute(&mut *tx)
         .await?;
@@ -323,7 +329,8 @@ pub async fn apply_verdict(
     Ok(())
 }
 
-/// Awards `set_id` to `winner_slot` and advances the bracket, in one transaction.
+/// Awards `set_id` to `winner_slot` as an organiser decision (`decided_by` `award`) and
+/// advances the bracket, in one transaction.
 pub async fn award_set(
     st: &AppState,
     event_id: i64,
@@ -332,7 +339,15 @@ pub async fn award_set(
 ) -> Result<(), LifecycleError> {
     let mut tx = begin_write(&st.db).await?;
     let bracket = read_bracket(&mut tx, event_id).await?;
-    award_on(&mut tx, event_id, bracket, set_id, winner_slot).await?;
+    award_on(
+        &mut tx,
+        event_id,
+        bracket,
+        set_id,
+        winner_slot,
+        Some(DecidedBy::Award),
+    )
+    .await?;
     tx.commit().await?;
     Ok(())
 }
@@ -347,15 +362,17 @@ pub(crate) async fn award_on(
     mut bracket: Bracket,
     set_id: SetId,
     winner_slot: u8,
+    how: Option<DecidedBy>,
 ) -> Result<(), LifecycleError> {
-    let mut pending = vec![(set_id, winner_slot)];
-    while let Some((set_id, winner_slot)) = pending.pop() {
+    let mut pending = vec![(set_id, winner_slot, how)];
+    while let Some((set_id, winner_slot, how)) = pending.pop() {
         let newly_ready = bracket.report(set_id, winner_slot)?;
         let marked = sqlx::query(
-            "UPDATE sets SET state = 'done', room_code = NULL, updated_at = ?
+            "UPDATE sets SET state = 'done', room_code = NULL, updated_at = ?, decided_by = ?
              WHERE event_id = ? AND set_id = ?",
         )
         .bind(now_unix())
+        .bind(how.map(DecidedBy::as_str))
         .bind(event_id)
         .bind(set_id)
         .execute(&mut *conn)
@@ -375,7 +392,7 @@ pub(crate) async fn award_on(
                 if award.double {
                     open_queue_item(conn, event_id, id, None, DOUBLE_DQ, None).await?;
                 }
-                pending.push((id, award.slot));
+                pending.push((id, award.slot, Some(award.decided_by())));
             }
         }
     }
@@ -392,11 +409,42 @@ pub(crate) async fn award_on(
 /// Queue reason for a set awarded with both of its entrants disqualified.
 pub const DOUBLE_DQ: &str = "double-dq";
 
+/// How a set was decided when not by its played games, as stored in `sets.decided_by`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DecidedBy {
+    /// An organiser awarded it.
+    Award,
+    /// One entrant was disqualified.
+    Dq,
+    /// Both entrants were disqualified (it went to slot 0).
+    DoubleDq,
+}
+
+impl DecidedBy {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            DecidedBy::Award => "award",
+            DecidedBy::Dq => "dq",
+            DecidedBy::DoubleDq => DOUBLE_DQ,
+        }
+    }
+}
+
 /// A set awarded because of a disqualification.
 pub(crate) struct DqAward {
     pub(crate) slot: u8,
     /// Both entrants are disqualified (the set goes to slot 0).
     pub(crate) double: bool,
+}
+
+impl DqAward {
+    pub(crate) fn decided_by(&self) -> DecidedBy {
+        if self.double {
+            DecidedBy::DoubleDq
+        } else {
+            DecidedBy::Dq
+        }
+    }
 }
 
 /// How a Ready set is awarded because of a disqualification, if it is.

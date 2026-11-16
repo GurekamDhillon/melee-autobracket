@@ -127,6 +127,11 @@ pub struct EventView {
     pub bracket: Option<bracket::Bracket>,
     /// `(set_id, wins)`.
     pub scores: Vec<(u32, [u8; 2])>,
+    /// Sets decided other than by played games, as `(set_id, how)`: `"award"` (an organiser
+    /// award), `"dq"` (the opponent was disqualified) or `"double-dq"` (both were). Their
+    /// `scores` count only the games played before the decision.
+    #[serde(default)]
+    pub decided_by: Vec<(u32, String)>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
@@ -175,6 +180,9 @@ pub struct QuarantineItem {
     /// The `x-ab-build` of each upload, in slot order.
     pub client_builds: Vec<String>,
     pub created_at: i64,
+    /// When the verdict was applied, unix seconds.
+    #[serde(default)]
+    pub judged_at: Option<i64>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]

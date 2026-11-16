@@ -9,7 +9,9 @@ use proto::Resolve;
 use sqlx::SqliteConnection;
 
 use crate::db::{begin_write, now_unix};
-use crate::lifecycle::{award_on, dq_award, read_bracket, to_json, LifecycleError, DOUBLE_DQ};
+use crate::lifecycle::{
+    award_on, dq_award, read_bracket, to_json, DecidedBy, LifecycleError, DOUBLE_DQ,
+};
 use crate::routes::ApiError;
 use crate::state::AppState;
 
@@ -191,7 +193,15 @@ pub async fn resolve_queue_item(
         Resolve::Award { slot } => match set.state {
             SetState::Ready => {
                 close_set_items(&mut tx, event_id, set_id, &resolution).await?;
-                award_on(&mut tx, event_id, bracket, set_id, slot).await?;
+                award_on(
+                    &mut tx,
+                    event_id,
+                    bracket,
+                    set_id,
+                    slot,
+                    Some(DecidedBy::Award),
+                )
+                .await?;
             }
             SetState::Done { winner } if winner == slot => {
                 close_set_items(&mut tx, event_id, set_id, &resolution).await?;
@@ -282,7 +292,15 @@ async fn award_dq_ready(
             return Ok(());
         };
         close_set_items(conn, event_id, id, resolution).await?;
-        award_on(conn, event_id, bracket, id, award.slot).await?;
+        award_on(
+            conn,
+            event_id,
+            bracket,
+            id,
+            award.slot,
+            Some(award.decided_by()),
+        )
+        .await?;
         if award.double {
             open_queue_item(conn, event_id, id, None, DOUBLE_DQ, None).await?;
         }

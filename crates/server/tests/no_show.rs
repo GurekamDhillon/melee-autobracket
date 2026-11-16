@@ -5,7 +5,7 @@ use autobracket_server::lifecycle::load_bracket;
 use autobracket_server::testkit::{play_game, TestApp, TestPlayer};
 use autobracket_server::worker::flag_stalled_sets;
 use bracket::{Format, SetState, Slot};
-use proto::{Next, NoShowReq, QueueItem, Resolve, RoomReq};
+use proto::{EventView, Next, NoShowReq, QueueItem, Resolve, RoomReq};
 use replay::testkit::simple_game;
 use reqwest::StatusCode;
 
@@ -233,6 +233,15 @@ async fn award_to_reporter_advances_bracket() {
     assert_eq!(next(&guest, event).await, Next::Champion);
     assert_eq!(next(&host, event).await, Next::Eliminated);
     assert!(queue(&app).await.is_empty());
+    let view: EventView = app
+        .as_to()
+        .get(&format!("/v1/events/{event}"))
+        .await
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(view.decided_by, vec![(0, "award".into())]);
+    assert_eq!(view.scores, vec![(0, [0, 0])]);
 }
 
 #[tokio::test]

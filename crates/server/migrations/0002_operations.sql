@@ -9,3 +9,10 @@ UPDATE sets SET updated_at = CAST(strftime('%s', 'now') AS INTEGER);
 
 -- What opened a queue item, beyond its reason (e.g. who reported a no-show, and their note).
 ALTER TABLE queue ADD COLUMN detail TEXT NULL;
+
+-- When the verdict of a game was applied (late, voided verdicts included), unix seconds.
+ALTER TABLE games ADD COLUMN judged_at INTEGER NULL;
+
+-- How a set was decided when not by played games: 'award', 'dq' or 'double-dq'. NULL for a
+-- set won on the board or not yet decided.
+ALTER TABLE sets ADD COLUMN decided_by TEXT NULL;

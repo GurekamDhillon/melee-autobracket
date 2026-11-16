@@ -207,7 +207,9 @@ async fn judge_claimed(st: &AppState, game_id: i64, claim: Claim) -> anyhow::Res
     .context("pre-judging")?;
 
     let (verdict, winner_slot, resim, verifier_build) = match pre {
-        Pre::Final(v) => (v, None, ResimOutcome::Skipped, st.resim.build()),
+        // Decided before any re-simulation (`Single` included: the lone upload is not run
+        // through the engine), so no verifier build checked it.
+        Pre::Final(v) => (v, None, ResimOutcome::Skipped, None),
         Pre::NeedsResim {
             winner_port,
             last_frame,
@@ -222,9 +224,22 @@ async fn judge_claimed(st: &AppState, game_id: i64, claim: Claim) -> anyhow::Res
                 );
             }
             let v: Verdict = judge::finish(&outcome, st.cfg.strict_resim);
-            (v, Some(judge::winner_slot(winner_port)), outcome, build)
+            (
+                v,
+                Some(judge::winner_slot(winner_port)),
+                outcome,
+                Some(build),
+            )
         }
     };
-    lifecycle::apply_verdict(st, game_id, &verdict, winner_slot, &resim, &verifier_build).await?;
+    lifecycle::apply_verdict(
+        st,
+        game_id,
+        &verdict,
+        winner_slot,
+        &resim,
+        verifier_build.as_deref(),
+    )
+    .await?;
     Ok(())
 }

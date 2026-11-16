@@ -137,6 +137,17 @@
   .tag { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; overflow-wrap: normal; }
   .score { font-variant-numeric: tabular-nums; color: var(--muted); min-width: 1ch; text-align: right; }
   .mark { color: var(--accent); font-size: 0.75rem; text-align: right; }
+  .decided {
+    padding: 0 0.3rem;
+    border: 1px solid var(--line);
+    border-radius: 4px;
+    color: var(--muted);
+    font-size: 0.65rem;
+    font-weight: 600;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+    line-height: 1.05rem;
+  }
   .row.win .tag { font-weight: 650; }
   .row.win .score { color: var(--accent); font-weight: 650; }
   .row.lose .tag { color: var(--muted); }
@@ -249,7 +260,10 @@
     return name + " " + round;
   }
 
-  function slotRow(slot, idx, set, score, tagOf) {
+  // How a set decided without play is labelled in place of its score.
+  const DECIDED_LABEL = { award: "awarded", dq: "DQ", "double-dq": "DQ" };
+
+  function slotRow(slot, idx, set, score, decided, tagOf) {
     const entrant = slotEntrant(slot);
     const winner = doneWinner(set.state);
     let cls = "row";
@@ -259,27 +273,33 @@
     row.append(el("span", "seed", entrant === null ? "" : entrant + 1));
     row.append(el("span", "tag", entrant === null ? "TBD" : tagOf(entrant)));
     let scoreText = "";
-    if (score) scoreText = score[idx];
+    if (decided) scoreText = "";
+    else if (score) scoreText = score[idx];
     else if (winner !== null) scoreText = winner === idx ? "W" : "";
-    row.append(el("span", "score", scoreText));
+    const scoreCell = el("span", "score", scoreText);
+    if (decided && winner === idx) {
+      scoreCell.append(el("span", "decided", DECIDED_LABEL[decided] || decided));
+    }
+    row.append(scoreCell);
     const mark = el("span", "mark", winner === idx ? "◂" : "");
     if (winner === idx) mark.append(el("span", "sr", " winner"));
     row.append(mark);
     return row;
   }
 
-  function setCard(set, scores, tagOf) {
+  function setCard(set, scores, decidedBy, tagOf) {
     if (isHidden(set)) return el("div", "set spacer");
     const live = set.state === "Ready";
     const card = el("div", live ? "set live" : "set");
     if (live) card.append(el("span", "badge", "Live"));
     const score = scores.get(set.id);
-    card.append(slotRow(set.slots[0], 0, set, score, tagOf));
-    card.append(slotRow(set.slots[1], 1, set, score, tagOf));
+    const decided = decidedBy.get(set.id);
+    card.append(slotRow(set.slots[0], 0, set, score, decided, tagOf));
+    card.append(slotRow(set.slots[1], 1, set, score, decided, tagOf));
     return card;
   }
 
-  function sideColumns(sets, side, format, scores, tagOf) {
+  function sideColumns(sets, side, format, scores, decidedBy, tagOf) {
     const byRound = new Map();
     for (const s of sets) {
       if (s.side !== side) continue;
@@ -295,7 +315,7 @@
       const col = el("section", "round");
       col.append(el("h2", null, roundLabel(side, r, last, format)));
       const box = el("div", "sets");
-      for (const s of list) box.append(setCard(s, scores, tagOf));
+      for (const s of list) box.append(setCard(s, scores, decidedBy, tagOf));
       col.append(box);
       cols.push(col);
     }
@@ -316,6 +336,8 @@
   function renderBracket(view, tagOf) {
     const b = view.bracket;
     const scores = new Map((view.scores || []).map(([id, wins]) => [id, wins]));
+    // Sets decided without play (award, DQ): labelled instead of a 0-0 score.
+    const decidedBy = new Map((view.decided_by || []).map(([id, how]) => [id, String(how)]));
     const grid = el("div", "bracket");
     const parts = [
       ["winners", "Winners"],
@@ -323,7 +345,7 @@
       ["final", "GrandFinal"],
     ];
     for (const [cls, side] of parts) {
-      const cols = sideColumns(b.sets, side, b.format, scores, tagOf);
+      const cols = sideColumns(b.sets, side, b.format, scores, decidedBy, tagOf);
       if (!cols.length) continue;
       const row = el("div", "side " + cls);
       row.append(...cols);

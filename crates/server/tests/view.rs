@@ -23,6 +23,9 @@ async fn root_serves_html() {
     let body = res.text().await.unwrap();
     assert!(body.contains("<title>"));
     assert!(body.contains("/v1/events"));
+    // Sets decided without play are labelled rather than shown as 0-0.
+    assert!(body.contains("decided_by"));
+    assert!(body.contains("awarded"));
 }
 
 #[tokio::test]

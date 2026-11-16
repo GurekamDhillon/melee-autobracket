@@ -134,6 +134,18 @@ pub(super) async fn event_view(db: &SqlitePool, id: i64) -> Result<EventView, Ap
         .map(|(set_id, w0, w1)| Ok((to_int(set_id)?, [to_int(w0)?, to_int(w1)?])))
         .collect::<Result<_, ApiError>>()?;
 
+    let decided: Vec<(i64, String)> = sqlx::query_as(
+        "SELECT set_id, decided_by FROM sets
+         WHERE event_id = ? AND decided_by IS NOT NULL ORDER BY set_id",
+    )
+    .bind(id)
+    .fetch_all(db)
+    .await?;
+    let decided_by = decided
+        .into_iter()
+        .map(|(set_id, how)| Ok((to_int(set_id)?, how)))
+        .collect::<Result<_, ApiError>>()?;
+
     let entrants = i64::try_from(tags.len()).unwrap_or(i64::MAX);
     Ok(EventView {
         summary: summary(id, name, state, entrants)?,
@@ -141,6 +153,7 @@ pub(super) async fn event_view(db: &SqlitePool, id: i64) -> Result<EventView, Ap
         tags,
         bracket,
         scores,
+        decided_by,
     })
 }
 
