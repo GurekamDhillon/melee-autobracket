@@ -203,6 +203,100 @@ async fn job_round_trip() {
     );
 }
 
+/// Each game is labelled with the build that judged it: the build a verifier posted for
+/// its own job, or `"external"` when it was judged without a re-simulation, never a build
+/// left over from an earlier game judged by the same task.
+#[tokio::test]
+async fn verifier_build_belongs_to_its_game() {
+    let vk = SigningKey::generate(&mut OsRng);
+    let resim = Arc::new(ExternalResim::new(Duration::from_secs(30)));
+    let app = TestApp::spawn_with(external(&vk), resim).await;
+    let host = app.player("Alice").await;
+    let guest = app.player("Bob").await;
+    // Judged in this order (by game id): a game whose verdict turns out moot, a game with
+    // only one upload (decided without re-simulation), and an ordinary game.
+    let moot = app
+        .started_event(Format::SingleElim, &[&host, &guest])
+        .await;
+    upload_pair(&host, &guest, moot, |s| simple_game(1, s)).await;
+    let single = app
+        .started_event(Format::SingleElim, &[&host, &guest])
+        .await;
+    let res = host
+        .post_bytes(
+            &format!("/v1/sets/{single}/0/games/1/replay"),
+            simple_game(1, START_A),
+            &[("x-ab-build", "b1")],
+        )
+        .await;
+    assert_eq!(res.status(), StatusCode::ACCEPTED);
+    sqlx::query("UPDATE games SET first_upload_at = 0 WHERE event_id = ?")
+        .bind(single)
+        .execute(&app.state.db)
+        .await
+        .unwrap();
+    let ordinary = app
+        .started_event(Format::SingleElim, &[&host, &guest])
+        .await;
+    upload_pair(&host, &guest, ordinary, |s| simple_game(1, s)).await;
+
+    let st = app.state.clone();
+    let judging = tokio::spawn(async move { judge_due(&st).await });
+    let verifier = Signer::new(vk, &app.url);
+
+    // While the first game is re-simulated, it leaves `judging` (as an organiser
+    // resolution would), so applying its verdict does nothing.
+    let first = claim_job(&verifier).await;
+    sqlx::query("UPDATE games SET state = 'void' WHERE event_id = ?")
+        .bind(moot)
+        .execute(&app.state.db)
+        .await
+        .unwrap();
+    let result = VerifyResult {
+        outcome: ResimOutcome::Match,
+        build: "first-build".into(),
+    };
+    assert_eq!(
+        verifier.post_result(first.id, &result).await,
+        StatusCode::NO_CONTENT
+    );
+
+    let second = claim_job(&verifier).await;
+    assert_ne!(second.id, first.id);
+    let result = VerifyResult {
+        outcome: ResimOutcome::Match,
+        build: "second-build".into(),
+    };
+    assert_eq!(
+        verifier.post_result(second.id, &result).await,
+        StatusCode::NO_CONTENT
+    );
+    let judged = tokio::time::timeout(Duration::from_secs(10), judging)
+        .await
+        .expect("judging finishes")
+        .unwrap()
+        .unwrap();
+    assert_eq!(judged, 3);
+
+    assert_eq!(game(&app, moot).await, ("void".into(), None, None));
+    assert_eq!(
+        game(&app, single).await,
+        (
+            "review".into(),
+            Some(Verdict::Single),
+            Some("external".into())
+        )
+    );
+    assert_eq!(
+        game(&app, ordinary).await,
+        (
+            "counted".into(),
+            Some(Verdict::Verified),
+            Some("second-build".into())
+        )
+    );
+}
+
 #[tokio::test]
 async fn claim_requires_verifier_key() {
     let vk = SigningKey::generate(&mut OsRng);
@@ -312,6 +406,14 @@ async fn external_check_without_verifier_is_unavailable() {
     assert_eq!(outcome, ResimOutcome::Unavailable("no verifier".into()));
     assert!(started.elapsed() < Duration::from_secs(5));
     assert_eq!(resim.build(), "external");
+    // With no result there is no posted build either.
+    assert_eq!(
+        resim.check_with_build(Path::new("/nowhere.slp"), 100).await,
+        (
+            ResimOutcome::Unavailable("no verifier".into()),
+            "external".into()
+        )
+    );
     // The abandoned job is not handed out any more.
     assert_eq!(
         Signer::new(vk, &app.url).claim().await.status(),

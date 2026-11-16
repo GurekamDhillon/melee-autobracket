@@ -651,6 +651,7 @@ async fn late_counting_verdict_for_decided_set_is_void() {
         &Verdict::PeerOnly,
         Some(0),
         &ResimOutcome::Skipped,
+        "none",
     )
     .await
     .unwrap();
@@ -687,6 +688,7 @@ async fn late_noncounting_verdict_does_not_reopen_set() {
         &Verdict::Conflicted,
         None,
         &ResimOutcome::Skipped,
+        "none",
     )
     .await
     .unwrap();

@@ -407,6 +407,7 @@ async fn game_never_counted_twice() {
         &Verdict::PeerOnly,
         Some(0),
         &ResimOutcome::Skipped,
+        "none",
     )
     .await
     .unwrap();

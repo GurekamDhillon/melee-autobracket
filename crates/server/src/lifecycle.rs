@@ -179,13 +179,15 @@ pub async fn load_bracket_on(
 /// bracket advance. Does nothing if the game is no longer in `judging`, so a duplicate or
 /// late apply cannot count a game twice.
 ///
-/// A counting verdict needs `winner_slot` (0 is the host).
+/// A counting verdict needs `winner_slot` (0 is the host). `verifier_build` is recorded on
+/// the game as the build that judged it.
 pub async fn apply_verdict(
     st: &AppState,
     game_id: i64,
     v: &Verdict,
     winner_slot: Option<u8>,
     resim: &ResimOutcome,
+    verifier_build: &str,
 ) -> Result<(), LifecycleError> {
     let verdict_json = to_json(v)?;
     let resim_json = to_json(resim)?;
@@ -222,7 +224,7 @@ pub async fn apply_verdict(
         )
         .bind(&verdict_json)
         .bind(&resim_json)
-        .bind(st.resim.build())
+        .bind(verifier_build)
         .bind(game_id)
         .execute(&mut *tx)
         .await?;
@@ -246,7 +248,7 @@ pub async fn apply_verdict(
         .bind(slot)
         .bind(&verdict_json)
         .bind(&resim_json)
-        .bind(st.resim.build())
+        .bind(verifier_build)
         .bind(game_id)
         .execute(&mut *tx)
         .await?;
@@ -286,7 +288,7 @@ pub async fn apply_verdict(
         )
         .bind(&verdict_json)
         .bind(&resim_json)
-        .bind(st.resim.build())
+        .bind(verifier_build)
         .bind(game_id)
         .execute(&mut *tx)
         .await?;
