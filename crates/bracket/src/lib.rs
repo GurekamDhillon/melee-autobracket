@@ -64,6 +64,8 @@ pub enum BracketError {
     BadSlot,
 }
 
+pub mod stages;
+
 mod double;
 mod seed;
 mod single;
