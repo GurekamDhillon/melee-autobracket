@@ -14,9 +14,11 @@ mod admin;
 mod events;
 mod players;
 mod sets;
+mod view;
 
 pub fn router() -> Router<AppState> {
     Router::new()
+        .route("/", get(view::page))
         .route("/v1/players", post(players::register))
         .route("/v1/events", get(events::list))
         .route("/v1/events/{id}", get(events::view))

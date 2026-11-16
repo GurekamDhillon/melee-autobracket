@@ -1,0 +1,56 @@
+# autobracket server configuration. Copy to /etc/autobracket/autobracket.toml.
+# Every value below is the default except to_keys, db_path and replay_dir.
+
+# Address and port the HTTP server listens on.
+bind = "0.0.0.0:8080"
+# SQLite database file; back up a tournament by copying it.
+db_path = "/var/lib/autobracket/autobracket.sqlite"
+# Directory where uploaded .slp replays are stored.
+replay_dir = "/var/lib/autobracket/replays"
+# melee_relay address handed to clients for netplay rooms.
+relay = "netplay.gsd.sh:51600"
+# Require an invite code (from `autobracket admin invite new`) to register a player key.
+require_invite = false
+# Tournament organiser public keys, lowercase hex (printed by `autobracket keygen`). Required.
+to_keys = []
+# Public keys of external verifier workers, lowercase hex (for verifier mode "external").
+verifier_keys = []
+# Engine builds clients may sign up with; an empty list accepts any build.
+accepted_builds = []
+# Seconds to wait for the second player's replay before a game is judged on one upload (verdict Single).
+upload_timeout_secs = 120
+# Send games whose re-simulation diverges to the TO queue (verdict Inexact) instead of counting them.
+strict_resim = false
+# Largest accepted request body (a replay upload), in bytes.
+max_replay_bytes = 16777216
+# Sustained requests per second allowed from one IP address.
+rate_per_sec = 20
+# Requests one IP address may make in a burst before being limited.
+rate_burst = 40
+
+[verifier]
+# "in_process" runs the engine here, "external" waits for `autobracket verify-worker`, "off" skips re-simulation.
+mode = "off"
+# Path to the melee engine binary (in_process mode).
+engine = ""
+# Path to your own NTSC 1.02 disc image (in_process mode); never distributed with this project.
+iso = ""
+# Seconds one re-simulation may run before it is stopped and recorded as crashed.
+timeout_secs = 120
+# Re-simulations run at the same time.
+jobs = 2
+
+[ruleset]
+# Default rules for new events; `event create` can override best_of.
+# Stocks per game.
+stocks = 4
+# Game timer, in seconds.
+timer_secs = 480
+# Games per set (best of N).
+best_of = 3
+# Games per grand final set (and reset) in double elimination.
+best_of_finals = 5
+# Legal stage ids, as Game Start records them (default: the six tournament stages).
+legal_stages = [2, 3, 8, 28, 31, 32]
+# Character ids that may not be played.
+banned_characters = []

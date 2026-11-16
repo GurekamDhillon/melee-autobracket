@@ -3,3 +3,4 @@ target/
 replays/
 *.iso
 .superpowers/
+.playwright-mcp/

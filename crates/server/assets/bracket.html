@@ -1,0 +1,426 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<title>Bracket</title>
+<link rel="icon" href="data:,">
+<style>
+  :root {
+    --bg: #f5f5f3;
+    --surface: #ffffff;
+    --text: #1c1d1f;
+    --muted: #6a6e75;
+    --faint: #a3a6ab;
+    --line: #dadad6;
+    --accent: #2853b8;
+    --live: #b94a0c;
+    --live-bg: #fbeee5;
+    --notice-bg: #f0efe9;
+    --card-w: 11.5rem;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #131416;
+      --surface: #1c1e21;
+      --text: #e7e7e5;
+      --muted: #9a9ea5;
+      --faint: #62666d;
+      --line: #2e3136;
+      --accent: #86a8f0;
+      --live: #f08a4b;
+      --live-bg: #3a2418;
+      --notice-bg: #202226;
+    }
+  }
+
+  * { box-sizing: border-box; }
+  html { -webkit-text-size-adjust: 100%; }
+  body {
+    margin: 0;
+    padding: 1.25rem 1rem 2rem;
+    background: var(--bg);
+    color: var(--text);
+    font: 15px/1.4 system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+    overflow-wrap: anywhere;
+  }
+  .wrap { max-width: 100%; }
+
+  header.top {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: flex-end;
+    justify-content: space-between;
+    gap: 0.75rem 1.5rem;
+    margin-bottom: 1rem;
+  }
+  h1 { margin: 0; font-size: 1.4rem; font-weight: 650; letter-spacing: -0.01em; }
+  .meta { margin: 0.2rem 0 0; color: var(--muted); font-size: 0.875rem; }
+  .meta .champion { color: var(--text); font-weight: 600; }
+  label.pick { display: flex; align-items: center; gap: 0.5rem; color: var(--muted); font-size: 0.875rem; }
+  select {
+    font: inherit;
+    color: var(--text);
+    background: var(--surface);
+    border: 1px solid var(--line);
+    border-radius: 6px;
+    padding: 0.3rem 0.5rem;
+    max-width: min(22rem, 100%);
+  }
+
+  .status {
+    margin: 0 0 1rem;
+    padding: 0.5rem 0.75rem;
+    border-radius: 6px;
+    background: var(--notice-bg);
+    color: var(--muted);
+    font-size: 0.875rem;
+  }
+
+  .board { overflow-x: auto; padding-bottom: 0.75rem; }
+  .bracket {
+    display: grid;
+    grid-template-columns: max-content max-content;
+    grid-template-areas: "w f" "l f";
+    gap: 2.25rem 2rem;
+    width: max-content;
+  }
+  .side { display: flex; gap: 1.25rem; }
+  .side.winners { grid-area: w; }
+  .side.losers { grid-area: l; padding-top: 1.25rem; border-top: 1px solid var(--line); }
+  .side.final { grid-area: f; align-self: center; }
+
+  .round { display: flex; flex-direction: column; width: var(--card-w); }
+  .round h2 {
+    margin: 0 0 0.6rem;
+    font-size: 0.75rem;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: var(--muted);
+  }
+  .sets { flex: 1; display: flex; flex-direction: column; justify-content: space-around; gap: 0.75rem; }
+  .spacer { visibility: hidden; }
+
+  .set {
+    position: relative;
+    background: var(--surface);
+    border: 1px solid var(--line);
+    border-radius: 6px;
+  }
+  .set.live { border-color: var(--live); }
+  .badge {
+    position: absolute;
+    top: -0.55rem;
+    right: 0.5rem;
+    padding: 0 0.35rem;
+    border-radius: 4px;
+    background: var(--live-bg);
+    color: var(--live);
+    font-size: 0.65rem;
+    font-weight: 700;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    line-height: 1.1rem;
+  }
+  .row {
+    display: grid;
+    grid-template-columns: 1.6rem 1fr auto 0.8rem;
+    align-items: center;
+    gap: 0.25rem;
+    padding: 0.3rem 0.45rem;
+    min-height: 1.9rem;
+  }
+  .row + .row { border-top: 1px solid var(--line); }
+  .seed { color: var(--faint); font-size: 0.75rem; font-variant-numeric: tabular-nums; }
+  .tag { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; overflow-wrap: normal; }
+  .score { font-variant-numeric: tabular-nums; color: var(--muted); min-width: 1ch; text-align: right; }
+  .mark { color: var(--accent); font-size: 0.75rem; text-align: right; }
+  .row.win .tag { font-weight: 650; }
+  .row.win .score { color: var(--accent); font-weight: 650; }
+  .row.lose .tag { color: var(--muted); }
+  .row.empty .tag { color: var(--faint); font-style: italic; }
+
+  .note { color: var(--muted); margin: 0.25rem 0 1rem; }
+  ol.entrants {
+    margin: 0;
+    padding-left: 2rem;
+    columns: 12rem auto;
+    column-gap: 2rem;
+  }
+  ol.entrants li { padding: 0.1rem 0; }
+
+  footer { margin-top: 1.25rem; color: var(--muted); font-size: 0.8rem; }
+  .sr { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header class="top">
+    <div>
+      <h1 id="title">Bracket</h1>
+      <p class="meta" id="meta"></p>
+    </div>
+    <label class="pick" hidden id="pick-label">Event
+      <select id="picker"></select>
+    </label>
+  </header>
+  <p class="status" id="status" role="status" hidden></p>
+  <main id="board" class="board"></main>
+  <footer>Last updated <time id="updated">never</time> &middot; refreshes every 10 seconds</footer>
+</div>
+<script>
+"use strict";
+(function () {
+  const POLL_MS = 10000;
+  const STATE_LABEL = { signup: "Signups open", running: "In progress", complete: "Complete" };
+
+  const $ = (id) => document.getElementById(id);
+  const picker = $("picker");
+  let pickerKey = "";
+  let timer = null;
+  let seq = 0;
+
+  function el(tag, cls, text) {
+    const e = document.createElement(tag);
+    if (cls) e.className = cls;
+    if (text !== undefined && text !== null) e.textContent = String(text);
+    return e;
+  }
+
+  async function getJson(path) {
+    const res = await fetch(path, { cache: "no-store", headers: { accept: "application/json" } });
+    if (!res.ok) throw new Error(path + " returned " + res.status);
+    return res.json();
+  }
+
+  function hashId() {
+    const m = /^#(\d+)$/.exec(location.hash);
+    return m ? Number(m[1]) : null;
+  }
+
+  function setStatus(text) {
+    const s = $("status");
+    s.textContent = text;
+    s.hidden = !text;
+  }
+
+  function renderPicker(events, id) {
+    const key = JSON.stringify(events.map((e) => [e.id, e.name, e.state]));
+    if (key !== pickerKey) {
+      pickerKey = key;
+      picker.replaceChildren();
+      for (const ev of events) {
+        const label = ev.name + " (" + (STATE_LABEL[ev.state] || ev.state) + ")";
+        const opt = el("option", null, label);
+        opt.value = String(ev.id);
+        picker.append(opt);
+      }
+    }
+    $("pick-label").hidden = events.length === 0;
+    if (id !== null) picker.value = String(id);
+  }
+
+  // ---- bracket drawing ---------------------------------------------------
+
+  function slotEntrant(slot) {
+    return slot && typeof slot === "object" && "Entrant" in slot ? slot.Entrant : null;
+  }
+
+  function doneWinner(state) {
+    return state && typeof state === "object" && "Done" in state ? state.Done.winner : null;
+  }
+
+  function isHidden(set) {
+    return set.state === "Skipped" || set.slots.some((s) => s === "Bye");
+  }
+
+  function roundLabel(side, round, last, format) {
+    if (side === "GrandFinal") return round === 1 ? "Grand final" : "Reset";
+    if (format === "SingleElim") {
+      if (round === last) return "Final";
+      if (round === last - 1) return "Semifinals";
+      return "Round " + round;
+    }
+    const name = side === "Winners" ? "Winners" : "Losers";
+    if (round === last) return name + " final";
+    if (side === "Winners" && round === last - 1) return "Winners semis";
+    return name + " " + round;
+  }
+
+  function slotRow(slot, idx, set, score, tagOf) {
+    const entrant = slotEntrant(slot);
+    const winner = doneWinner(set.state);
+    let cls = "row";
+    if (entrant === null) cls += " empty";
+    else if (winner !== null) cls += winner === idx ? " win" : " lose";
+    const row = el("div", cls);
+    row.append(el("span", "seed", entrant === null ? "" : entrant + 1));
+    row.append(el("span", "tag", entrant === null ? "TBD" : tagOf(entrant)));
+    let scoreText = "";
+    if (score) scoreText = score[idx];
+    else if (winner !== null) scoreText = winner === idx ? "W" : "";
+    row.append(el("span", "score", scoreText));
+    const mark = el("span", "mark", winner === idx ? "◂" : "");
+    if (winner === idx) mark.append(el("span", "sr", " winner"));
+    row.append(mark);
+    return row;
+  }
+
+  function setCard(set, scores, tagOf) {
+    if (isHidden(set)) return el("div", "set spacer");
+    const live = set.state === "Ready";
+    const card = el("div", live ? "set live" : "set");
+    if (live) card.append(el("span", "badge", "Live"));
+    const score = scores.get(set.id);
+    card.append(slotRow(set.slots[0], 0, set, score, tagOf));
+    card.append(slotRow(set.slots[1], 1, set, score, tagOf));
+    return card;
+  }
+
+  function sideColumns(sets, side, format, scores, tagOf) {
+    const byRound = new Map();
+    for (const s of sets) {
+      if (s.side !== side) continue;
+      if (!byRound.has(s.round)) byRound.set(s.round, []);
+      byRound.get(s.round).push(s);
+    }
+    const rounds = [...byRound.keys()].sort((a, b) => a - b);
+    const last = rounds.length ? rounds[rounds.length - 1] : 0;
+    const cols = [];
+    for (const r of rounds) {
+      const list = byRound.get(r).sort((a, b) => a.id - b.id);
+      if (list.every(isHidden)) continue;
+      const col = el("section", "round");
+      col.append(el("h2", null, roundLabel(side, r, last, format)));
+      const box = el("div", "sets");
+      for (const s of list) box.append(setCard(s, scores, tagOf));
+      col.append(box);
+      cols.push(col);
+    }
+    return cols;
+  }
+
+  function champion(bracket) {
+    const resolved = bracket.sets.every((s) => s.state === "Skipped" || doneWinner(s.state) !== null);
+    if (!resolved) return null;
+    for (let i = bracket.sets.length - 1; i >= 0; i--) {
+      const s = bracket.sets[i];
+      const w = doneWinner(s.state);
+      if (s.winner_to === null && w !== null) return slotEntrant(s.slots[w]);
+    }
+    return null;
+  }
+
+  function renderBracket(view, tagOf) {
+    const b = view.bracket;
+    const scores = new Map((view.scores || []).map(([id, wins]) => [id, wins]));
+    const grid = el("div", "bracket");
+    const parts = [
+      ["winners", "Winners"],
+      ["losers", "Losers"],
+      ["final", "GrandFinal"],
+    ];
+    for (const [cls, side] of parts) {
+      const cols = sideColumns(b.sets, side, b.format, scores, tagOf);
+      if (!cols.length) continue;
+      const row = el("div", "side " + cls);
+      row.append(...cols);
+      grid.append(row);
+    }
+    return grid;
+  }
+
+  function rulesText(r, format) {
+    if (!r) return "";
+    const parts = ["Best of " + r.best_of];
+    // best_of_finals applies to grand final sets, which only double elimination has.
+    if (format === "DoubleElim" && r.best_of_finals !== r.best_of) {
+      parts.push("grand final best of " + r.best_of_finals);
+    }
+    parts.push(r.stocks + " stocks");
+    const m = Math.floor(r.timer_secs / 60), s = r.timer_secs % 60;
+    parts.push(m + ":" + String(s).padStart(2, "0"));
+    return parts.join(", ");
+  }
+
+  function renderView(view) {
+    const sum = view.summary;
+    const tags = view.tags || [];
+    const tagOf = (n) => (typeof tags[n] === "string" ? tags[n] : "Entrant " + (n + 1));
+    $("title").textContent = sum.name;
+    document.title = sum.name + " · Bracket";
+
+    const meta = $("meta");
+    meta.replaceChildren();
+    const bits = [STATE_LABEL[sum.state] || sum.state, sum.entrants + (sum.entrants === 1 ? " entrant" : " entrants")];
+    const rules = rulesText(view.ruleset, view.bracket ? view.bracket.format : null);
+    if (rules) bits.push(rules);
+    meta.append(bits.join(" · "));
+    if (view.bracket) {
+      const champ = champion(view.bracket);
+      if (champ !== null) {
+        meta.append(" · Champion: ");
+        meta.append(el("span", "champion", tagOf(champ)));
+      }
+    }
+
+    const board = $("board");
+    if (view.bracket) {
+      board.replaceChildren(renderBracket(view, tagOf));
+      return;
+    }
+    const nodes = [el("p", "note", "The bracket appears here when the event starts.")];
+    if (tags.length) {
+      const list = el("ol", "entrants");
+      for (const t of tags) list.append(el("li", null, t));
+      nodes.push(list);
+    }
+    board.replaceChildren(...nodes);
+  }
+
+  function renderNoEvents() {
+    $("title").textContent = "Bracket";
+    document.title = "Bracket";
+    $("meta").textContent = "";
+    $("board").replaceChildren(el("p", "note", "No events yet. This page will update when one is created."));
+  }
+
+  // ---- polling -----------------------------------------------------------
+
+  async function refresh() {
+    clearTimeout(timer);
+    const mine = ++seq;
+    try {
+      const list = await getJson("/v1/events");
+      const events = (Array.isArray(list) ? list : []).slice().sort((a, b) => b.id - a.id);
+      let id = hashId();
+      if (id === null || !events.some((e) => e.id === id)) id = events.length ? events[0].id : null;
+      const view = id === null ? null : await getJson("/v1/events/" + id);
+      if (mine !== seq) return;
+      renderPicker(events, id);
+      if (view) renderView(view);
+      else renderNoEvents();
+      setStatus("");
+      $("updated").textContent = new Date().toLocaleTimeString();
+    } catch (err) {
+      if (mine !== seq) return;
+      setStatus("Couldn’t reach the server just now. Showing the last update; trying again in a few seconds.");
+    } finally {
+      if (mine === seq) timer = setTimeout(refresh, POLL_MS);
+    }
+  }
+
+  picker.addEventListener("change", () => {
+    location.hash = "#" + picker.value;
+  });
+  window.addEventListener("hashchange", refresh);
+  document.addEventListener("visibilitychange", () => {
+    if (!document.hidden) refresh();
+  });
+  refresh();
+})();
+</script>
+</body>
+</html>
