@@ -149,6 +149,52 @@ fn second_run_without_force_fails_and_changes_nothing() {
     assert!(!tmp.path().join("autobracket.toml").exists());
 }
 
+/// A `--force` run that cannot move the config into place changes nothing: the old key and
+/// the old config, which names it, stay together.
+#[test]
+fn force_that_cannot_place_the_config_leaves_the_old_pair() {
+    let tmp = tempfile::tempdir().unwrap();
+    ok(&init(tmp.path(), &[]));
+    let key = std::fs::read(tmp.path().join("organiser.key")).unwrap();
+    // A non-empty directory where the config goes: renaming a file over it fails.
+    let config = tmp.path().join("autobracket.toml");
+    std::fs::remove_file(&config).unwrap();
+    std::fs::create_dir_all(config.join("blocker")).unwrap();
+
+    let out = init(tmp.path(), &["--force"]);
+    assert!(!out.status.success());
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("nothing was changed"), "{err}");
+    assert_eq!(
+        std::fs::read(tmp.path().join("organiser.key")).unwrap(),
+        key
+    );
+    assert!(!tmp.path().join(".organiser.key.new").exists());
+    assert!(!tmp.path().join(".autobracket.toml.new").exists());
+}
+
+/// When the config is in place but the key cannot follow, the message says where the new
+/// key is, and the config names that key.
+#[test]
+fn force_that_cannot_place_the_key_says_where_the_new_key_is() {
+    let tmp = tempfile::tempdir().unwrap();
+    ok(&init(tmp.path(), &[]));
+    let key = tmp.path().join("organiser.key");
+    std::fs::remove_file(&key).unwrap();
+    std::fs::create_dir_all(key.join("blocker")).unwrap();
+
+    let out = init(tmp.path(), &["--force"]);
+    assert!(!out.status.success());
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains(".organiser.key.new"), "{err}");
+    let cfg = Config::load(&tmp.path().join("autobracket.toml")).unwrap();
+    let new = read_key_file(&tmp.path().join(".organiser.key.new")).unwrap();
+    assert_eq!(
+        cfg.to_keys,
+        vec![hex::encode(new.verifying_key().to_bytes())]
+    );
+}
+
 #[test]
 fn force_replaces_both_files() {
     let tmp = tempfile::tempdir().unwrap();

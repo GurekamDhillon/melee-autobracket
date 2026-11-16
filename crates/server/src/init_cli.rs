@@ -114,10 +114,28 @@ pub fn run(args: InitArgs) -> anyhow::Result<()> {
     }
     let key_file = dir.join(KEY_FILE);
     let config_file = dir.join(CONFIG_FILE);
-    std::fs::rename(&key_tmp, &key_file)
-        .with_context(|| format!("moving the key into {}", key_file.display()))?;
-    std::fs::rename(&config_tmp, &config_file)
-        .with_context(|| format!("moving the configuration into {}", config_file.display()))?;
+    // The config first: if it cannot move, the old key and old config still match. If the key
+    // then cannot follow, the new key is still beside the config that names it.
+    if let Err(e) = std::fs::rename(&config_tmp, &config_file) {
+        let _ = std::fs::remove_file(&key_tmp);
+        let _ = std::fs::remove_file(&config_tmp);
+        return Err(e).with_context(|| {
+            format!(
+                "moving the configuration into {}; nothing was changed",
+                config_file.display()
+            )
+        });
+    }
+    std::fs::rename(&key_tmp, &key_file).with_context(|| {
+        format!(
+            "moving the key into {}. {} already names the NEW key, whose secret is in {}: \
+             move that file to {} by hand (the old organiser key no longer works)",
+            key_file.display(),
+            config_file.display(),
+            key_tmp.display(),
+            key_file.display()
+        )
+    })?;
 
     let url = public_url.unwrap_or_else(|| local_url(&cfg.bind));
     print!(
