@@ -3,7 +3,7 @@
 
 use axum::http::StatusCode;
 use bracket::{Bracket, BracketError, Format, SetId, SetState, Side, Slot};
-use proto::{ResimOutcome, Ruleset, Verdict};
+use proto::{ResimOutcome, Resolve, Ruleset, Verdict};
 use sqlx::{SqliteConnection, SqlitePool};
 
 use crate::db::{begin_write, now_unix};
@@ -207,6 +207,34 @@ pub async fn apply_verdict(
     let set_id = SetId::try_from(set_id)
         .map_err(|_| LifecycleError::Corrupt(format!("game {game_id} set_id {set_id}")))?;
 
+    // The set may have been decided or sent back while the game was judged (an organiser
+    // resolution, say). The late verdict is then moot: keep it on the game, change nothing else.
+    let set_state: Option<String> =
+        sqlx::query_scalar("SELECT state FROM sets WHERE event_id = ? AND set_id = ?")
+            .bind(event_id)
+            .bind(set_id)
+            .fetch_optional(&mut *tx)
+            .await?;
+    if set_state.as_deref() != Some("ready") {
+        sqlx::query(
+            "UPDATE games SET state = 'void', winner_slot = NULL, verdict_json = ?,
+                 resim_json = ?, verifier_build = ? WHERE id = ?",
+        )
+        .bind(&verdict_json)
+        .bind(&resim_json)
+        .bind(st.resim.build())
+        .bind(game_id)
+        .execute(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        eprintln!(
+            "judge: game {game_id} judged {name} after set {event_id}/{set_id} left play \
+             ({}); voided",
+            set_state.as_deref().unwrap_or("no sets row")
+        );
+        return Ok(());
+    }
+
     if v.counts() {
         let slot = winner_slot.filter(|s| *s <= 1).ok_or_else(|| {
             LifecycleError::Corrupt(format!("{name} verdict without a winner slot"))
@@ -232,11 +260,8 @@ pub async fn apply_verdict(
         let wins: i64 = sqlx::query_scalar(bump)
             .bind(event_id)
             .bind(set_id)
-            .fetch_optional(&mut *tx)
-            .await?
-            .ok_or_else(|| {
-                LifecycleError::Corrupt(format!("game {game_id} judged in set not in play"))
-            })?;
+            .fetch_one(&mut *tx)
+            .await?;
 
         let ruleset: Ruleset = serde_json::from_str(&ruleset_json)
             .map_err(|e| LifecycleError::Corrupt(format!("event {event_id} ruleset_json: {e}")))?;
@@ -270,17 +295,7 @@ pub async fn apply_verdict(
             .bind(set_id)
             .execute(&mut *tx)
             .await?;
-        sqlx::query(
-            "INSERT INTO queue (event_id, set_id, game_id, reason, state, created_at)
-             VALUES (?, ?, ?, ?, 'open', ?)",
-        )
-        .bind(event_id)
-        .bind(set_id)
-        .bind(game_id)
-        .bind(name)
-        .bind(now_unix())
-        .execute(&mut *tx)
-        .await?;
+        open_queue_item(&mut tx, event_id, set_id, Some(game_id), name).await?;
     }
 
     if matches!(
@@ -314,8 +329,8 @@ pub async fn award_set(
 
 /// Marks the set `done`, reports it to `bracket`, opens a `sets` row for each newly Ready
 /// set, and stores the bracket. A newly Ready set holding a disqualified entrant is awarded
-/// straight to the other entrant (to slot 0 when both are disqualified). The event becomes
-/// `complete` with the bracket.
+/// straight to the other entrant; when both are disqualified it goes to slot 0 and a
+/// `double-dq` queue item tells the organiser. The event becomes `complete` with the bracket.
 async fn award_on(
     conn: &mut SqliteConnection,
     event_id: i64,
@@ -344,8 +359,11 @@ async fn award_on(
                 continue;
             }
             open_set(conn, event_id, id).await?;
-            if let Some(slot) = dq_award(conn, event_id, set.slots).await? {
-                pending.push((id, slot));
+            if let Some(award) = dq_award(conn, event_id, set.slots).await? {
+                if award.double {
+                    open_queue_item(conn, event_id, id, None, DOUBLE_DQ).await?;
+                }
+                pending.push((id, award.slot));
             }
         }
     }
@@ -359,12 +377,22 @@ async fn award_on(
     Ok(())
 }
 
-/// The slot a Ready set is awarded to because of a disqualification, if any.
+/// Queue reason for a set awarded with both of its entrants disqualified.
+pub const DOUBLE_DQ: &str = "double-dq";
+
+/// A set awarded because of a disqualification.
+struct DqAward {
+    slot: u8,
+    /// Both entrants are disqualified (the set goes to slot 0).
+    double: bool,
+}
+
+/// How a Ready set is awarded because of a disqualification, if it is.
 async fn dq_award(
     conn: &mut SqliteConnection,
     event_id: i64,
     slots: [Slot; 2],
-) -> Result<Option<u8>, LifecycleError> {
+) -> Result<Option<DqAward>, LifecycleError> {
     let mut dq = [false; 2];
     for (i, slot) in slots.iter().enumerate() {
         let Slot::Entrant(seed) = *slot else {
@@ -382,11 +410,13 @@ async fn dq_award(
             LifecycleError::Corrupt(format!("event {event_id} has no entrant seeded {seed}"))
         })?;
     }
-    Ok(match dq {
-        [false, false] => None,
-        [true, false] => Some(1),
-        [false, true] | [true, true] => Some(0),
-    })
+    let (slot, double) = match dq {
+        [false, false] => return Ok(None),
+        [true, false] => (1, false),
+        [false, true] => (0, false),
+        [true, true] => (0, true),
+    };
+    Ok(Some(DqAward { slot, double }))
 }
 
 /// The verdict's variant name, as used for queue reasons and quarantine kinds.
@@ -405,6 +435,213 @@ pub fn verdict_name(v: &Verdict) -> &'static str {
 
 fn to_json<T: serde::Serialize>(v: &T) -> Result<String, LifecycleError> {
     serde_json::to_string(v).map_err(|e| LifecycleError::Corrupt(format!("serialising: {e}")))
+}
+
+/// Opens an organiser queue item on a set (and the game in question, if any).
+async fn open_queue_item(
+    conn: &mut SqliteConnection,
+    event_id: i64,
+    set_id: SetId,
+    game_id: Option<i64>,
+    reason: &str,
+) -> Result<(), LifecycleError> {
+    sqlx::query(
+        "INSERT INTO queue (event_id, set_id, game_id, reason, state, created_at)
+         VALUES (?, ?, ?, ?, 'open', ?)",
+    )
+    .bind(event_id)
+    .bind(set_id)
+    .bind(game_id)
+    .bind(reason)
+    .bind(now_unix())
+    .execute(&mut *conn)
+    .await?;
+    Ok(())
+}
+
+#[derive(thiserror::Error, Debug)]
+pub enum ResolveError {
+    #[error("no such queue item")]
+    NoSuchItem,
+    #[error("queue item is already resolved")]
+    AlreadyResolved,
+    #[error("slot must be 0 or 1")]
+    BadSlot,
+    #[error("{0}")]
+    Conflict(&'static str),
+    #[error(transparent)]
+    Lifecycle(#[from] LifecycleError),
+}
+
+impl From<sqlx::Error> for ResolveError {
+    fn from(e: sqlx::Error) -> Self {
+        ResolveError::Lifecycle(LifecycleError::Db(e))
+    }
+}
+
+impl From<ResolveError> for ApiError {
+    fn from(e: ResolveError) -> Self {
+        match e {
+            ResolveError::NoSuchItem => ApiError::new(StatusCode::NOT_FOUND, e.to_string()),
+            ResolveError::BadSlot => ApiError::new(StatusCode::BAD_REQUEST, e.to_string()),
+            ResolveError::AlreadyResolved | ResolveError::Conflict(_) => {
+                ApiError::new(StatusCode::CONFLICT, e.to_string())
+            }
+            ResolveError::Lifecycle(e) => e.into(),
+        }
+    }
+}
+
+/// Resolves an open organiser queue item, in one transaction, recording `r`, the organiser's
+/// key and the time in `resolution_json`.
+///
+/// - `Award { slot }`: the set's games in review become `void`, its open items are resolved,
+///   and the set is awarded to `slot`. On a set already decided for `slot` this only
+///   acknowledges the item; one decided the other way is a conflict.
+/// - `Replay`: the item's game becomes `void` and the set goes back to `ready` with no room
+///   code, so the same game number is played again. Wins are unchanged.
+/// - `Dq { slot }`: the entrant in `slot` is disqualified, and every Ready set holding a
+///   disqualified entrant (this one included) is awarded to the opponent, which also
+///   decides sets that become Ready later.
+pub async fn resolve_queue_item(
+    st: &AppState,
+    item_id: i64,
+    r: &Resolve,
+    to_key: &str,
+) -> Result<(), ResolveError> {
+    if let Resolve::Award { slot } | Resolve::Dq { slot } = r {
+        if *slot > 1 {
+            return Err(ResolveError::BadSlot);
+        }
+    }
+    let resolution = to_json(&serde_json::json!({
+        "resolve": r,
+        "by": to_key,
+        "at": now_unix(),
+    }))?;
+
+    let mut tx = begin_write(&st.db).await?;
+    let row: Option<(i64, i64, Option<i64>, String)> =
+        sqlx::query_as("SELECT event_id, set_id, game_id, state FROM queue WHERE id = ?")
+            .bind(item_id)
+            .fetch_optional(&mut *tx)
+            .await?;
+    let (event_id, set_id, game_id, state) = row.ok_or(ResolveError::NoSuchItem)?;
+    if state != "open" {
+        return Err(ResolveError::AlreadyResolved);
+    }
+    let set_id = SetId::try_from(set_id)
+        .map_err(|_| LifecycleError::Corrupt(format!("queue item {item_id} set_id {set_id}")))?;
+    let bracket = read_bracket(&mut tx, event_id).await?;
+    let set = bracket
+        .sets
+        .get(set_id as usize)
+        .ok_or(LifecycleError::Bracket(BracketError::UnknownSet))?;
+
+    match *r {
+        Resolve::Award { slot } => match set.state {
+            SetState::Ready => {
+                close_set_items(&mut tx, event_id, set_id, &resolution).await?;
+                award_on(&mut tx, event_id, bracket, set_id, slot).await?;
+            }
+            SetState::Done { winner } if winner == slot => {
+                close_set_items(&mut tx, event_id, set_id, &resolution).await?;
+            }
+            _ => return Err(ResolveError::Conflict("set is already decided")),
+        },
+        Resolve::Replay => {
+            if set.state != SetState::Ready {
+                return Err(ResolveError::Conflict("set is already decided"));
+            }
+            if let Some(game_id) = game_id {
+                sqlx::query("UPDATE games SET state = 'void' WHERE id = ? AND state = 'review'")
+                    .bind(game_id)
+                    .execute(&mut *tx)
+                    .await?;
+            }
+            sqlx::query(
+                "UPDATE sets SET state = 'ready', room_code = NULL
+                 WHERE event_id = ? AND set_id = ?",
+            )
+            .bind(event_id)
+            .bind(set_id)
+            .execute(&mut *tx)
+            .await?;
+        }
+        Resolve::Dq { slot } => {
+            let Slot::Entrant(seed) = set.slots[usize::from(slot)] else {
+                return Err(ResolveError::Conflict("no entrant in that slot"));
+            };
+            sqlx::query("UPDATE entrants SET dq = 1 WHERE event_id = ? AND seed = ?")
+                .bind(event_id)
+                .bind(seed)
+                .execute(&mut *tx)
+                .await?;
+            award_dq_ready(&mut tx, event_id, &resolution).await?;
+        }
+    }
+
+    sqlx::query("UPDATE queue SET state = 'resolved', resolution_json = ? WHERE id = ?")
+        .bind(&resolution)
+        .bind(item_id)
+        .execute(&mut *tx)
+        .await?;
+    tx.commit().await?;
+    Ok(())
+}
+
+/// Before an organiser decides a set: its games in review become `void` and its open queue
+/// items are resolved with `resolution`.
+async fn close_set_items(
+    conn: &mut SqliteConnection,
+    event_id: i64,
+    set_id: SetId,
+    resolution: &str,
+) -> Result<(), LifecycleError> {
+    sqlx::query(
+        "UPDATE games SET state = 'void' WHERE event_id = ? AND set_id = ? AND state = 'review'",
+    )
+    .bind(event_id)
+    .bind(set_id)
+    .execute(&mut *conn)
+    .await?;
+    sqlx::query(
+        "UPDATE queue SET state = 'resolved', resolution_json = ?
+         WHERE event_id = ? AND set_id = ? AND state = 'open'",
+    )
+    .bind(resolution)
+    .bind(event_id)
+    .bind(set_id)
+    .execute(&mut *conn)
+    .await?;
+    Ok(())
+}
+
+/// Awards every Ready set that holds a disqualified entrant, one at a time (each award can
+/// make more sets Ready), until none is left.
+async fn award_dq_ready(
+    conn: &mut SqliteConnection,
+    event_id: i64,
+    resolution: &str,
+) -> Result<(), LifecycleError> {
+    loop {
+        let bracket = read_bracket(conn, event_id).await?;
+        let mut found = None;
+        for id in bracket.ready_sets() {
+            if let Some(award) = dq_award(conn, event_id, bracket.sets[id as usize].slots).await? {
+                found = Some((id, award));
+                break;
+            }
+        }
+        let Some((id, award)) = found else {
+            return Ok(());
+        };
+        close_set_items(conn, event_id, id, resolution).await?;
+        award_on(conn, event_id, bracket, id, award.slot).await?;
+        if award.double {
+            open_queue_item(conn, event_id, id, None, DOUBLE_DQ).await?;
+        }
+    }
 }
 
 #[cfg(test)]

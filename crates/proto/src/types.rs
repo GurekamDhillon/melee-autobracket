@@ -147,3 +147,23 @@ pub struct VerifyResult {
     pub outcome: ResimOutcome,
     pub build: String,
 }
+
+/// A game kept for later study, with the evidence it was judged on.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct QuarantineItem {
+    pub id: i64,
+    pub game_id: i64,
+    pub kind: String,
+    pub verdict: Option<Verdict>,
+    pub resim: Option<ResimOutcome>,
+    pub verifier_build: Option<String>,
+    /// The `x-ab-build` of each upload, in slot order.
+    pub client_builds: Vec<String>,
+    pub created_at: i64,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct RekeyReq {
+    /// The player's new verifying key, 64 lowercase hex characters.
+    pub new_key: String,
+}

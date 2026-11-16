@@ -10,6 +10,8 @@ use autobracket_server::{build_app, Config, NoResim};
 use clap::{Parser, Subcommand};
 use proto::SigningKey;
 
+mod admin_cli;
+
 #[derive(Parser)]
 #[command(
     name = "autobracket",
@@ -33,6 +35,8 @@ enum Cmd {
         #[arg(long, value_name = "FILE")]
         out: PathBuf,
     },
+    /// Organiser commands against a running server.
+    Admin(admin_cli::AdminArgs),
 }
 
 #[tokio::main]
@@ -40,6 +44,7 @@ async fn main() -> anyhow::Result<()> {
     match Cli::parse().cmd {
         Cmd::Serve { config } => serve(Config::load(&config)?).await,
         Cmd::Keygen { out } => keygen(&out),
+        Cmd::Admin(args) => admin_cli::run(args).await,
     }
 }
 

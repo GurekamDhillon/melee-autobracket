@@ -63,20 +63,29 @@ pub async fn judge_due(st: &AppState) -> anyhow::Result<usize> {
     let mut judged = 0;
     let mut first_err = None;
     for game_id in due {
-        let Some(claim) = claim(st, game_id).await? else {
-            continue;
+        let claim = match claim(st, game_id).await {
+            Ok(Some(claim)) => claim,
+            Ok(None) => continue,
+            Err(e) => {
+                // Nothing was committed, so the game is still `uploading`; carry on.
+                first_err.get_or_insert(e.context(format!("claiming game {game_id}")));
+                continue;
+            }
         };
         match judge_claimed(st, game_id, claim).await {
             Ok(()) => judged += 1,
             Err(e) => {
                 // Hand the game back so a later pass (or a restart) retries it, and carry on
                 // with the others.
-                let _ = sqlx::query(
+                let handed_back = sqlx::query(
                     "UPDATE games SET state = 'uploading' WHERE id = ? AND state = 'judging'",
                 )
                 .bind(game_id)
                 .execute(&st.db)
                 .await;
+                if let Err(he) = handed_back {
+                    eprintln!("worker: game {game_id}: returning it to uploading failed: {he}");
+                }
                 first_err.get_or_insert(e.context(format!("judging game {game_id}")));
             }
         }
@@ -118,8 +127,8 @@ async fn claim(st: &AppState, game_id: i64) -> anyhow::Result<Option<Claim>> {
             .bind(game_id)
             .fetch_all(&mut *tx)
             .await?;
-    tx.commit().await?;
-
+    // Validated before committing: on failure the claim rolls back and the game stays
+    // `uploading`.
     let mut paths = [None, None];
     for (slot, path) in uploads {
         let slot = usize::try_from(slot)
@@ -128,6 +137,7 @@ async fn claim(st: &AppState, game_id: i64) -> anyhow::Result<Option<Claim>> {
             .with_context(|| format!("upload slot {slot}"))?;
         paths[slot] = Some(PathBuf::from(path));
     }
+    tx.commit().await?;
     Ok(Some(Claim { ruleset, paths }))
 }
 

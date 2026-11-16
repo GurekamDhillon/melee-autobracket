@@ -273,3 +273,10 @@ impl TestPlayer {
         req.body(body).send().await.expect("send request")
     }
 }
+
+impl TestApp {
+    /// A client signing with `sk` (registered or not).
+    pub fn client(&self, sk: SigningKey, tag: &str) -> TestPlayer {
+        TestPlayer::new(sk, tag, &self.url)
+    }
+}
