@@ -133,6 +133,37 @@ impl Bracket {
             })
     }
 
+    /// Final placings, once the bracket is complete: index = entrant id, value = 1-based place.
+    ///
+    /// The champion is 1st. Every other entrant is ranked by the highest `(side, round)` set
+    /// they lost, with Winners < Losers < GrandFinal; their place is 1 + the number of entrants
+    /// ranked strictly higher (the champion counts as highest). Equal ranks share a place, so
+    /// single elimination gives 1, 2, 3, 3, 5, 5, 5, 5 and double elimination 1, 2, 3, 4, 5, 5,
+    /// 7, 7. Sets decided by a bye are not losses.
+    pub fn placings(&self) -> Option<Vec<u32>> {
+        let champion = self.champion()?;
+        let mut ranks = vec![(0u8, 0u8); self.entrants as usize];
+        for set in &self.sets {
+            let SetState::Done { winner } = set.state else {
+                continue;
+            };
+            let (Slot::Entrant(_), Slot::Entrant(loser)) =
+                (set.slots[winner as usize], set.slots[1 - winner as usize])
+            else {
+                continue;
+            };
+            let rank = &mut ranks[loser as usize];
+            *rank = (*rank).max((set.side as u8, set.round));
+        }
+        ranks[champion as usize] = (u8::MAX, u8::MAX);
+        Some(
+            ranks
+                .iter()
+                .map(|rank| 1 + ranks.iter().filter(|other| *other > rank).count() as u32)
+                .collect(),
+        )
+    }
+
     /// True if `set` was actually played: Done with an entrant in both slots.
     pub fn was_played(&self, set: SetId) -> bool {
         self.sets.get(set as usize).is_some_and(|s| {
