@@ -14,7 +14,8 @@ use sha2::{Digest, Sha256};
 use super::ApiError;
 use crate::state::AppState;
 
-/// The document every page is poured into: `{{title}}`, `{{style}}`, `{{body}}`, `{{script}}`.
+/// The document every page is poured into: `{{page}}`, `{{title}}`, `{{style}}`, `{{body}}`,
+/// `{{script}}`.
 const SHELL: &str = include_str!("../../assets/shell.html");
 /// Every page's styles.
 const SITE_CSS: &str = include_str!("../../assets/site.css");
@@ -110,19 +111,21 @@ impl Page {
 static PAGES: LazyLock<HashMap<&'static str, Page>> = LazyLock::new(|| {
     SOURCES
         .iter()
-        .map(|(name, title, body, script)| (*name, assemble(title, body, script)))
+        .map(|(name, title, body, script)| (*name, assemble(name, title, body, script)))
         .collect()
 });
 
 /// Every page's image sources, as its policy states them.
 const IMG_SRC: &str = "img-src data:";
 
-/// Fills the shell for one page. The CSP allows nothing but the page's own inline script and
+/// Fills the shell for page `name` (its `data-page`, for page-specific layout). The CSP allows
+/// nothing but the page's own inline script and
 /// style (by hash), requests to this server, fonts from this server, the empty `data:` icon,
 /// and no framing.
-fn assemble(title: &str, body: &str, script: &str) -> Page {
+fn assemble(name: &str, title: &str, body: &str, script: &str) -> Page {
     let script = format!("{SITE_JS}\n{script}");
     let html = SHELL
+        .replace("{{page}}", name)
         .replace("{{title}}", title)
         .replace("{{style}}", SITE_CSS)
         .replace("{{body}}", body)

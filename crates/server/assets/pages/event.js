@@ -10,14 +10,20 @@
   let drawnKey = "";
   let enteredFor = "";
   let polling = null;
+  let scrolledToHash = false;
 
-  // The picker, the layout toggle and "Jump to live" sit beside the title.
-  $("head-side").append($("pick-label"), $("lay-h").parentNode, $("jump-live"));
+  // The picker, the layout toggle, "Jump to live" and when the page last heard from the server
+  // sit together as one toolbar, one row under the facts: every control the same height, the
+  // "Updated" stamp a small pill at the end of the same row.
+  const toolbar = el("div", "toolbar");
+  toolbar.append($("pick-label"), $("lay-h").parentNode, $("jump-live"), $("fresh"));
+  $("head-side").append(toolbar);
 
   // ---- layout: rounds side by side, or stacked for portrait screens -------------
 
   const LAYOUT_KEY = "bracket-layout";
   const PORTRAIT = matchMedia("(orientation: portrait)");
+  const CALM = matchMedia("(prefers-reduced-motion: reduce)");
   const board = $("board");
 
   // Storage is touched only here and in storeLayout, each guarded: a browser that refuses it
@@ -185,7 +191,12 @@
       return seat;
     }
     const live = set.state === "Ready";
-    const card = el("li", live ? "set live" : "set " + tiltClass(j, set.id));
+    // Both players known, nothing played or decided yet: the set is still to come.
+    const upcoming = !live && decided === undefined && doneWinner(set.state) === null &&
+      set.slots.every((s) => slotEntrant(s) !== null);
+    const card = el("li", live ? "set live" : "set " + tiltClass(j, set.id) + (upcoming ? " upcoming" : ""));
+    // Other pages link straight to a set: /events/N#set-M.
+    card.id = "set-" + set.id;
     const face = el("div");
     face.setAttribute("aria-hidden", "true");
     if (live) face.append(el("span", "flag", "Live"));
@@ -209,7 +220,14 @@
 
   function championBurst(tag) {
     const box = el("p", "champ");
-    box.append(icon("burst"));
+    // A dashed orbit, the burst, and four sparks around it: all drawn by the shell's symbols or CSS.
+    box.append(el("span", "champ-orbit"), icon("burst"));
+    for (const k of ["s1", "s2", "s3", "s4"]) {
+      const spark = el("span", "champ-spark " + k);
+      spark.append(icon("star"));
+      spark.setAttribute("aria-hidden", "true");
+      box.append(spark);
+    }
     const text = el("span", "champ-text");
     text.append(el("span", "champ-label", "Champion"));
     text.append(el("span", "sr", ": "));
@@ -226,6 +244,23 @@
     ["final", "GrandFinal", "Final"],
   ];
 
+  // A round's heading: a chip with its place on the side (the round's number), its name, the
+  // matches it holds and its state. The chip's colour carries the state; the words say it too.
+  const ROUND_STATE = { done: "Done", now: "Live", todo: "Upcoming" };
+
+  function roundHead(round, n) {
+    const head = el("header", "round-head st-" + round.status);
+    const chip = el("div", "round-chip");
+    const no = el("span", "round-no", String(n + 1));
+    no.setAttribute("aria-hidden", "true");
+    const shown = round.sets.filter((s) => !isHidden(s)).length;
+    const meta = el("p", "round-meta");
+    meta.append(el("span", null, shown + (shown === 1 ? " match" : " matches")), " \u00b7 ", el("span", "round-state", ROUND_STATE[round.status] || ""));
+    chip.append(no, el("h2", null, round.name), meta);
+    head.append(chip);
+    return head;
+  }
+
   function renderBracket(view, tagOf) {
     const b = view.bracket;
     const scores = new Map((view.scores || []).map(([id, wins]) => [id, wins]));
@@ -241,7 +276,9 @@
       const first = side === "GrandFinal" ? widest : 0;
       rounds.forEach((round, n) => {
         const col = el("section", "round c" + Math.min(first + n, 12));
-        col.append(el("h2", null, round.name));
+        // The run strip's disc for this round jumps here.
+        col.dataset.round = cls + "-" + n;
+        col.append(roundHead(round, n));
         const list = el("ol", "sets");
         let j = 0;
         for (const s of round.sets) {
@@ -266,38 +303,95 @@
     return grid;
   }
 
-  // The run strip: one mark per round, grouped by side; the grand final is a star.
+  // The run strip: one disc per round, grouped by side; the grand final is a star. Each disc
+  // jumps to its round below. A round is done, now (a set is in play), next (the first still to
+  // come on its side) or later; the legend under the count says so. On a phone the strip sticks
+  // to the top of the screen while the bracket scrolls under it.
+  const STATE_HOP = { done: "done", now: "in play", next: "up next", todo: "to come" };
+  // Whether the Key tooltip is open; kept across redraws so a poll does not close it.
+  let keyOpen = false;
+
   function renderStrip(view) {
     const b = view.bracket;
     const strip = el("div", "strip");
+    const row = el("div", "strip-row");
     const said = [];
-    for (const [, side, label] of SIDES) {
+    let total = 0;
+    let doneTotal = 0;
+    for (const [cls, side, label] of SIDES) {
       const rounds = sideRounds(b, side);
       if (!rounds.length) continue;
       const name = b.format === "SingleElim" ? "Rounds" : label;
       const grp = el("div", "grp");
-      grp.append(el("span", "grp-name", name));
+      const grpName = el("span", "grp-name", name);
+      grpName.setAttribute("aria-hidden", "true");
+      grp.append(grpName);
       const marks = el("span", "marks");
-      for (const r of rounds) {
-        const mark = el("span", "mark " + (r.star ? "star " : "disc ") + r.status);
-        if (r.star) mark.append(icon("star"));
-        marks.append(mark);
-      }
+      let nextTaken = false;
+      rounds.forEach((r, n) => {
+        let state = r.status;
+        if (state === "todo" && !nextTaken) {
+          state = "next";
+          nextTaken = true;
+        }
+        const hop = el("button", "hop " + (r.star ? "star " : "disc ") + state);
+        hop.type = "button";
+        hop.dataset.round = cls + "-" + n;
+        hop.setAttribute("aria-label", r.name + ", " + STATE_HOP[state]);
+        // Each disc scrolls to its round column; the title says which one on hover.
+        hop.title = r.name;
+        if (r.star) hop.append(icon("star"));
+        else hop.append(String(n + 1));
+        marks.append(hop);
+      });
       grp.append(marks);
-      strip.append(grp);
+      row.append(grp);
       const done = rounds.filter((r) => r.status === "done").length;
+      total += rounds.length;
+      doneTotal += done;
       let words = name + ": " + done + " of " + rounds.length + (rounds.length === 1 ? " round" : " rounds") + " done";
       const now = rounds.filter((r) => r.status === "now").map((r) => r.name);
       if (now.length) words += ", " + now.join(" and ") + " in play";
       said.push(words);
     }
-    for (const child of strip.children) child.setAttribute("aria-hidden", "true");
+    // One slim line: the count, a bar, the stamp when complete, and a Key button whose tooltip
+    // holds the legend. The count and bar are decoration; the Progress words above speak for them.
+    const note = el("div", "strip-note");
+    const count = el("span", "strip-count", doneTotal + " of " + total + (total === 1 ? " round" : " rounds") + " done");
+    count.setAttribute("aria-hidden", "true");
+    const bar = el("progress", "strip-bar");
+    bar.max = Math.max(total, 1);
+    bar.value = doneTotal;
+    bar.setAttribute("aria-hidden", "true");
+    note.append(count, bar);
     const complete = view.summary.state === "complete";
     if (complete) {
       const stamp = el("span", "stamp big", "Complete");
       stamp.setAttribute("aria-hidden", "true");
-      strip.append(stamp);
+      note.append(stamp);
     }
+    // The legend sits under the discs, always visible at a desktop width. The Key button only
+    // shows on a phone, where it opens the same legend under the discs.
+    const keyBtn = el("button", "key-toggle", "Key");
+    keyBtn.type = "button";
+    keyBtn.setAttribute("aria-controls", "strip-key");
+    keyBtn.setAttribute("aria-expanded", String(keyOpen));
+    const legend = el("span", "key-tip");
+    legend.id = "strip-key";
+    legend.classList.toggle("open", keyOpen);
+    for (const [key, word] of [["done", "Done"], ["now", "Live"], ["upcoming", "Upcoming"]]) legend.append(el("span", "key " + key, word));
+    keyBtn.addEventListener("click", () => {
+      keyOpen = !keyOpen;
+      legend.classList.toggle("open", keyOpen);
+      keyBtn.setAttribute("aria-expanded", String(keyOpen));
+    });
+    note.append(keyBtn);
+    row.addEventListener("click", (e) => {
+      const hop = e.target.closest(".hop");
+      const target = hop && board.querySelector('[data-round="' + hop.dataset.round + '"]');
+      if (target) target.scrollIntoView({ block: "start", behavior: CALM.matches ? "auto" : "smooth" });
+    });
+    strip.append(note, row, legend);
     strip.prepend(el("span", "sr", "Progress. " + said.join(". ") + (complete ? ". The event is complete." : ".")));
     return strip;
   }
@@ -335,6 +429,75 @@
     return parts;
   }
 
+  // ---- the hero: where the event stands, its date, its facts as labels, and the champion ----
+
+  // Built once and filled on each drawing; the shell's title sits between them.
+  const heroKicker = el("div", "ev-kicker");
+  const heroState = el("span", "status");
+  const heroDate = el("span", "ev-date");
+  heroKicker.append(heroState, heroDate);
+  const heroFacts = el("div", "chips ev-facts");
+  heroFacts.setAttribute("aria-hidden", "true");
+  const heroChamp = el("p", "hero-champ");
+  heroChamp.hidden = true;
+  const heroDesc = el("p", "ev-desc");
+  heroDesc.hidden = true;
+  const topText = $("title").parentNode;
+  topText.insertBefore(heroKicker, $("title"));
+  $("title").after(heroFacts, heroChamp, heroDesc);
+
+  const STATES = ["signup", "running", "complete"];
+
+  // The champion's sets won and lost across the bracket, counted from the sets that were played.
+  function champRecord(bracket, who) {
+    let won = 0;
+    let lost = 0;
+    for (const s of bracket.sets) {
+      const w = doneWinner(s.state);
+      if (w === null) continue;
+      const idx = s.slots.findIndex((slot) => slotEntrant(slot) === who);
+      if (idx < 0) continue;
+      if (idx === w) won++;
+      else lost++;
+    }
+    return [won, lost];
+  }
+
+  function renderHero(sum, stateLabel, facts, when, champ, tagOf, view) {
+    heroState.className = STATES.includes(sum.state) ? "status " + sum.state : "status";
+    heroState.textContent = stateLabel;
+    heroDate.textContent = when;
+    heroDate.hidden = when === "";
+    heroFacts.replaceChildren(...facts.map((f, i) => el("span", i === 0 && f.hot ? "chip hot" : "chip", f.text)));
+    heroDesc.textContent = sum.description || "";
+    heroDesc.hidden = !sum.description;
+    if (champ === null) {
+      heroChamp.hidden = true;
+      heroChamp.replaceChildren();
+      return;
+    }
+    const name = tagLink(tagOf(champ));
+    name.className = "tag hc-name";
+    // The profile link carries a chevron, so it reads as a way somewhere.
+    const nameRow = el("span", "hc-name-row");
+    const [won, lost] = champRecord(view.bracket, champ);
+    const record = el("span", "hc-record", won + "-" + lost + (won + lost === 1 ? " set" : " sets"));
+    const badge = el("span", "hc-badge");
+    const burst = icon("burst");
+    burst.classList.add("hc-burst");
+    const star = icon("star");
+    star.classList.add("hc-star");
+    badge.append(burst, star);
+    badge.setAttribute("aria-hidden", "true");
+    const text = el("span", "hc-text");
+    const chev = icon("chev");
+    chev.classList.add("hc-chev");
+    nameRow.append(name, chev);
+    text.append(el("span", "hc-label", "Champion"), nameRow, record);
+    heroChamp.replaceChildren(badge, text);
+    heroChamp.hidden = false;
+  }
+
   function renderView(view) {
     const sum = view.summary;
     const tags = view.tags || [];
@@ -343,11 +506,14 @@
     document.title = sum.name + " · Bracket";
 
     const format = view.bracket ? view.bracket.format : null;
-    const bits = [STATE_LABEL[sum.state] || sum.state];
-    if (FORMAT_LABEL[format]) bits.push(FORMAT_LABEL[format]);
-    bits.push(sum.entrants + (sum.entrants === 1 ? " entrant" : " entrants"));
-    bits.push(...rulesBits(view.ruleset, format));
-    if (AB.knownTime(sum.starts_at)) bits.push(AB.fmtWhen(sum.starts_at).abs);
+    const stateLabel = STATE_LABEL[sum.state] || sum.state;
+    const facts = [];
+    if (FORMAT_LABEL[format]) facts.push({ text: FORMAT_LABEL[format], hot: true });
+    facts.push({ text: sum.entrants + (sum.entrants === 1 ? " entrant" : " entrants") });
+    for (const bit of rulesBits(view.ruleset, format)) facts.push({ text: bit });
+    const when = AB.knownTime(sum.starts_at) ? AB.fmtWhen(sum.starts_at).abs : "";
+    const bits = [stateLabel, ...facts.map((f) => f.text)];
+    if (when) bits.push(when);
     let text = bits.join(", ");
     if (sum.description) text += ". " + sum.description;
     const meta = $("meta");
@@ -358,6 +524,7 @@
       meta.append((/[.!?]$/.test(text) ? " " : ". ") + "Champion: ");
       meta.append(el("span", "champion", tagOf(champ)));
     }
+    renderHero(sum, stateLabel, facts, when, champ, tagOf, view);
 
     const unverified = view.unverified_games || 0;
     setNotice("unverified", unverified > 0
@@ -385,6 +552,12 @@
       $("jump-live").hidden = true;
     }
     labelBoard();
+    // Arrived from a scoreboard elsewhere: bring that set into view, once.
+    if (!scrolledToHash) {
+      scrolledToHash = true;
+      const target = /^#set-\d+$/.test(location.hash) ? document.getElementById(location.hash.slice(1)) : null;
+      if (target) target.scrollIntoView({ block: "center", inline: "center" });
+    }
   }
 
   // ---- polling -----------------------------------------------------------
@@ -396,7 +569,12 @@
       renderPicker(events);
       renderView(view);
       setNotice("status", "");
-      $("updated").textContent = new Date().toLocaleTimeString();
+      $("updated").textContent = new Date().toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit", second: "2-digit" });
+      // The dot blinks once per refresh (only where motion is allowed; see site.css).
+      const dot = document.querySelector(".fresh-dot");
+      dot.classList.remove("blink");
+      void dot.offsetWidth;
+      dot.classList.add("blink");
     } catch (err) {
       if (err && err.status === 404) {
         // The event was deleted under us: say so once and stop asking.
