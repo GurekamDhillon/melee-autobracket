@@ -224,7 +224,7 @@ described above; the tables list the other statuses.
 
 | Method | Path | Who | Request body | Success | Other statuses |
 |---|---|---|---|---|---|
-| GET | `/` | public | — | 200 HTML landing page | — |
+| GET | `/` | public | — | 200 HTML landing page (live now, next up, latest results) | — |
 | GET | `/events/{id}` | public | — | 200 HTML bracket page | 400, 404 |
 | GET | `/assets/fonts/{file}` | public | — | 200 `font/woff2`, one of the page's fonts | 404 |
 | GET | `/v1/events` | public | — | 200 `[EventSummary]` | — |
