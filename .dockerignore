@@ -1,0 +1,15 @@
+target/
+dist/
+.git
+.github/
+.superpowers/
+.playwright-mcp/
+docs/superpowers/
+**/*.sqlite*
+**/replays/
+**/*.key
+**/*.iso
+**/*.slp
+**/*.slpz
+**/*.mrpl
+/autobracket.toml

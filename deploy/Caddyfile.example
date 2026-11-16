@@ -1,0 +1,22 @@
+# Caddy as the TLS reverse proxy in front of autobracket. Caddy gets and renews the
+# certificate itself: point the name's DNS at this machine, open ports 80 and 443, and replace
+# bracket.example.org with your own name. Players and the admin CLI then use
+# https://bracket.example.org.
+#
+# autobracket rate-limits per client address, and behind a proxy every request comes from the
+# proxy. Caddy sends the client's address in X-Forwarded-For; list the address Caddy connects
+# from in the server's trusted_proxies so it is believed (README, "TLS and reverse proxies"):
+#   Caddy on the same host, proxying to 127.0.0.1:8080 (systemd, or the compose file's
+#   loopback port):   trusted_proxies = ["127.0.0.1/32"]   (`init --proxy-cidr 127.0.0.1/32`)
+#   ...except that with the server in Docker the request then reaches it from the Docker
+#   network's gateway:  trusted_proxies = ["172.16.0.0/12"], or better that network's subnet.
+# Never trust a range that clients can connect from directly.
+
+bracket.example.org {
+	# Replay uploads are up to 16 MiB (the server's max_replay_bytes); allow a little more.
+	request_body {
+		max_size 17MB
+	}
+	# Plain HTTP to the server; no WebSockets. Caddy sets X-Forwarded-For, -Proto and -Host.
+	reverse_proxy 127.0.0.1:8080
+}

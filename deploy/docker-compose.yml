@@ -1,0 +1,67 @@
+# autobracket with Docker Compose. Run these from a checkout of the repository (the image is
+# built from its Dockerfile; no prebuilt image is published).
+#
+# (a) First-time setup: build the image, then write a key and a config into the volume.
+#     Inside a container the server must listen on 0.0.0.0, so pass --bind 0.0.0.0:8080. It is
+#     published below on the host's loopback only; never publish it on a public address.
+#     --proxy-cidr is your reverse proxy's address as the container sees it (README, "TLS and
+#     reverse proxies"): a proxy on the host connecting to 127.0.0.1:8080 arrives from this
+#     project's Docker network gateway, inside 172.16.0.0/12 on a default Docker install
+#     (`docker network inspect autobracket_default` shows the exact subnet; prefer it).
+#
+#       docker compose -f deploy/docker-compose.yml build
+#       docker compose -f deploy/docker-compose.yml run --rm autobracket \
+#         init --dir /data --bind 0.0.0.0:8080 --proxy-cidr 172.16.0.0/12
+#       docker compose -f deploy/docker-compose.yml up -d
+#
+#     `init` prints the next steps; run its `autobracket ...` commands as in (b). The organiser
+#     key is /data/organiser.key in the volume: back it up (README, "Backups").
+#
+# (b) Admin commands run inside the running container, against the server's own port:
+#
+#       docker compose -f deploy/docker-compose.yml exec autobracket \
+#         autobracket admin --server http://127.0.0.1:8080 --key-file /data/organiser.key \
+#         event create --name Nightly --format double --best-of 3
+#
+#     The image has no editor. To change the config (it holds no secret), copy it out, edit
+#     it, copy it back (as the server's own user) and restart:
+#
+#       docker compose -f deploy/docker-compose.yml exec -T autobracket \
+#         cat /data/autobracket.toml > autobracket.toml
+#       $EDITOR autobracket.toml
+#       docker compose -f deploy/docker-compose.yml exec -T autobracket \
+#         sh -c 'cat > /data/autobracket.toml' < autobracket.toml
+#       docker compose -f deploy/docker-compose.yml restart
+#
+# (c) Re-simulation (verifier mode "in_process"): the image has no engine and no disc image.
+#     Uncomment the two read-only mounts below, pointing at your own files (both must be
+#     readable by uid 10001), and set in /data/autobracket.toml:
+#
+#       [verifier]
+#       mode = "in_process"
+#       engine = "/opt/melee/melee"
+#       iso = "/opt/melee/melee.iso"
+#
+#     then `docker compose -f deploy/docker-compose.yml restart`.
+
+name: autobracket
+
+services:
+  autobracket:
+    build:
+      context: ..
+    image: autobracket:local
+    restart: unless-stopped
+    ports:
+      # Host loopback only: put your TLS reverse proxy in front (deploy/Caddyfile.example,
+      # deploy/nginx.conf.example). AUTOBRACKET_PORT changes the host port.
+      - "127.0.0.1:${AUTOBRACKET_PORT:-8080}:8080"
+    volumes:
+      - data:/data
+      # - /opt/melee/melee:/opt/melee/melee:ro
+      # - /opt/melee/melee.iso:/opt/melee/melee.iso:ro
+    environment:
+      AUTOBRACKET_LOG: info
+
+volumes:
+  data:
