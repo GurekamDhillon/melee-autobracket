@@ -2,7 +2,6 @@
 //! directory, and signing HTTP clients for organisers and players.
 
 use std::collections::VecDeque;
-use std::net::SocketAddr;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 
@@ -54,14 +53,8 @@ impl TestApp {
             .await
             .expect("bind");
         let addr = listener.local_addr().expect("local addr");
-        let server = tokio::spawn(async move {
-            axum::serve(
-                listener,
-                app.into_make_service_with_connect_info::<SocketAddr>(),
-            )
-            .await
-            .expect("serve");
-        });
+        let max_connections = state.cfg.max_connections;
+        let server = tokio::spawn(crate::serve(listener, app, max_connections));
         state.tasks.add(server.abort_handle());
         TestApp {
             url: format!("http://{addr}"),

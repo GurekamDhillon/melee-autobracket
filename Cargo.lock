@@ -134,6 +134,8 @@ dependencies = [
  "clap",
  "hex",
  "http-body-util",
+ "hyper",
+ "hyper-util",
  "proto",
  "rand 0.8.8",
  "replay",

@@ -23,6 +23,8 @@ tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "sync",
 sqlx = { version = "0.9", default-features = false, features = ["runtime-tokio", "sqlite-bundled", "migrate", "macros"] }
 tower_governor = { version = "0.8", default-features = false, features = ["axum"] }
 tower = { version = "0.5", features = ["util"] }
+hyper = { version = "1", features = ["http1", "server"] }
+hyper-util = { version = "0.1", features = ["tokio", "server", "http1", "service"] }
 http-body-util = "0.1"
 bytes = "1"
 clap = { version = "4", features = ["derive"] }

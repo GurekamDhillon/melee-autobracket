@@ -18,7 +18,7 @@ use sha2::{Digest, Sha256};
 use sqlx::SqliteConnection;
 
 use super::{check_text, parse_body, ApiError, MAX_BUILD_CHARS};
-use crate::auth::Player;
+use crate::auth::{Player, PlayerUpload};
 use crate::db::{begin_write, now_unix};
 use crate::lifecycle::{load_bracket_on, LifecycleError};
 use crate::logging::{label, sha_prefix, Journal};
@@ -234,7 +234,7 @@ pub async fn upload(
     State(state): State<AppState>,
     path: Result<Path<(i64, i64, i64)>, PathRejection>,
     headers: HeaderMap,
-    player: Player,
+    PlayerUpload(player): PlayerUpload,
 ) -> Result<StatusCode, ApiError> {
     let Path((event, set, n)) = path.map_err(bad_request)?;
     let client_build = match headers.get("x-ab-build") {

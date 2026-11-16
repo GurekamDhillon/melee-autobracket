@@ -55,4 +55,8 @@ fn example_config_parses() {
     assert_eq!(cfg.set_stall_secs, defaults.set_stall_secs);
     assert_eq!(cfg.verifier.mode, VerifierMode::Off);
     assert_eq!(cfg.ruleset, defaults.ruleset);
+    assert_eq!(cfg.max_connections, defaults.max_connections);
+    assert_eq!(cfg.trusted_proxies, defaults.trusted_proxies);
+    assert_eq!(cfg.no_show_grace_secs, defaults.no_show_grace_secs);
+    assert_eq!(cfg.allow_direct_connect, defaults.allow_direct_connect);
 }

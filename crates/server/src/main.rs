@@ -1,6 +1,5 @@
 use std::fs::OpenOptions;
 use std::io::Write;
-use std::net::SocketAddr;
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -148,11 +147,7 @@ async fn serve(cfg: Config) -> anyhow::Result<()> {
     );
     // Kept on stdout as the readiness line scripts wait for.
     println!("listening on {addr}");
-    axum::serve(
-        listener,
-        app.into_make_service_with_connect_info::<SocketAddr>(),
-    )
-    .await?;
+    autobracket_server::serve(listener, app, state.cfg.max_connections).await;
     Ok(())
 }
 
