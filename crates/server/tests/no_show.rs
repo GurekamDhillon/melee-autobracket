@@ -18,6 +18,7 @@ async fn no_show(p: &TestPlayer, event: i64, set: u32, detail: Option<&str>) -> 
         &format!("/v1/sets/{event}/{set}/no-show"),
         &NoShowReq {
             detail: detail.map(Into::into),
+            ..Default::default()
         },
     )
     .await

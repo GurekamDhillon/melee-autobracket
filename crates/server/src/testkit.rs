@@ -30,8 +30,9 @@ pub struct TestApp {
 }
 
 impl TestApp {
-    /// Spawns with [`NoResim`]. Rate limits are raised out of reach and the background worker
-    /// is off (tests judge with [`crate::worker::judge_due`]) unless `edit` changes them.
+    /// Spawns with [`NoResim`]. Rate limits are raised out of reach, the no-show grace period
+    /// after a room code is off, and the background worker is off (tests judge with
+    /// [`crate::worker::judge_due`]) unless `edit` changes them.
     pub async fn spawn(edit: impl FnOnce(&mut Config)) -> Self {
         Self::spawn_with(edit, Arc::new(NoResim)).await
     }
@@ -46,6 +47,7 @@ impl TestApp {
         cfg.rate_per_sec = 1_000_000;
         cfg.rate_burst = 1_000_000;
         cfg.worker_enabled = false;
+        cfg.no_show_grace_secs = 0;
         edit(&mut cfg);
 
         let (app, state) = build_app(cfg, resim).await.expect("build app");
