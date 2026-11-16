@@ -373,7 +373,7 @@ h2 { margin: 0 0 var(--sp-4); font-size: 1.125rem; line-height: 1.2; white-space
 .board[data-layout="vertical"] .bracket { display: block; width: auto; }
 /* On a wide screen that chose Vertical, the column stays card-shaped: the idle tilt over a
    page-wide card would read as a skew. */
-.board[data-layout="vertical"] .bracket { max-width: 40rem; }
+.board[data-layout="vertical"] .bracket { max-width: 40rem; margin-inline: auto; }
 .board[data-layout="vertical"] .side { display: block; }
 .board[data-layout="vertical"] .round { width: auto; margin-bottom: var(--sp-5); }
 .board[data-layout="vertical"] .sets { gap: var(--sp-3); }

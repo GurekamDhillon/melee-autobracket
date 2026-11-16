@@ -36,11 +36,41 @@
     try { localStorage.setItem(LAYOUT_KEY, value); } catch (e) {}
   }
 
+  // The layout clicked this visit: it wins even where storage refused to remember it, so the
+  // toggle always answers; storage only carries the choice to the next visit.
+  let chosen = null;
+  // Whether a bracket (rather than the sign-up list) is on the board.
+  let hasBracket = false;
+
+  // The board is a keyboard-scrollable region only in the horizontal layout, where it scrolls
+  // sideways; stacked, it is a plain region.
+  function labelBoard() {
+    if (!hasBracket) {
+      board.removeAttribute("tabindex");
+      board.removeAttribute("aria-label");
+      return;
+    }
+    if (board.dataset.layout === "vertical") {
+      board.removeAttribute("tabindex");
+      board.setAttribute("aria-label", "Bracket");
+    } else {
+      board.tabIndex = 0;
+      board.setAttribute("aria-label", "Bracket, scrolls sideways");
+    }
+  }
+
   function applyLayout() {
-    const layout = storedLayout() || (PORTRAIT.matches ? "vertical" : "horizontal");
+    const layout = chosen || storedLayout() || (PORTRAIT.matches ? "vertical" : "horizontal");
     board.dataset.layout = layout;
     $("lay-h").setAttribute("aria-pressed", String(layout === "horizontal"));
     $("lay-v").setAttribute("aria-pressed", String(layout === "vertical"));
+    labelBoard();
+  }
+
+  function chooseLayout(value) {
+    chosen = value;
+    storeLayout(value);
+    applyLayout();
   }
 
   function jumpToLive() {
@@ -48,8 +78,8 @@
   }
 
   PORTRAIT.addEventListener("change", applyLayout);
-  $("lay-h").addEventListener("click", () => { storeLayout("horizontal"); applyLayout(); });
-  $("lay-v").addEventListener("click", () => { storeLayout("vertical"); applyLayout(); });
+  $("lay-h").addEventListener("click", () => chooseLayout("horizontal"));
+  $("lay-v").addEventListener("click", () => chooseLayout("vertical"));
   $("jump-live").addEventListener("click", jumpToLive);
   applyLayout();
 
@@ -331,16 +361,15 @@
     if (view.bracket) {
       $("strip").replaceChildren(renderStrip(view));
       $("board").replaceChildren(renderBracket(view, tagOf));
-      $("board").tabIndex = 0;
-      $("board").setAttribute("aria-label", "Bracket, scrolls sideways");
+      hasBracket = true;
       $("jump-live").hidden = !document.querySelector(".set.live");
     } else {
       $("strip").replaceChildren();
       $("board").replaceChildren(renderSignup(tags));
-      $("board").removeAttribute("tabindex");
-      $("board").removeAttribute("aria-label");
+      hasBracket = false;
       $("jump-live").hidden = true;
     }
+    labelBoard();
   }
 
   // ---- polling -----------------------------------------------------------

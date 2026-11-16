@@ -75,6 +75,8 @@ async fn bracket_page_has_a_vertical_layout() {
         r#"try { return localStorage.getItem(LAYOUT_KEY); } catch"#,
         r#"try { localStorage.setItem(LAYOUT_KEY, value); } catch"#,
         r#"behavior: "auto""#,
+        // A click wins for the visit even where storage refused to remember it.
+        "chosen || storedLayout() ||",
     ] {
         assert!(page.contains(s), "{s} in the bracket page");
     }
