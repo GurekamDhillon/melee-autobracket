@@ -18,6 +18,12 @@
 #     usage         prints an unknown-argument error, exits 2 (a usage error).
 #     fail          exits 1 without a replay.
 #     cwd           writes `stray.txt` to its current directory, then one replay.
+#     game2         prints the MATCH CODE line, sleeps 2 s, writes one replay.
+#     np-timeout    prints the MATCH CODE line and the installed engine's host line for
+#                   nobody joining within --np-timeout, exits 1 without a replay.
+#     no-room       prints the guest's line for an unknown match code, exits 1.
+#     host-closed   prints the guest's line for a host that closed its room, exits 1.
+#     bad-match     prints the line for an unknown `--match` fighter, exits 1.
 #     (otherwise)   prints the MATCH CODE line, sleeps 1 s, writes one replay.
 # Modes not listed with another exit status exit 0.
 set -eu
@@ -94,6 +100,28 @@ case "${1:-}" in
     cwd)
         printf 'stray' > stray.txt
         printf 'fake replay' > "$replay"
+        ;;
+    game2)
+        echo "$code_line" >&2
+        sleep 2
+        printf 'fake replay' > "$replay"
+        ;;
+    np-timeout)
+        echo "$code_line" >&2
+        echo "play: netplay host: no connection after 60 s (Waiting for the guest...): nobody connected; check that the guest has your address and port, that UDP to it is allowed through the firewall / forwarded by the router, or use a match code (--np-server)" >&2
+        exit 1
+        ;;
+    no-room)
+        echo "play: netplay guest: no room with that code" >&2
+        exit 1
+        ;;
+    host-closed)
+        echo "play: netplay guest: The host closed the room" >&2
+        exit 1
+        ;;
+    bad-match)
+        echo "play: --match: unknown fighter 'bogus'" >&2
+        exit 1
         ;;
     *)
         echo "$code_line" >&2
