@@ -2,7 +2,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use anyhow::{bail, Context};
-use autobracket_client::api::Api;
+use autobracket_client::api::{check_server_url, Api};
 use autobracket_client::config::{self, ClientConfig};
 use autobracket_client::engine::CommandEngine;
 use autobracket_client::play::{describe, play_event};
@@ -101,6 +101,7 @@ async fn main() -> anyhow::Result<()> {
             invite,
         } => {
             let mut cfg = ClientConfig::load(&path)?;
+            check_server_url(&server)?;
             cfg.server = server;
             api(&cfg)?.register(&tag, invite.as_deref()).await?;
             cfg.save(&path)?;

@@ -304,10 +304,24 @@ const PARAMS: GameParams<'static> = GameParams {
 fn command_engine_reads_code_and_collects_replays() {
     let work = TempDir::new().unwrap();
     let mut engine = CommandEngine::new(&fake_config(work.path())).unwrap();
+    let output = capture_output(&mut engine);
 
     engine.host(&PARAMS).unwrap();
     let code = engine.room_code(Duration::from_secs(5)).unwrap();
     assert_eq!(code.as_deref(), Some("K7QX"));
+    let run = work.path().join("run-1");
+    assert_stderr_is_log(&run);
+    let log = std::fs::read_to_string(run.join("engine.log")).unwrap();
+    assert!(log.contains("MATCH CODE K7QX"), "engine.log: {log:?}");
+    assert!(
+        output
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|l| l.contains("MATCH CODE K7QX")),
+        "forwarded: {:?}",
+        output.lock().unwrap()
+    );
     assert!(engine.running());
     assert!(engine.take_replays().unwrap().is_empty(), "while running");
 
@@ -319,6 +333,141 @@ fn command_engine_reads_code_and_collects_replays() {
     );
     assert!(engine.take_replays().unwrap().is_empty(), "second call");
     assert!(replays[0].exists(), "replays are left in place");
+}
+
+/// Collects the lines the engine forwards.
+fn capture_output(engine: &mut CommandEngine) -> Arc<Mutex<Vec<String>>> {
+    let lines = Arc::new(Mutex::new(Vec::new()));
+    let sink = lines.clone();
+    engine.set_output(move |line| sink.lock().unwrap().push(line.to_string()));
+    lines
+}
+
+/// The game's stderr is a file in its run directory, not a pipe into the client.
+fn assert_stderr_is_log(run: &Path) {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let target = loop {
+        let t = std::fs::read_to_string(run.join("stderr-target")).unwrap_or_default();
+        if !t.is_empty() || Instant::now() > deadline {
+            break t;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    };
+    assert_eq!(
+        Path::new(target.trim()),
+        run.join("engine.log"),
+        "the game's stderr"
+    );
+}
+
+/// A config whose host runs use one of `fake_melee.sh`'s modes.
+fn mode_config(work_dir: &Path, mode: &str) -> ClientConfig {
+    let mut cfg = fake_config(work_dir);
+    cfg.host_args = vec![mode.to_string()];
+    cfg
+}
+
+fn wait_for_file(path: &Path, within: Duration) -> bool {
+    let deadline = Instant::now() + within;
+    while !path.exists() {
+        if Instant::now() > deadline {
+            return false;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    true
+}
+
+fn read_trimmed(path: &Path) -> String {
+    std::fs::read_to_string(path).unwrap().trim().to_string()
+}
+
+#[test]
+fn command_engine_sees_a_code_printed_just_before_exit() {
+    let work = TempDir::new().unwrap();
+    let mut engine = CommandEngine::new(&mode_config(work.path(), "quick")).unwrap();
+    let output = capture_output(&mut engine);
+
+    engine.host(&PARAMS).unwrap();
+    wait_for_exit(&mut engine);
+
+    let code = engine.room_code(Duration::from_secs(5)).unwrap();
+    assert_eq!(code.as_deref(), Some("K7QX"));
+    assert!(output
+        .lock()
+        .unwrap()
+        .iter()
+        .any(|l| l.contains("MATCH CODE K7QX")));
+}
+
+#[test]
+fn game_survives_the_engine_being_dropped() {
+    let work = TempDir::new().unwrap();
+    let mut engine = CommandEngine::new(&mode_config(work.path(), "slow")).unwrap();
+    let output = capture_output(&mut engine);
+    let run = work.path().join("run-1");
+
+    engine.host(&PARAMS).unwrap();
+    assert!(wait_for_file(&run.join("pgid"), Duration::from_secs(5)));
+    assert_stderr_is_log(&run);
+    // Its own process group, so Ctrl-C in the client's terminal does not reach it.
+    assert_eq!(
+        read_trimmed(&run.join("pgid")),
+        read_trimmed(&run.join("pid"))
+    );
+    drop(engine);
+
+    assert!(
+        wait_for_file(
+            &run.join("Game_20261115T200000.slp"),
+            Duration::from_secs(10)
+        ),
+        "the game died with the client"
+    );
+    let log = std::fs::read_to_string(run.join("engine.log")).unwrap();
+    assert!(log.contains("fake: second line"), "engine.log: {log:?}");
+    assert!(
+        output
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|l| l == "fake: first line"),
+        "forwarded: {:?}",
+        output.lock().unwrap()
+    );
+}
+
+#[test]
+fn stop_terminates_a_running_game() {
+    let work = TempDir::new().unwrap();
+    let mut engine = CommandEngine::new(&mode_config(work.path(), "slow")).unwrap();
+    let run = work.path().join("run-1");
+
+    engine.host(&PARAMS).unwrap();
+    assert!(wait_for_file(&run.join("pid"), Duration::from_secs(5)));
+    engine.stop();
+    assert!(!engine.running());
+
+    std::thread::sleep(Duration::from_millis(2500));
+    assert!(
+        !run.join("Game_20261115T200000.slp").exists(),
+        "a stopped game writes no replay"
+    );
+}
+
+#[tokio::test]
+async fn malformed_server_url_ends_play() {
+    let api = Api::new("not a url", SigningKey::from_bytes(&[7; 32]), "b1");
+    let mut engine = ScriptedEngine::new("", vec![]);
+
+    let result = tokio::time::timeout(
+        Duration::from_secs(5),
+        play_event(&api, &mut engine, 1, POLL),
+    )
+    .await
+    .expect("a malformed server URL must end play, not be retried");
+
+    assert!(result.is_err());
 }
 
 #[test]
@@ -546,9 +695,13 @@ async fn forbidden_ends_play_with_the_servers_message() {
     let stranger = Api::new(&app.url, SigningKey::from_bytes(&[7; 32]), "b1");
     let mut engine = ScriptedEngine::new("", vec![]);
 
-    let err = play_event(&stranger, &mut engine, event, POLL)
-        .await
-        .expect_err("an unregistered key cannot play");
+    let err = tokio::time::timeout(
+        Duration::from_secs(10),
+        play_event(&stranger, &mut engine, event, POLL),
+    )
+    .await
+    .expect("a 403 must end play, not be retried")
+    .expect_err("an unregistered key cannot play");
 
     let msg = format!("{err:#}");
     assert!(msg.contains("key is not registered"), "{msg}");
@@ -612,4 +765,19 @@ async fn guest_gives_up_after_runs_without_replays() {
 fn config_debug_redacts_the_key() {
     let cfg = fake_config(Path::new("/tmp"));
     assert!(!format!("{cfg:?}").contains(&cfg.secret_key_hex));
+}
+
+#[test]
+fn server_urls_are_checked() {
+    use autobracket_client::api::check_server_url;
+    check_server_url("http://127.0.0.1:8080").unwrap();
+    check_server_url("https://bracket.example").unwrap();
+    for bad in [
+        "not a url",
+        "127.0.0.1:8080",
+        "ftp://bracket.example",
+        "http//x",
+    ] {
+        assert!(check_server_url(bad).is_err(), "{bad}");
+    }
 }

@@ -1,10 +1,14 @@
 //! Running the game. [`Engine`] is what the play loop needs; [`CommandEngine`] runs the
 //! real `melee` binary.
 
-use std::io::{BufRead, BufReader};
+use std::fs::{File, OpenOptions};
+use std::io::{ErrorKind, Read};
+use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
-use std::sync::mpsc::{self, Receiver};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::{self, Receiver, Sender};
+use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{bail, Context};
@@ -41,7 +45,8 @@ pub trait Engine {
 /// Runs `{melee}` with `host_args` or `join_args`. Each argument has `{iso}`, `{relay}`,
 /// `{code}` (empty when hosting), `{mrpl}`, `{stocks}` and `{timer_secs}` replaced; no
 /// shell is involved. Every run gets a fresh `{work_dir}/run-{n}/`, which is the
-/// `MELEE_SLP_DIR` and holds `game.mrpl`; run directories are never deleted.
+/// `MELEE_SLP_DIR` and holds `game.mrpl` and `engine.log` (the game's stdout and stderr,
+/// which the client follows and forwards); run directories are never deleted.
 pub struct CommandEngine {
     melee: PathBuf,
     iso: String,
@@ -49,16 +54,32 @@ pub struct CommandEngine {
     host_args: Vec<String>,
     join_args: Vec<String>,
     code_regex: Regex,
+    output: Output,
     run: Option<Run>,
 }
+
+/// Where the game's output lines are forwarded.
+type Output = Arc<dyn Fn(&str) + Send + Sync>;
+
+/// How often the log is checked for new output.
+const TAIL_INTERVAL: Duration = Duration::from_millis(50);
 
 struct Run {
     dir: PathBuf,
     /// `None` once the process has exited.
     child: Option<Child>,
-    /// Room codes found on the process's stderr.
+    /// Room codes found in the process's output.
     codes: Receiver<String>,
     code: Option<String>,
+    /// Tells the log reader that no more output is coming (or wanted): it reads what is
+    /// left and stops.
+    done: Arc<AtomicBool>,
+}
+
+impl Drop for Run {
+    fn drop(&mut self) {
+        self.done.store(true, Ordering::Release);
+    }
 }
 
 impl CommandEngine {
@@ -72,8 +93,14 @@ impl CommandEngine {
             host_args: cfg.host_args.clone(),
             join_args: cfg.join_args.clone(),
             code_regex,
+            output: Arc::new(|line: &str| eprintln!("{line}")),
             run: None,
         })
+    }
+
+    /// Sends the game's output lines to `sink` instead of the client's stderr.
+    pub fn set_output(&mut self, sink: impl Fn(&str) + Send + Sync + 'static) {
+        self.output = Arc::new(sink);
     }
 
     fn start(&mut self, host: bool, p: &GameParams, code: &str) -> anyhow::Result<()> {
@@ -101,41 +128,42 @@ impl CommandEngine {
             })
             .collect();
 
-        let mut child = Command::new(&self.melee)
+        // The game writes its output to a file in its run directory, not to a pipe into
+        // this process, and runs in its own process group: if the client exits or is
+        // interrupted, the game keeps running and still writes its replay.
+        let log_path = dir.join("engine.log");
+        let log = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&log_path)
+            .with_context(|| format!("creating {}", log_path.display()))?;
+        let log_reader =
+            File::open(&log_path).with_context(|| format!("opening {}", log_path.display()))?;
+        let child = Command::new(&self.melee)
             .args(&args)
             .env("MELEE_SLP_DIR", &dir)
             .stdin(Stdio::null())
-            .stderr(Stdio::piped())
+            .stdout(log.try_clone().context("duplicating the log file handle")?)
+            .stderr(log)
+            .process_group(0)
             .spawn()
             .with_context(|| format!("starting {}", self.melee.display()))?;
-        let stderr = child
-            .stderr
-            .take()
-            .context("the game's stderr was not captured")?;
         let (tx, codes) = mpsc::channel();
-        let regex = self.code_regex.clone();
-        std::thread::spawn(move || {
-            // Forwards the engine's output to ours and picks out room codes.
-            let mut reader = BufReader::new(stderr);
-            let mut buf = Vec::new();
-            while matches!(reader.read_until(b'\n', &mut buf), Ok(n) if n > 0) {
-                let line = String::from_utf8_lossy(&buf);
-                let line = line.trim_end_matches(['\n', '\r']);
-                eprintln!("{line}");
-                if let Some(c) = regex.captures(line) {
-                    let code = c.get(1).or_else(|| c.get(0)).map(|m| m.as_str());
-                    if let Some(code) = code {
-                        let _ = tx.send(code.to_string());
-                    }
-                }
-                buf.clear();
-            }
-        });
+        let done = Arc::new(AtomicBool::new(false));
+        let tail = Tail {
+            file: log_reader,
+            regex: self.code_regex.clone(),
+            output: self.output.clone(),
+            codes: tx,
+            done: done.clone(),
+        };
+        std::thread::spawn(move || tail.run());
         self.run = Some(Run {
             dir,
             child: Some(child),
             codes,
             code: None,
+            done,
         });
         Ok(())
     }
@@ -170,7 +198,7 @@ impl Engine for CommandEngine {
             return Ok(None);
         };
         if run.code.is_none() {
-            // Nothing yet, or stderr closed without a code: `None` either way.
+            // Nothing yet, or the run ended without a code: `None` either way.
             run.code = if wait.is_zero() {
                 run.codes.try_recv().ok()
             } else {
@@ -194,11 +222,13 @@ impl Engine for CommandEngine {
                     eprintln!("the game exited with {status}");
                 }
                 run.child = None;
+                run.done.store(true, Ordering::Release);
                 false
             }
             Err(e) => {
                 eprintln!("checking on the game: {e}");
                 run.child = None;
+                run.done.store(true, Ordering::Release);
                 false
             }
         }
@@ -249,6 +279,62 @@ impl Drop for CommandEngine {
                     "Leaving the game running; its replay will be written to {}",
                     run.dir.display()
                 );
+            }
+        }
+    }
+}
+
+/// Follows a run's `engine.log`: forwards each line and sends each room code found.
+struct Tail {
+    file: File,
+    regex: Regex,
+    output: Output,
+    codes: Sender<String>,
+    done: Arc<AtomicBool>,
+}
+
+impl Tail {
+    fn run(mut self) {
+        let mut pending = Vec::new();
+        let mut buf = [0u8; 8192];
+        loop {
+            // Checked before reading: once set, everything the game wrote is already in
+            // the file, so this last pass reads it all.
+            let finished = self.done.load(Ordering::Acquire);
+            loop {
+                match self.file.read(&mut buf) {
+                    Ok(0) => break,
+                    Ok(n) => {
+                        pending.extend_from_slice(&buf[..n]);
+                        while let Some(i) = pending.iter().position(|&b| b == b'\n') {
+                            let line: Vec<u8> = pending.drain(..=i).collect();
+                            self.line(&line);
+                        }
+                    }
+                    Err(e) if e.kind() == ErrorKind::Interrupted => {}
+                    Err(e) => {
+                        eprintln!("reading the game's log: {e}");
+                        return;
+                    }
+                }
+            }
+            if finished {
+                if !pending.is_empty() {
+                    self.line(&pending);
+                }
+                return;
+            }
+            std::thread::sleep(TAIL_INTERVAL);
+        }
+    }
+
+    fn line(&self, raw: &[u8]) {
+        let line = String::from_utf8_lossy(raw);
+        let line = line.trim_end_matches(['\n', '\r']);
+        (self.output)(line);
+        if let Some(c) = self.regex.captures(line) {
+            if let Some(code) = c.get(1).or_else(|| c.get(0)) {
+                let _ = self.codes.send(code.as_str().to_string());
             }
         }
     }

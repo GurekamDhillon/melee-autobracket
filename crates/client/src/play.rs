@@ -411,9 +411,22 @@ fn report_unfinished(engine: &mut dyn Engine, event: i64, s: &mut Session) {
                  replay with: autobracket-client upload {event} {} {} FILE",
                 launch.set_id, launch.game_no, launch.set_id, launch.game_no
             );
-        } else if let Ok(replays) = engine.take_replays() {
-            s.pending
-                .extend(replays.into_iter().map(|path| Pending { launch, path }));
+        } else {
+            let dir = engine.run_dir();
+            match engine.take_replays() {
+                Ok(replays) => s
+                    .pending
+                    .extend(replays.into_iter().map(|path| Pending { launch, path })),
+                Err(e) => eprintln!(
+                    "Could not list the replays of set {} game {} ({e:#}); look for .slp files \
+                     in {} and upload them with: autobracket-client upload {event} {} {} FILE",
+                    launch.set_id,
+                    launch.game_no,
+                    dir.map_or_else(|| "its run directory".into(), |d| d.display().to_string()),
+                    launch.set_id,
+                    launch.game_no
+                ),
+            }
         }
     }
     for p in &s.pending {

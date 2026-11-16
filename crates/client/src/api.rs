@@ -45,17 +45,35 @@ pub fn is_retryable(e: &anyhow::Error) -> bool {
         .is_some_and(ApiError::retryable)
 }
 
-fn transport(what: &str, e: &reqwest::Error) -> ApiError {
+/// A request that failed without a response. A request that could not even be built
+/// (a malformed server URL, say) is a fatal error; anything else is a retryable
+/// [`ApiError`] transport failure.
+fn transport(what: &str, e: &reqwest::Error) -> anyhow::Error {
     let mut message = format!("{what}: {e}");
     let mut source = std::error::Error::source(e);
     while let Some(s) = source {
         message.push_str(&format!(": {s}"));
         source = s.source();
     }
+    if e.is_builder() {
+        return anyhow::anyhow!("invalid request: {message}");
+    }
     ApiError {
         status: None,
         message,
     }
+    .into()
+}
+
+/// Checks that `server` is an absolute `http://` or `https://` URL with a host.
+pub fn check_server_url(server: &str) -> anyhow::Result<()> {
+    let url = reqwest::Url::parse(server).with_context(|| {
+        format!("server {server:?} is not a valid URL (expected e.g. http://host:8080)")
+    })?;
+    if !matches!(url.scheme(), "http" | "https") || url.host_str().is_none() {
+        anyhow::bail!("server {server:?} must be an http:// or https:// URL with a host");
+    }
+    Ok(())
 }
 
 pub struct Api {
