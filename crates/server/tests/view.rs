@@ -334,5 +334,5 @@ async fn documented_routes_exist() {
         );
         seen += 1;
     }
-    assert!(seen >= 21, "parsed {seen} routes from the table");
+    assert!(seen >= 24, "parsed {seen} routes from the table");
 }
