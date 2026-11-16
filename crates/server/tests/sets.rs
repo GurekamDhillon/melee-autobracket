@@ -272,14 +272,29 @@ async fn room_code_flow() {
 #[tokio::test]
 async fn room_code_validation() {
     let (_app, host, _guest, event) = two_player().await;
-    for good in ["KQ7X", "0000", "relay.gsd.sh:51600", "a-b.c:1", "x:12345"] {
+    let longest_host = format!("{}:51600", "a".repeat(253));
+    for good in [
+        "KQ7X",
+        "0000",
+        "relay.gsd.sh:51600",
+        "a-b.c:1",
+        "x:12345",
+        "x:65535",
+        longest_host.as_str(),
+    ] {
         assert_eq!(
             room(&host, event, 0, good).await,
             StatusCode::NO_CONTENT,
             "{good:?}"
         );
     }
+    let too_long_host = format!("{}:51600", "a".repeat(254));
     for bad in [
+        too_long_host.as_str(),
+        "x:0",
+        "x:00000",
+        "x:65536",
+        "x:99999",
         "",
         "kq7x",
         "KQ7",
@@ -362,6 +377,34 @@ async fn upload_stores_and_is_idempotent() {
     assert_eq!(PathBuf::from(&path), expected);
     assert_eq!(std::fs::read(&expected).unwrap(), file);
     assert_eq!(stored_files(&app), vec![expected]);
+}
+
+/// While the game is being judged, re-sending the same file is still a harmless `200`
+/// (a client retrying after a lost response) and stores nothing new; a different file is `409`.
+#[tokio::test]
+async fn reupload_while_judging_is_idempotent() {
+    let (app, host, _guest, event) = two_player().await;
+    let file = simple_game(1, START_A);
+    assert_eq!(
+        upload(&host, event, 0, 1, file.clone()).await,
+        StatusCode::ACCEPTED
+    );
+    sqlx::query("UPDATE games SET state = 'judging'")
+        .execute(&app.state.db)
+        .await
+        .unwrap();
+
+    assert_eq!(upload(&host, event, 0, 1, file).await, StatusCode::OK);
+    assert_eq!(
+        upload(&host, event, 0, 1, simple_game(1, START_B)).await,
+        StatusCode::CONFLICT
+    );
+    assert_eq!(
+        count(&app, "SELECT COUNT(*) FROM uploads WHERE slot = 0").await,
+        1
+    );
+    assert_eq!(count(&app, "SELECT COUNT(*) FROM uploads").await, 1);
+    assert_eq!(stored_files(&app).len(), 1);
 }
 
 #[tokio::test]
