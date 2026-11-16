@@ -170,8 +170,9 @@ pub struct QueueItem {
     /// went to review, say). `None` when there is none. Each game's evidence holds `game_id`,
     /// `game_no`, `state`, `verdict`, `uploads` (per slot: `slot`, `tag`, `sha256` (12 hex
     /// digits), `client_build`, `parse`, and for a readable file `stage`, `timer_secs`,
-    /// `players` (`port`, `character`, `start_stocks`, `final_stocks`, `final_percent`),
-    /// `end_method`, `lras_initiator`, `winner_port`, `legality`), and `resim` (`outcome`,
+    /// `players` (`port`, `character`, `kind`, `start_stocks`, `final_stocks`,
+    /// `final_percent`), `last_frame`, `end_method`, `lras_initiator`, `winner_port`,
+    /// `legality` (`"ok"` or the first rule broken)), and `resim` (`outcome`,
     /// `detail`, `build`, `slot`, `evidence_only`: a lone upload is re-simulated as evidence
     /// only, which never counts) or null. Text from outside the server is cleaned of control
     /// characters, line separators and bidirectional controls.

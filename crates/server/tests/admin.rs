@@ -1346,3 +1346,116 @@ async fn double_dq_through_the_resolution_route() {
     assert_eq!(items[0].reason, "double-dq");
     assert_eq!(items[0].set_id, losers.id);
 }
+
+/// A set waiting on a no-show with a game of it uploaded meanwhile (`uploading` or `judging`,
+/// as the upload route allows): the organiser's decision voids that game in the same
+/// transaction, so it can neither be joined nor count afterwards.
+async fn no_show_set_with_game(app: &TestApp, ps: &[TestPlayer], game_state: &str) -> (i64, i64) {
+    let event = app
+        .started_event(Format::SingleElim, &[&ps[0], &ps[1]])
+        .await;
+    let res = ps[1]
+        .post_json(&format!("/v1/sets/{event}/0/no-show"), &json!({}))
+        .await;
+    assert_eq!(res.status(), StatusCode::NO_CONTENT);
+    // The host's upload arrives while the set is in review (stored through the route with the
+    // set briefly ready, as the review-time upload route would store it).
+    sqlx::query("UPDATE sets SET state = 'ready' WHERE event_id = ?")
+        .bind(event)
+        .execute(&app.state.db)
+        .await
+        .unwrap();
+    assert_eq!(
+        upload(&ps[0], event, 0, 1, simple_game(1, START_A)).await,
+        StatusCode::ACCEPTED
+    );
+    sqlx::query("UPDATE sets SET state = 'review' WHERE event_id = ?")
+        .bind(event)
+        .execute(&app.state.db)
+        .await
+        .unwrap();
+    let game_id: i64 =
+        sqlx::query_scalar("UPDATE games SET state = ? WHERE event_id = ? RETURNING id")
+            .bind(game_state)
+            .bind(event)
+            .fetch_one(&app.state.db)
+            .await
+            .unwrap();
+    (event, game_id)
+}
+
+#[tokio::test]
+async fn replay_voids_a_game_uploaded_during_review() {
+    for game_state in ["uploading", "judging"] {
+        let app = TestApp::spawn(|_| {}).await;
+        let ps = players(&app, 2).await;
+        let (event, game_id) = no_show_set_with_game(&app, &ps, game_state).await;
+        let item = queue(&app).await.remove(0);
+        assert_eq!(
+            resolve(&app, item.id, &Resolve::Replay).await,
+            StatusCode::NO_CONTENT
+        );
+        assert_eq!(
+            game_states(&app, event, 0).await,
+            vec!["void"],
+            "{game_state}"
+        );
+        assert_eq!(set_row(&app, event, 0).await, ("ready".into(), 0, 0));
+
+        // A verdict for the voided game arriving late changes nothing.
+        apply_verdict(
+            &app.state,
+            game_id,
+            &Verdict::PeerOnly,
+            Some(0),
+            &ResimOutcome::Skipped,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(game_states(&app, event, 0).await, vec!["void"]);
+        assert_eq!(set_row(&app, event, 0).await, ("ready".into(), 0, 0));
+
+        // The next upload starts a fresh game 1.
+        assert_eq!(
+            upload(&ps[1], event, 0, 1, simple_game(1, START_B)).await,
+            StatusCode::ACCEPTED
+        );
+        let games: Vec<(i64, String)> =
+            sqlx::query_as("SELECT id, state FROM games WHERE event_id = ? ORDER BY id")
+                .bind(event)
+                .fetch_all(&app.state.db)
+                .await
+                .unwrap();
+        assert_eq!(games.len(), 2);
+        assert_ne!(games[1].0, game_id);
+        assert_eq!(games[1].1, "uploading");
+        assert_eq!(
+            judge_due(&app.state).await.unwrap(),
+            0,
+            "one upload, not yet due"
+        );
+    }
+}
+
+#[tokio::test]
+async fn award_voids_a_game_uploaded_during_review() {
+    for game_state in ["uploading", "judging"] {
+        let app = TestApp::spawn(|_| {}).await;
+        let ps = players(&app, 2).await;
+        let (event, _) = no_show_set_with_game(&app, &ps, game_state).await;
+        let item = queue(&app).await.remove(0);
+        assert_eq!(
+            resolve(&app, item.id, &Resolve::Award { slot: 0 }).await,
+            StatusCode::NO_CONTENT
+        );
+        assert_eq!(
+            game_states(&app, event, 0).await,
+            vec!["void"],
+            "{game_state}"
+        );
+        assert_eq!(set_row(&app, event, 0).await, ("done".into(), 0, 0));
+        assert_eq!(judge_due(&app.state).await.unwrap(), 0);
+    }
+}

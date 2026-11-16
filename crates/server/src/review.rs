@@ -289,8 +289,10 @@ pub async fn resolve_queue_item(
     Ok(())
 }
 
-/// Before an organiser decides a set: its games in review become `void` and its open queue
-/// items are resolved with `resolution`.
+/// Before an organiser decides a set: its games not yet decided (`review`, and `uploading` or
+/// `judging`, which a set waiting on a no-show can have) become `void`, and its open queue
+/// items are resolved with `resolution`. A judging task whose game is voided here finds it no
+/// longer `judging`, so its verdict is not applied; an upload after a replay starts a new game.
 async fn close_set_items(
     conn: &mut SqliteConnection,
     event_id: i64,
@@ -298,7 +300,8 @@ async fn close_set_items(
     resolution: &str,
 ) -> Result<(), LifecycleError> {
     sqlx::query(
-        "UPDATE games SET state = 'void' WHERE event_id = ? AND set_id = ? AND state = 'review'",
+        "UPDATE games SET state = 'void' WHERE event_id = ? AND set_id = ?
+           AND state IN ('review', 'uploading', 'judging')",
     )
     .bind(event_id)
     .bind(set_id)
