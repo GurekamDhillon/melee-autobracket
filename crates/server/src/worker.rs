@@ -21,7 +21,7 @@ use tracing::{error, info, warn};
 
 use crate::config::{Config, VerifierMode};
 use crate::db::{begin_write, now_unix};
-use crate::judge::{self, Pre};
+use crate::judge::{self, Pre, UploadMeta};
 use crate::lifecycle::{self, verdict_name, LifecycleError};
 use crate::logging::{clean, detail, label, resim_kind, Journal, MAX_DETAIL_CHARS};
 use crate::resim::Resim;
@@ -469,6 +469,8 @@ struct Claim {
     ruleset: Ruleset,
     /// Stored replay path per slot (0 is the host).
     paths: [Option<PathBuf>; 2],
+    /// What else is known about each slot's upload (the tag even without one).
+    meta: [UploadMeta; 2],
 }
 
 /// Moves the game from `uploading` to `judging`: `false` if another task (or process) got
@@ -493,18 +495,39 @@ async fn load_claim(st: &AppState, game_id: i64) -> anyhow::Result<Claim> {
     .fetch_one(&mut *tx)
     .await?;
     let ruleset = serde_json::from_str(&ruleset_json).context("event ruleset_json")?;
-    let uploads: Vec<(i64, String)> =
-        sqlx::query_as("SELECT slot, path FROM uploads WHERE game_id = ?")
+    let uploads: Vec<(i64, String, String, String)> =
+        sqlx::query_as("SELECT slot, path, sha256, client_build FROM uploads WHERE game_id = ?")
             .bind(game_id)
             .fetch_all(&mut *tx)
             .await?;
     let mut paths = [None, None];
-    for (slot, path) in uploads {
+    let mut meta: [UploadMeta; 2] = Default::default();
+    for (slot, path, sha256, client_build) in uploads {
         let slot = usize::try_from(slot)
             .ok()
             .filter(|s| *s < 2)
             .with_context(|| format!("upload slot {slot}"))?;
         paths[slot] = Some(PathBuf::from(path));
+        meta[slot].sha256 = sha256;
+        meta[slot].client_build = client_build;
+    }
+    // For the evidence only: judging goes on without the tags.
+    let tags = match lifecycle::load_bracket_on(&mut tx, event_id).await {
+        Ok(bracket) => match usize::try_from(set_id)
+            .ok()
+            .and_then(|i| bracket.sets.get(i))
+        {
+            Some(set) => lifecycle::slot_tags(&mut tx, event_id, set.slots)
+                .await
+                .unwrap_or(None),
+            None => None,
+        },
+        Err(_) => None,
+    };
+    if let Some(tags) = tags {
+        for (m, tag) in meta.iter_mut().zip(tags) {
+            m.tag = Some(tag);
+        }
     }
     tx.commit().await?;
     Ok(Claim {
@@ -513,6 +536,7 @@ async fn load_claim(st: &AppState, game_id: i64) -> anyhow::Result<Claim> {
         game_no,
         ruleset,
         paths,
+        meta,
     })
 }
 
@@ -533,19 +557,45 @@ async fn judge_claimed(st: &AppState, game_id: i64, claim: Claim) -> anyhow::Res
             ),
         }
     }
-    let ruleset = claim.ruleset;
-    let pre = tokio::task::spawn_blocking(move || {
+    let ruleset = claim.ruleset.clone();
+    let meta = claim.meta.clone();
+    let (pre, uploads, lone) = tokio::task::spawn_blocking(move || {
         let [a, b] = &files;
-        judge::pre_judge([a.as_deref(), b.as_deref()], &ruleset)
+        let files = [a.as_deref(), b.as_deref()];
+        let pre = judge::pre_judge(files, &ruleset);
+        let mut uploads = Vec::new();
+        let mut lone = None;
+        for (slot, file) in (0u8..).zip(files) {
+            if claim_has_upload(&meta[usize::from(slot)]) {
+                uploads.push(judge::upload_evidence(
+                    slot,
+                    &meta[usize::from(slot)],
+                    file,
+                    &ruleset,
+                ));
+            }
+            if pre == Pre::Final(Verdict::Single) {
+                if let Some(frame) = file.and_then(|f| judge::evidence_resim_frame(f, &ruleset)) {
+                    lone = Some((slot, frame));
+                }
+            }
+        }
+        (pre, uploads, lone)
     })
     .await
     .context("pre-judging")?;
 
     let mut resim_ms = 0;
+    let mut resim_evidence = serde_json::Value::Null;
     let (verdict, winner_slot, resim, verifier_build) = match pre {
-        // Decided before any re-simulation (`Single` included: the lone upload is not run
-        // through the engine), so no verifier build checked it.
-        Pre::Final(v) => (v, None, ResimOutcome::Skipped, None),
+        // Decided before any re-simulation, so no verifier build checked it for counting. A
+        // lone upload that could be checked is re-simulated as evidence for the organiser.
+        Pre::Final(v) => {
+            if let Some((slot, frame)) = lone {
+                resim_evidence = evidence_resim(st, &claim, game_id, slot, frame).await;
+            }
+            (v, None, ResimOutcome::Skipped, None)
+        }
         Pre::NeedsResim {
             winner_port,
             last_frame,
@@ -593,9 +643,23 @@ async fn judge_claimed(st: &AppState, game_id: i64, claim: Claim) -> anyhow::Res
             }
             // A build is recorded only when the engine actually ran on the game.
             let build = engine_ran(&outcome).then_some(build);
+            let (kind, text) = judge::resim_evidence(&outcome);
+            resim_evidence = serde_json::json!({
+                "outcome": kind,
+                "detail": text,
+                "build": build.as_deref().map(label),
+                "slot": 0,
+                "evidence_only": false,
+            });
             (v, Some(judge::winner_slot(winner_port)), outcome, build)
         }
     };
+    let evidence = serde_json::json!({
+        "game_no": claim.game_no,
+        "verdict": verdict_display(&verdict),
+        "uploads": uploads,
+        "resim": resim_evidence,
+    });
     lifecycle::apply_verdict(
         st,
         game_id,
@@ -603,6 +667,7 @@ async fn judge_claimed(st: &AppState, game_id: i64, claim: Claim) -> anyhow::Res
         winner_slot,
         &resim,
         verifier_build.as_deref(),
+        Some(&evidence.to_string()),
     )
     .await?;
     info!(
@@ -618,6 +683,44 @@ async fn judge_claimed(st: &AppState, game_id: i64, claim: Claim) -> anyhow::Res
         "verdict"
     );
     Ok(())
+}
+
+/// Whether the claim found an upload for this slot (every stored upload has a hash).
+fn claim_has_upload(meta: &UploadMeta) -> bool {
+    !meta.sha256.is_empty()
+}
+
+/// Re-simulates the lone upload in `slot` as evidence only: the outcome is shown to the
+/// organiser and never counts. A failure to check is recorded in the evidence instead of
+/// retrying the game, since nothing depends on it.
+async fn evidence_resim(
+    st: &AppState,
+    claim: &Claim,
+    game_id: i64,
+    slot: u8,
+    last_frame: i32,
+) -> serde_json::Value {
+    let Some(path) = claim.paths[usize::from(slot)].as_deref() else {
+        return serde_json::Value::Null;
+    };
+    let (kind, text, build) = match st.resim.check_with_build(path, last_frame).await {
+        Ok((outcome, build)) => {
+            let build = engine_ran(&outcome).then_some(build);
+            let (kind, text) = judge::resim_evidence(&outcome);
+            (kind, text, build)
+        }
+        Err(e) => {
+            warn!(game_id, error = %detail(format_args!("{e:#}")), "evidence re-simulation failed");
+            ("Error", clean(&format!("{e:#}"), MAX_DETAIL_CHARS), None)
+        }
+    };
+    serde_json::json!({
+        "outcome": kind,
+        "detail": text,
+        "build": build.as_deref().map(label),
+        "slot": slot,
+        "evidence_only": true,
+    })
 }
 
 /// Whether a re-simulation outcome means the engine ran on the replay: `Skipped` (verifier

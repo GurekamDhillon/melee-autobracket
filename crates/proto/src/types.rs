@@ -164,6 +164,25 @@ pub struct QueueItem {
     /// it and their note; for a stalled set, how long it had been idle.
     #[serde(default)]
     pub detail: Option<String>,
+    /// What the judging worker found in the uploads: for an item about one game, that game's
+    /// evidence (an object); for an item about the set (a no-show, a stalled set), an array
+    /// with the evidence of every game of the set that has any (a game judged after the set
+    /// went to review, say). `None` when there is none. Each game's evidence holds `game_id`,
+    /// `game_no`, `state`, `verdict`, `uploads` (per slot: `slot`, `tag`, `sha256` (12 hex
+    /// digits), `client_build`, `parse`, and for a readable file `stage`, `timer_secs`,
+    /// `players` (`port`, `character`, `start_stocks`, `final_stocks`, `final_percent`),
+    /// `end_method`, `lras_initiator`, `winner_port`, `legality`), and `resim` (`outcome`,
+    /// `detail`, `build`, `slot`, `evidence_only`: a lone upload is re-simulated as evidence
+    /// only, which never counts) or null. Text from outside the server is cleaned of control
+    /// characters, line separators and bidirectional controls.
+    #[serde(default)]
+    pub evidence: Option<serde_json::Value>,
+    /// The tag of the player who reported a no-show.
+    #[serde(default)]
+    pub reporter_tag: Option<String>,
+    /// The tags of the set's players, `[slot 0 (host), slot 1]`.
+    #[serde(default)]
+    pub tags: Option<[String; 2]>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]

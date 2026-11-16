@@ -4,11 +4,15 @@
 use axum::extract::rejection::PathRejection;
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
+use std::collections::HashMap;
+
 use axum::Json;
+use bracket::Bracket;
 use proto::{EventCreateReq, EventSummary, EventView, QueueItem, RekeyReq, Resolve};
 use rand::rngs::OsRng;
 use rand::Rng;
 use serde_json::{json, Value};
+use sqlx::SqliteConnection;
 
 use super::events::{event_view, summary};
 use super::{check_text, parse_body, ApiError, MAX_EVENT_NAME_CHARS};
@@ -89,39 +93,66 @@ pub async fn start_event(
     event_view(&state.db, id).await.map(Json)
 }
 
-/// `GET /v1/admin/queue`: the open queue items, oldest first, with the judged evidence of
-/// the game in question.
+/// `GET /v1/admin/queue`: the open queue items, oldest first, with the judged verdict of the
+/// game in question, the players' tags, who reported a no-show, and the evidence: that
+/// game's, or for an item about the whole set, every game of the set that has some (see
+/// [`QueueItem::evidence`]). Read in one transaction.
 pub async fn queue(
     State(state): State<AppState>,
     _to: To,
 ) -> Result<Json<Vec<QueueItem>>, ApiError> {
+    let mut tx = state.db.begin().await?;
     let rows: Vec<QueueRow> = sqlx::query_as(
         "SELECT q.id, q.event_id, q.set_id, q.game_id, q.reason, g.verdict_json, g.resim_json,
-                q.detail
+                q.detail, q.reporter_slot
          FROM queue q LEFT JOIN games g ON g.id = q.game_id
          WHERE q.state = 'open' ORDER BY q.id",
     )
-    .fetch_all(&state.db)
+    .fetch_all(&mut *tx)
     .await?;
-    rows.into_iter()
-        .map(
-            |(id, event_id, set_id, game_id, reason, verdict, resim, detail)| {
-                Ok(QueueItem {
-                    id,
-                    event_id,
-                    set_id: u32::try_from(set_id).map_err(|_| {
-                        ApiError::internal(format_args!("queue item {id} set_id {set_id}"))
-                    })?,
-                    game_id,
-                    reason,
-                    verdict: parse_stored(verdict.as_deref())?,
-                    resim: parse_stored(resim.as_deref())?,
-                    detail,
-                })
-            },
-        )
-        .collect::<Result<_, _>>()
-        .map(Json)
+    let mut brackets: HashMap<i64, Option<Bracket>> = HashMap::new();
+    let mut items = Vec::with_capacity(rows.len());
+    for (id, event_id, set_id, game_id, reason, verdict, resim, detail, reporter_slot) in rows {
+        let set = u32::try_from(set_id)
+            .map_err(|_| ApiError::internal(format_args!("queue item {id} set_id {set_id}")))?;
+        if let std::collections::hash_map::Entry::Vacant(e) = brackets.entry(event_id) {
+            e.insert(lifecycle::load_bracket_on(&mut tx, event_id).await.ok());
+        }
+        let slots = brackets
+            .get(&event_id)
+            .and_then(Option::as_ref)
+            .and_then(|b| b.sets.get(set as usize))
+            .map(|s| s.slots);
+        let tags = match slots {
+            Some(slots) => lifecycle::slot_tags(&mut tx, event_id, slots).await?,
+            None => None,
+        };
+        let reporter_tag = reporter_slot
+            .and_then(|s| usize::try_from(s).ok())
+            .and_then(|s| tags.as_ref().and_then(|t| t.get(s).cloned()));
+        let evidence = match game_id {
+            Some(game_id) => game_evidence(&mut tx, game_id).await?,
+            None => {
+                let games = game_evidence_of_set(&mut tx, event_id, set_id).await?;
+                (!games.is_empty()).then_some(Value::Array(games))
+            }
+        };
+        items.push(QueueItem {
+            id,
+            event_id,
+            set_id: set,
+            game_id,
+            reason,
+            verdict: parse_stored(verdict.as_deref())?,
+            resim: parse_stored(resim.as_deref())?,
+            detail,
+            evidence,
+            reporter_tag,
+            tags,
+        });
+    }
+    tx.commit().await?;
+    Ok(Json(items))
 }
 
 type QueueRow = (
@@ -133,7 +164,51 @@ type QueueRow = (
     Option<String>,
     Option<String>,
     Option<String>,
+    Option<i64>,
 );
+
+/// The stored evidence of one game, with its `game_id` and current `state`; `None` when the
+/// game has none.
+async fn game_evidence(
+    conn: &mut SqliteConnection,
+    game_id: i64,
+) -> Result<Option<Value>, ApiError> {
+    let row: Option<(i64, String, String)> = sqlx::query_as(
+        "SELECT id, state, evidence_json FROM games WHERE id = ? AND evidence_json IS NOT NULL",
+    )
+    .bind(game_id)
+    .fetch_optional(&mut *conn)
+    .await?;
+    row.map(evidence_value).transpose()
+}
+
+/// [`game_evidence`] of every game of one set that has some, oldest first.
+async fn game_evidence_of_set(
+    conn: &mut SqliteConnection,
+    event_id: i64,
+    set_id: i64,
+) -> Result<Vec<Value>, ApiError> {
+    let rows: Vec<(i64, String, String)> = sqlx::query_as(
+        "SELECT id, state, evidence_json FROM games
+         WHERE event_id = ? AND set_id = ? AND evidence_json IS NOT NULL ORDER BY id",
+    )
+    .bind(event_id)
+    .bind(set_id)
+    .fetch_all(&mut *conn)
+    .await?;
+    rows.into_iter().map(evidence_value).collect()
+}
+
+/// A stored evidence row as shown: the evidence object with `game_id` and `state` added.
+fn evidence_value((game_id, state, json): (i64, String, String)) -> Result<Value, ApiError> {
+    let mut ev: Value = serde_json::from_str(&json)
+        .map_err(|e| ApiError::internal(format_args!("game {game_id} evidence_json: {e}")))?;
+    if let Some(obj) = ev.as_object_mut() {
+        obj.insert("game_id".into(), game_id.into());
+        obj.insert("state".into(), state.into());
+    }
+    Ok(ev)
+}
 
 /// `POST /v1/admin/queue/{id}/resolve` (`Resolve`).
 pub async fn resolve(

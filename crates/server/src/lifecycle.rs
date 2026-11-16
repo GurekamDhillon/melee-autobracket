@@ -197,7 +197,8 @@ pub async fn load_bracket_on(
 /// the game as the build that re-simulated it: `None` when the engine did not run on the game
 /// (the verdicts decided before re-simulation: `Single`, `Conflicted`, `Illegal`, `Undecided`;
 /// and outcomes `Skipped` and `Unavailable`). The time of
-/// the verdict is recorded as `judged_at`, a late (voided) one included.
+/// the verdict is recorded as `judged_at`, a late (voided) one included, and so is
+/// `evidence_json` (what the worker found in the uploads, for the organiser).
 pub async fn apply_verdict(
     st: &AppState,
     game_id: i64,
@@ -205,6 +206,7 @@ pub async fn apply_verdict(
     winner_slot: Option<u8>,
     resim: &ResimOutcome,
     verifier_build: Option<&str>,
+    evidence_json: Option<&str>,
 ) -> Result<(), LifecycleError> {
     let verdict_json = to_json(v)?;
     let resim_json = to_json(resim)?;
@@ -225,6 +227,12 @@ pub async fn apply_verdict(
     if game_state != "judging" {
         return Ok(());
     }
+    // Kept whatever the verdict leads to, a late (voided) one included.
+    sqlx::query("UPDATE games SET evidence_json = ? WHERE id = ?")
+        .bind(evidence_json)
+        .bind(game_id)
+        .execute(&mut *tx)
+        .await?;
     let set_id = SetId::try_from(set_id)
         .map_err(|_| LifecycleError::Corrupt(format!("game {game_id} set_id {set_id}")))?;
 
@@ -501,6 +509,34 @@ async fn tag_for_log(conn: &mut SqliteConnection, event_id: i64, seed: u32) -> S
             format!("seed={seed}")
         }
     }
+}
+
+/// The tags of the players in `slots` (a bracket set's), `None` unless both are entrants with a
+/// player row.
+pub(crate) async fn slot_tags(
+    conn: &mut SqliteConnection,
+    event_id: i64,
+    slots: [Slot; 2],
+) -> Result<Option<[String; 2]>, LifecycleError> {
+    let mut tags: [String; 2] = Default::default();
+    for (tag, slot) in tags.iter_mut().zip(slots) {
+        let Slot::Entrant(seed) = slot else {
+            return Ok(None);
+        };
+        let found: Option<String> = sqlx::query_scalar(
+            "SELECT p.tag FROM entrants n JOIN players p ON p.key = n.player_key
+             WHERE n.event_id = ? AND n.seed = ?",
+        )
+        .bind(event_id)
+        .bind(seed)
+        .fetch_optional(&mut *conn)
+        .await?;
+        let Some(found) = found else {
+            return Ok(None);
+        };
+        *tag = found;
+    }
+    Ok(Some(tags))
 }
 
 /// Queue reason for a set awarded with both of its entrants disqualified.

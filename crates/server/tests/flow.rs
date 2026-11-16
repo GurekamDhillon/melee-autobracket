@@ -554,6 +554,7 @@ async fn game_never_counted_twice() {
         Some(0),
         &ResimOutcome::Skipped,
         Some("none"),
+        None,
     )
     .await
     .unwrap();

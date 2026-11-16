@@ -484,3 +484,36 @@ fn winner_slot_mapping() {
     assert_eq!(winner_slot(1), 0);
     assert_eq!(winner_slot(2), 1);
 }
+
+#[test]
+fn upload_evidence_describes_the_file() {
+    use autobracket_server::judge::{evidence_resim_frame, upload_evidence, UploadMeta};
+    let rules = Ruleset::default();
+    let meta = UploadMeta {
+        tag: Some("Alice\u{202e}".into()),
+        sha256: "ab".repeat(32),
+        client_build: "b1".into(),
+    };
+    let good = simple_game(2, T0);
+    let ev = upload_evidence(1, &meta, Some(&good), &rules);
+    assert_eq!(ev["slot"], 1);
+    assert_eq!(ev["tag"], "Alice\\u{202e}", "cleaned");
+    assert_eq!(ev["sha256"], "abababababab");
+    assert_eq!(ev["parse"], "ok");
+    assert_eq!(ev["winner_port"], 2);
+    assert_eq!(ev["legality"], "ok");
+    assert_eq!(evidence_resim_frame(&good, &rules), Some(5400));
+
+    // An illegal file names the rule it breaks and is not re-simulated as evidence.
+    let illegal = base().stage(4).start_at(T0).build();
+    let ev = upload_evidence(0, &meta, Some(&illegal), &rules);
+    assert_eq!(ev["legality"], "stage");
+    assert_eq!(evidence_resim_frame(&illegal, &rules), None);
+
+    // Unreadable bytes, and a stored file that is gone.
+    let ev = upload_evidence(0, &meta, Some(b"garbage"), &rules);
+    assert_ne!(ev["parse"], "ok");
+    assert!(ev.get("winner_port").is_none());
+    let ev = upload_evidence(0, &meta, None, &rules);
+    assert_eq!(ev["parse"], "stored file unreadable");
+}

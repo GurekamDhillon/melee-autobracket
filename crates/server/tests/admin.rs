@@ -171,6 +171,161 @@ async fn queue_lists_conflict_with_evidence() {
     assert!(item.game_id.is_some());
     assert_eq!(item.verdict, Some(Verdict::Conflicted));
     assert_eq!(item.resim, Some(ResimOutcome::Skipped));
+
+    // Who is in the set, and what each file says.
+    assert_eq!(item.tags, Some(["P0".to_string(), "P1".to_string()]));
+    assert_eq!(item.reporter_tag, None);
+    let ev = item.evidence.as_ref().expect("evidence");
+    assert_eq!(ev["game_id"], json!(item.game_id.unwrap()));
+    assert_eq!(ev["game_no"], 1);
+    assert_eq!(ev["state"], "review");
+    assert_eq!(ev["verdict"], "Conflicted");
+    let uploads = ev["uploads"].as_array().unwrap();
+    assert_eq!(uploads.len(), 2);
+    for (slot, (tag, winner)) in [("P0", 1), ("P1", 2)].into_iter().enumerate() {
+        let u = &uploads[slot];
+        assert_eq!(u["slot"], slot, "{u}");
+        assert_eq!(u["tag"], tag, "{u}");
+        assert_eq!(u["sha256"].as_str().unwrap().len(), 12, "{u}");
+        assert_eq!(u["client_build"], "b1", "{u}");
+        assert_eq!(u["parse"], "ok", "{u}");
+        assert_eq!(u["stage"], 32, "{u}");
+        assert_eq!(u["timer_secs"], 480, "{u}");
+        assert_eq!(u["end_method"], 2, "{u}");
+        assert_eq!(u["winner_port"], winner, "{u}");
+        assert_eq!(u["legality"], "ok", "{u}");
+        let players = u["players"].as_array().unwrap();
+        assert_eq!(players.len(), 2, "{u}");
+        assert_eq!(players[0]["port"], 1, "{u}");
+        assert!(players[0]["character"].is_u64(), "{u}");
+        assert!(players[0]["final_stocks"].is_u64(), "{u}");
+        assert!(players[0]["final_percent"].is_number(), "{u}");
+    }
+    assert!(
+        ev["resim"].is_null(),
+        "a conflicted pair is not re-simulated: {ev}"
+    );
+}
+
+/// A lone upload is re-simulated as evidence only: the outcome is shown to the organiser,
+/// and the game still never counts.
+#[tokio::test]
+async fn single_upload_evidence_includes_an_evidence_only_resimulation() {
+    use autobracket_server::testkit::FakeResim;
+    let resim = std::sync::Arc::new(FakeResim(std::sync::Mutex::new(
+        vec![ResimOutcome::Crashed(
+            "boom\n2026 INFO forged\u{202e}".into(),
+        )]
+        .into(),
+    )));
+    let app = TestApp::spawn_with(
+        |c| {
+            c.upload_timeout_secs = 1;
+            c.verifier.mode = autobracket_server::config::VerifierMode::InProcess;
+        },
+        resim,
+    )
+    .await;
+    let ps = players(&app, 2).await;
+    let event = app
+        .started_event(Format::SingleElim, &[&ps[0], &ps[1]])
+        .await;
+    assert_eq!(
+        upload(&ps[1], event, 0, 1, simple_game(2, START_B)).await,
+        StatusCode::ACCEPTED
+    );
+    sqlx::query("UPDATE games SET first_upload_at = first_upload_at - 2")
+        .execute(&app.state.db)
+        .await
+        .unwrap();
+    assert_eq!(judge_due(&app.state).await.unwrap(), 1);
+
+    let items = queue(&app).await;
+    assert_eq!(items.len(), 1);
+    let item = &items[0];
+    assert_eq!(item.verdict, Some(Verdict::Single));
+    // The game itself was not re-simulated for counting.
+    assert_eq!(item.resim, Some(ResimOutcome::Skipped));
+    let ev = item.evidence.as_ref().expect("evidence");
+    let uploads = ev["uploads"].as_array().unwrap();
+    assert_eq!(uploads.len(), 1);
+    assert_eq!(uploads[0]["slot"], 1);
+    assert_eq!(uploads[0]["tag"], "P1");
+    assert_eq!(uploads[0]["winner_port"], 2);
+    let resim = &ev["resim"];
+    assert_eq!(resim["evidence_only"], true, "{ev}");
+    assert_eq!(resim["slot"], 1, "{ev}");
+    assert_eq!(resim["outcome"], "Crashed", "{ev}");
+    assert_eq!(resim["build"], "fake", "{ev}");
+    // Verifier text is cleaned like log text.
+    let detail = resim["detail"].as_str().unwrap();
+    assert!(detail.contains("boom"), "{detail}");
+    assert!(
+        !detail.contains('\n') && !detail.contains('\u{202e}'),
+        "{detail:?}"
+    );
+    let (state, build): (String, Option<String>) =
+        sqlx::query_as("SELECT state, verifier_build FROM games")
+            .fetch_one(&app.state.db)
+            .await
+            .unwrap();
+    assert_eq!((state.as_str(), build), ("review", None));
+}
+
+/// A no-show item names who reported it; a game judged after the set went to review (as an
+/// upload accepted in review is) is voided, and its evidence is attached to the set's item.
+#[tokio::test]
+async fn set_items_carry_the_reporter_and_the_evidence_of_late_games() {
+    let app = TestApp::spawn(|_| {}).await;
+    let ps = players(&app, 2).await;
+    let event = app
+        .started_event(Format::SingleElim, &[&ps[0], &ps[1]])
+        .await;
+    let res = ps[1]
+        .post_json(
+            &format!("/v1/sets/{event}/0/no-show"),
+            &json!({ "detail": "never joined" }),
+        )
+        .await;
+    assert_eq!(res.status(), StatusCode::NO_CONTENT);
+    let items = queue(&app).await;
+    assert_eq!(items.len(), 1);
+    assert_eq!(items[0].reason, "no-show");
+    assert_eq!(items[0].reporter_tag.as_deref(), Some("P1"));
+    assert_eq!(items[0].tags, Some(["P0".to_string(), "P1".to_string()]));
+    assert_eq!(items[0].evidence, None);
+
+    // The game was played after all: its uploads arrive while the set is in review (stored
+    // here directly, as the upload route does for a set waiting on a no-show).
+    sqlx::query("UPDATE sets SET state = 'ready'")
+        .execute(&app.state.db)
+        .await
+        .unwrap();
+    for (p, start) in [(&ps[0], START_A), (&ps[1], START_B)] {
+        assert_eq!(
+            upload(p, event, 0, 1, simple_game(1, start)).await,
+            StatusCode::ACCEPTED
+        );
+    }
+    sqlx::query("UPDATE sets SET state = 'review'")
+        .execute(&app.state.db)
+        .await
+        .unwrap();
+    assert_eq!(judge_due(&app.state).await.unwrap(), 1);
+    assert_eq!(game_states(&app, event, 0).await, vec!["void"]);
+
+    let items = queue(&app).await;
+    assert_eq!(items.len(), 1);
+    let ev = items[0]
+        .evidence
+        .as_ref()
+        .expect("the late game's evidence");
+    let games = ev.as_array().expect("one entry per game of the set");
+    assert_eq!(games.len(), 1);
+    assert_eq!(games[0]["state"], "void");
+    assert_eq!(games[0]["verdict"], "PeerOnly");
+    assert_eq!(games[0]["uploads"].as_array().unwrap().len(), 2);
+    assert_eq!(games[0]["uploads"][0]["winner_port"], 1);
 }
 
 #[tokio::test]
@@ -689,6 +844,7 @@ async fn late_counting_verdict_for_decided_set_is_void() {
         Some(0),
         &ResimOutcome::Skipped,
         Some("none"),
+        None,
     )
     .await
     .unwrap();
@@ -728,6 +884,7 @@ async fn late_noncounting_verdict_does_not_reopen_set() {
         &Verdict::Conflicted,
         None,
         &ResimOutcome::Skipped,
+        None,
         None,
     )
     .await

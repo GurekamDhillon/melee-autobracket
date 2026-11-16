@@ -205,12 +205,21 @@ async fn job_round_trip() {
 
 /// Each game is labelled with the build that re-simulated it: the build a verifier posted
 /// for its own job, or none when it was judged without a re-simulation, never a build left
-/// over from an earlier game judged by the same task.
+/// over from an earlier game judged by the same task. A lone upload's evidence-only
+/// re-simulation records its build in the evidence, not on the game.
 #[tokio::test]
 async fn verifier_build_belongs_to_its_game() {
     let vk = SigningKey::generate(&mut OsRng);
     let resim = Arc::new(ExternalResim::new(Duration::from_secs(30)));
-    let app = TestApp::spawn_with(external(&vk), resim).await;
+    // One game at a time, so the jobs arrive in game order.
+    let app = TestApp::spawn_with(
+        |c| {
+            external(&vk)(c);
+            c.verifier.jobs = 1;
+        },
+        resim,
+    )
+    .await;
     let host = app.player("Alice").await;
     let guest = app.player("Bob").await;
     // Judged in this order (by game id): a game whose verdict turns out moot, a game with
@@ -261,8 +270,20 @@ async fn verifier_build_belongs_to_its_game() {
         StatusCode::NO_CONTENT
     );
 
+    // The lone upload, re-simulated as evidence only.
+    let lone = claim_job(&verifier).await;
+    assert_ne!(lone.id, first.id);
+    let result = VerifyResult {
+        outcome: ResimOutcome::Match,
+        build: "lone-build".into(),
+    };
+    assert_eq!(
+        verifier.post_result(lone.id, &result).await,
+        StatusCode::NO_CONTENT
+    );
+
     let second = claim_job(&verifier).await;
-    assert_ne!(second.id, first.id);
+    assert_ne!(second.id, lone.id);
     let result = VerifyResult {
         outcome: ResimOutcome::Match,
         build: "second-build".into(),
@@ -283,6 +304,14 @@ async fn verifier_build_belongs_to_its_game() {
         game(&app, single).await,
         ("review".into(), Some(Verdict::Single), None)
     );
+    let evidence: String = sqlx::query_scalar("SELECT evidence_json FROM games WHERE event_id = ?")
+        .bind(single)
+        .fetch_one(&app.state.db)
+        .await
+        .unwrap();
+    let evidence: serde_json::Value = serde_json::from_str(&evidence).unwrap();
+    assert_eq!(evidence["resim"]["build"], "lone-build", "{evidence}");
+    assert_eq!(evidence["resim"]["evidence_only"], true, "{evidence}");
     assert_eq!(
         game(&app, ordinary).await,
         (

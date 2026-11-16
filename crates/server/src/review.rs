@@ -81,6 +81,20 @@ pub(crate) async fn send_to_review(
     detail: Option<&str>,
     journal: &mut Journal,
 ) -> Result<i64, LifecycleError> {
+    send_to_review_reported(conn, event_id, set_id, reason, detail, None, journal).await
+}
+
+/// [`send_to_review`] for a report by a player of the set: `reporter_slot` (0 is the host) is
+/// kept on the queue item, which then names the reporter.
+pub(crate) async fn send_to_review_reported(
+    conn: &mut SqliteConnection,
+    event_id: i64,
+    set_id: SetId,
+    reason: &str,
+    detail: Option<&str>,
+    reporter_slot: Option<u8>,
+    journal: &mut Journal,
+) -> Result<i64, LifecycleError> {
     let moved = sqlx::query(
         "UPDATE sets SET state = 'review', room_code = NULL, updated_at = ?
          WHERE event_id = ? AND set_id = ? AND state = 'ready'",
@@ -95,7 +109,15 @@ pub(crate) async fn send_to_review(
             "set {event_id}/{set_id} is not ready"
         )));
     }
-    open_queue_item(conn, event_id, set_id, None, reason, detail, journal).await
+    let id = open_queue_item(conn, event_id, set_id, None, reason, detail, journal).await?;
+    if reporter_slot.is_some() {
+        sqlx::query("UPDATE queue SET reporter_slot = ? WHERE id = ?")
+            .bind(reporter_slot)
+            .bind(id)
+            .execute(&mut *conn)
+            .await?;
+    }
+    Ok(id)
 }
 
 /// The queue detail of a no-show report: who reported it, and their note cut to
