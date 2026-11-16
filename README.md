@@ -320,7 +320,7 @@ that never counts it. `quarantine get ID SLOT --out FILE` downloads a quarantine
 `award` gives the set to a slot (slot 0 is the set's host), `replay` voids the game so it is
 played again (or, for a no-show, gives the players another try), and `dq` disqualifies the
 player in that slot from the event. A set decided by `award` or a DQ is listed in the event's
-`decided_by` and tagged "awarded" or "DQ" on the bracket page, next to the games played before
+`decided_by` and stamped "Awarded" or "DQ" on the bracket page, next to the games played before
 the decision (or in place of a 0-0 score).
 
 ## Verdicts

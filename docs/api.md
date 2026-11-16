@@ -16,6 +16,7 @@ Contents:
 4. [Routes](#4-routes)
 5. [Types](#5-types)
 6. [What a player's client does](#6-what-a-players-client-does)
+7. [Round names](#7-round-names)
 
 ## 1. Conventions
 
@@ -60,8 +61,8 @@ Contents:
 ## 2. Signing a request
 
 There are no accounts or passwords. A participant is an Ed25519 key pair; the public key is
-their identity. Every route except the public ones (`GET /`, `GET /v1/events`,
-`GET /v1/events/{id}`) must be signed with four headers:
+their identity. Every route except the public ones (`GET /`, `GET /assets/fonts/{file}`,
+`GET /v1/events`, `GET /v1/events/{id}`) must be signed with four headers:
 
 | Header | Value |
 |---|---|
@@ -221,6 +222,7 @@ described above; the tables list the other statuses.
 | Method | Path | Who | Request body | Success | Other statuses |
 |---|---|---|---|---|---|
 | GET | `/` | public | — | 200 HTML bracket page | — |
+| GET | `/assets/fonts/{file}` | public | — | 200 `font/woff2`, one of the page's fonts | 404 |
 | GET | `/v1/events` | public | — | 200 `[EventSummary]` | — |
 | GET | `/v1/events/{id}` | public | — | 200 `EventView` | 400, 404 |
 | POST | `/v1/players` | any key | `RegisterReq` | 201, empty | 400 tag or body; 403 invite missing, unknown or used; 409 key already registered, tag taken |
@@ -663,3 +665,34 @@ A game kept for study (a re-simulation divergence, a conflict), with its evidenc
    organiser's decision shows up as `Play` again (a replay of the game, same `game_no`), or as
    the set being decided. Stop a running game only when `next` offers a different set or the
    player is out of the event.
+
+## 7. Round names
+
+What a round is called on the bracket page and in the in-game bracket menu. The names are
+presentation only: the API carries no round names, and each one is derived from a set's `side`
+and `round` and from the highest `round` of that side in the bracket.
+
+On the winners and losers sides the last rounds are named counting back from the side's last
+round; every earlier round is numbered by its `round`, which starts at 1.
+
+| Side | Round | Name |
+|---|---|---|
+| Winners | last | Winners final |
+| Winners | last − 1 | Winners semis |
+| Winners | last − 2 | Winners quarters |
+| Winners | earlier | Winners round N |
+| Losers | last | Losers final |
+| Losers | last − 1 | Losers semis |
+| Losers | earlier | Losers round N |
+| Grand final | 1 | Grand final |
+| Grand final | 2 | Grand final reset |
+| Single elimination | last | Final |
+| Single elimination | last − 1 | Semis |
+| Single elimination | last − 2 | Quarters |
+| Single elimination | earlier | Round N |
+
+A single-elimination bracket has only winners-side sets and its names carry no side. The grand
+final reset is shown only when it is played, that is when its set is not `Skipped`. A round whose
+sets all hold a `Bye` or are `Skipped` is not shown, and the numbering of the other rounds does
+not change: in a bracket whose losers round 1 is all byes, the first losers round shown is
+"Losers round 2".

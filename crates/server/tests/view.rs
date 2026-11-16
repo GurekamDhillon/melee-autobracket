@@ -25,7 +25,7 @@ async fn root_serves_html() {
     assert!(body.contains("/v1/events"));
     // Sets decided without play are labelled rather than shown as 0-0.
     assert!(body.contains("decided_by"));
-    assert!(body.contains("awarded"));
+    assert!(body.contains("Awarded"));
     // Games counted while the verifier was unavailable are mentioned under the header.
     assert!(body.contains("view.unverified_games"));
     assert!(body.contains("counted without engine verification"));
@@ -113,6 +113,9 @@ async fn page_has_security_headers() {
     ] {
         assert!(csp.contains(directive), "{directive} in {csp}");
     }
+    // Fonts come from this server and nowhere else.
+    assert!(csp.contains("font-src 'self';"), "{csp}");
+    assert!(!csp.contains('*'), "no wildcard: {csp}");
     assert!(!csp.contains("unsafe"), "{csp}");
     assert!(!csp.contains("http"), "no external origins: {csp}");
     let page = res.text().await.unwrap();
@@ -120,6 +123,109 @@ async fn page_has_security_headers() {
         let hash = base64(&Sha256::digest(inline_block(&page, tag).as_bytes()));
         let expected = format!("{directive} 'sha256-{hash}'");
         assert!(csp.contains(&expected), "{expected} in {csp}");
+    }
+}
+
+/// The font files the page's stylesheet asks for, as paths.
+fn font_paths(page: &str) -> Vec<&str> {
+    const PREFIX: &str = "/assets/fonts/";
+    page.match_indices(PREFIX)
+        .map(|(at, _)| {
+            let rest = &page[at..];
+            let end = rest.find(['"', '\'', ')', ' ']).unwrap();
+            &rest[..end]
+        })
+        .collect()
+}
+
+#[tokio::test]
+async fn page_fonts_are_served() {
+    let app = TestApp::spawn(|_| {}).await;
+    let page = fetch_root(&app).await.text().await.unwrap();
+    let paths = font_paths(&page);
+    assert_eq!(paths.len(), 2, "one file per typeface: {paths:?}");
+    for path in paths {
+        let res = reqwest::get(format!("{}{path}", app.url)).await.unwrap();
+        assert_eq!(res.status(), StatusCode::OK, "{path}");
+        let header = |name: &str| res.headers()[name].to_str().unwrap().to_owned();
+        assert_eq!(header("content-type"), "font/woff2", "{path}");
+        assert_eq!(header("x-content-type-options"), "nosniff", "{path}");
+        let cache = header("cache-control");
+        assert!(cache.contains("immutable"), "{path}: {cache}");
+        assert!(cache.contains("max-age=31536000"), "{path}: {cache}");
+        let body = res.bytes().await.unwrap();
+        assert!(body.starts_with(b"wOF2"), "{path} is a WOFF2 file");
+    }
+}
+
+#[tokio::test]
+async fn unknown_font_is_json_404() {
+    let app = TestApp::spawn(|_| {}).await;
+    for name in ["nope.woff2", "README.md", "..%2Fbracket.html"] {
+        let res = reqwest::get(format!("{}/assets/fonts/{name}", app.url))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::NOT_FOUND, "{name}");
+        let ctype = res.headers()["content-type"].to_str().unwrap().to_owned();
+        assert!(ctype.starts_with("application/json"), "{name}: {ctype}");
+        let body: serde_json::Value = res.json().await.unwrap();
+        assert!(body["error"].is_string(), "{name}: {body}");
+    }
+}
+
+/// The round names in `docs/api.md` ("Round names") are the ones the page uses.
+///
+/// This compares text, it does not run the page: for each side, the names the doc lists
+/// counting back from the last round must appear in the page's script as that side's list, in
+/// the same order, and the numbered and grand-final names must appear as written. It proves the
+/// two cannot drift apart in wording or order; it does not prove the script picks the right
+/// entry for a given round.
+#[test]
+fn round_names_match_the_doc() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let doc = std::fs::read_to_string(root.join("../../docs/api.md")).unwrap();
+    let page = std::fs::read_to_string(root.join("assets/bracket.html")).unwrap();
+    let section = doc.split_once("## 7. Round names").unwrap().1;
+    let rows: Vec<[&str; 3]> = section
+        .lines()
+        .filter_map(|line| {
+            let cells: Vec<&str> = line.split('|').map(str::trim).collect();
+            match cells[..] {
+                [_, side, round, name, _] if side != "Side" && !side.starts_with('-') => {
+                    Some([side, round, name])
+                }
+                _ => None,
+            }
+        })
+        .collect();
+    assert_eq!(rows.len(), 13, "{rows:?}");
+
+    for (side, key) in [
+        ("Winners", "Winners"),
+        ("Losers", "Losers"),
+        ("Single elimination", "Single"),
+    ] {
+        // "last", "last − 1", … in the order the doc gives them.
+        let named: Vec<String> = rows
+            .iter()
+            .filter(|[s, round, _]| *s == side && round.starts_with("last"))
+            .map(|[_, _, name]| format!("\"{name}\""))
+            .collect();
+        let list = format!("{key}: [{}],", named.join(", "));
+        assert!(page.contains(&list), "the page has `{list}`");
+        // The numbered rounds: "Winners round N" is built as "Winners round " + round.
+        let [_, _, numbered] = rows
+            .iter()
+            .find(|[s, round, _]| *s == side && *round == "earlier")
+            .unwrap();
+        let stem = format!("\"{} \"", numbered.strip_suffix(" N").unwrap());
+        assert!(page.contains(&stem), "the page has {stem}");
+    }
+    for [_, _, name] in rows.iter().filter(|[s, _, _]| *s == "Grand final") {
+        assert!(
+            page.contains(&format!("\"{name}\"")),
+            "the page has {name:?}"
+        );
     }
 }
 
@@ -171,7 +277,7 @@ async fn documented_routes_exist() {
     assert!(seen >= 21, "parsed {seen} routes from the table");
 }
 
-/// Falling back to "no events" also removes the "counted without engine verification" line
+/// Falling back to "no events" also hides the "counted without engine verification" line
 /// an earlier event's view put under the header.
 #[tokio::test]
 async fn no_events_view_removes_the_unverified_line() {
@@ -185,6 +291,10 @@ async fn no_events_view_removes_the_unverified_line() {
             .find("\n  }\n")
             .expect("end of renderNoEvents");
     let func = &body[start..end];
-    assert!(func.contains(r#"$("unverified")"#), "{func}");
-    assert!(func.contains(".remove()"), "{func}");
+    // setNotice with empty text clears the line and hides it.
+    assert!(func.contains(r#"setNotice("unverified", "")"#), "{func}");
+    assert!(
+        body.contains("s.hidden = !text;"),
+        "setNotice hides empty notices"
+    );
 }

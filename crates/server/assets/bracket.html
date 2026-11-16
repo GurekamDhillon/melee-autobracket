@@ -3,193 +3,501 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<meta name="color-scheme" content="light dark">
+<meta name="color-scheme" content="dark light">
 <title>Bracket</title>
 <link rel="icon" href="data:,">
 <style>
-  :root {
-    --bg: #f5f5f3;
-    --surface: #ffffff;
-    --text: #1c1d1f;
-    --muted: #6a6e75;
-    --faint: #a3a6ab;
-    --line: #dadad6;
-    --accent: #2853b8;
-    --live: #b94a0c;
-    --live-bg: #fbeee5;
-    --notice-bg: #f0efe9;
-    --card-w: 11.5rem;
+  /* Fonts: served by this server; fonts/README.md beside this file says where they come from. The text face is
+     Source Sans 3 700, subset and therefore renamed (its licence reserves the name). */
+  @font-face {
+    font-family: "Bricolage Grotesque";
+    src: url("/assets/fonts/bricolage-grotesque-800.woff2") format("woff2");
+    font-weight: 800;
+    font-style: normal;
+    font-display: swap;
   }
-  @media (prefers-color-scheme: dark) {
-    :root {
-      --bg: #131416;
-      --surface: #1c1e21;
-      --text: #e7e7e5;
-      --muted: #9a9ea5;
-      --faint: #62666d;
-      --line: #2e3136;
-      --accent: #86a8f0;
-      --live: #f08a4b;
-      --live-bg: #3a2418;
-      --notice-bg: #202226;
+  @font-face {
+    font-family: "Autobracket Text";
+    src: url("/assets/fonts/autobracket-text-700.woff2") format("woff2");
+    font-weight: 700;
+    font-style: normal;
+    font-display: swap;
+  }
+
+  /* ---- Envoy "Party pack" tokens, copied from design/envoy/tokens.css. Rules below use them by
+     name only, so a change to the kit's values is an edit to this block. ---- */
+  :root {
+    --envoy-sunny: #FFD84A;        /* cursor, hovered sticker, ready, highlights */
+    --envoy-ink: #2A1A6E;          /* grape ink: every outline, hard shadow, text on white */
+    --envoy-white: #FFFFFF;        /* sticker faces */
+    --envoy-coral: #FF4D6D;        /* Player 1, warnings, stamps */
+    --envoy-lagoon: #00A99D;       /* Player 2 */
+    --envoy-lilac: #5A4C99;        /* quiet text on white */
+    --envoy-lilac-pale: #C9BFF5;   /* quiet text on ink or violet */
+    --envoy-coral-deep: #C2183F;   /* cannot-pay / error text */
+    --envoy-faded: #DAD7E8;        /* done, locked */
+    --envoy-cream: #FBF6DD;        /* dashed empty seat */
+    --envoy-violet: #4C3D9E;       /* scene base (scenery only, no outline) */
+    --envoy-violet-d: #33257C;     /* scene ground */
+
+    /* semantic aliases (dark = the game) */
+    --bg: var(--envoy-violet);
+    --bg-ground: var(--envoy-violet-d);
+    --surface: var(--envoy-white);       /* sticker face */
+    --on-surface: var(--envoy-ink);
+    --on-surface-quiet: var(--envoy-lilac);
+    --on-bg: var(--envoy-white);
+    --on-bg-quiet: var(--envoy-lilac-pale);
+    --outline: var(--envoy-ink);
+    --accent: var(--envoy-sunny);        /* hover / focus / current */
+    --p1: var(--envoy-coral);
+    --p2: var(--envoy-lagoon);
+    --danger: var(--envoy-coral-deep);
+
+    /* shape */
+    --edge: 3px;                         /* sticker outline (2.5 pills, 2 name tags) */
+    --radius: 12px;                      /* general; 10 list rows; 9-11 pills */
+    --radius-row: 10px;
+    --shadow: 3px 4px 0 var(--envoy-ink);        /* hard, no blur */
+    --shadow-hover: 4px 6px 0 var(--envoy-ink);
+    --ring-hover: 0 0 0 3px var(--envoy-white);  /* hovered sticker: white ring outside edge */
+
+    /* type */
+    --font-display: "Bricolage Grotesque", "Autobracket Text", "Source Sans 3", system-ui, sans-serif; /* 800, -0.02em */
+    --font-text: "Autobracket Text", "Source Sans 3", system-ui, sans-serif;                            /* 700 */
+
+    /* spacing rhythm */
+    --sp-1: 4px; --sp-2: 8px; --sp-3: 12px; --sp-4: 16px; --sp-5: 24px;
+    --stagger: 2;                        /* frames between list items (3 for cards) */
+
+    /* motion: 60 fps frames in ms */
+    --m-hover: 67ms;
+    --m-enter: 150ms;      /* scale .85 -> 1.04 -> 1, opacity 0 -> 1 */
+    --m-burst: 117ms;      /* scale 0 -> 1.2 -> 1 */
+    --ease: cubic-bezier(.22, 1, .36, 1);
+
+    /* ---- this page's own, derived from the above ---- */
+    --frame: 16.67ms;
+    --edge-pill: 2.5px;
+    --hill: color-mix(in srgb, var(--bg) 90%, var(--envoy-white));  /* scenery, one step lighter */
+    --focus: var(--envoy-white);         /* keyboard focus ring */
+    --title-edge: 5px;                   /* ink edge round the white title */
+    --title-drop: 3px;
+    --set-w: 13rem;
+    color-scheme: dark;
+  }
+  /* DERIVED LIGHT VARIANT (from tokens.css; not in the game): paper page, same ink and accent. */
+  @media (prefers-color-scheme: light) {
+    :root:not([data-theme="dark"]) {
+      --bg: #F3F0FF; --bg-ground: #E6E1FA;
+      --on-bg: var(--envoy-ink); --on-bg-quiet: var(--envoy-lilac);
+      --surface: #FFFFFF; --on-surface: var(--envoy-ink);
+      --shadow: 3px 4px 0 var(--envoy-ink);
+      --hill: var(--bg-ground);
+      --focus: var(--envoy-ink);
+      --title-edge: 0px;
+      --title-drop: 0px;
+      color-scheme: light;
     }
   }
 
   * { box-sizing: border-box; }
+  [hidden] { display: none !important; }
   html { -webkit-text-size-adjust: 100%; }
   body {
     margin: 0;
-    padding: 1.25rem 1rem 2rem;
+    min-height: 100vh;
+    padding: var(--sp-5) var(--sp-5) 5rem;
     background: var(--bg);
-    color: var(--text);
-    font: 15px/1.4 system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+    color: var(--on-bg);
+    font: 700 1rem/1.35 var(--font-text);
     overflow-wrap: anywhere;
+    overflow-x: clip;
   }
-  .wrap { max-width: 100%; }
+  h1, h2, .score, .champ-tag, .stamp.big {
+    font-family: var(--font-display);
+    font-weight: 800;
+    letter-spacing: -0.02em;
+  }
+  .sr { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+  .defs { position: absolute; }
 
+  /* ---- scene: flat violet, a lighter hill behind, a darker one rising from the ground ---- */
+  .scene { position: fixed; inset: 0; z-index: -1; overflow: hidden; pointer-events: none; }
+  .scene::before, .scene::after { content: ""; position: absolute; border-radius: 50%; }
+  .scene::before { width: 78vw; height: 78vw; right: -18vw; top: 22vh; background: var(--hill); }
+  .scene::after { width: 90vw; height: 60vw; left: -30vw; bottom: -48vw; background: var(--bg-ground); }
+  footer {
+    position: fixed;
+    left: 0; right: 0; bottom: 0;
+    padding: var(--sp-3) var(--sp-5);
+    background: var(--bg-ground);
+    color: var(--on-bg-quiet);
+    font-size: 0.8125rem;
+  }
+
+  /* ---- header ---- */
   header.top {
     display: flex;
     flex-wrap: wrap;
     align-items: flex-end;
     justify-content: space-between;
-    gap: 0.75rem 1.5rem;
-    margin-bottom: 1rem;
+    gap: var(--sp-3) var(--sp-5);
+    margin-bottom: var(--sp-4);
   }
-  h1 { margin: 0; font-size: 1.4rem; font-weight: 650; letter-spacing: -0.01em; }
-  .meta { margin: 0.2rem 0 0; color: var(--muted); font-size: 0.875rem; }
-  .meta .champion { color: var(--text); font-weight: 600; }
-  label.pick { display: flex; align-items: center; gap: 0.5rem; color: var(--muted); font-size: 0.875rem; }
+  h1 {
+    margin: 0;
+    font-size: 2.25rem;
+    line-height: 1.1;
+    -webkit-text-stroke: var(--title-edge) var(--outline);
+    paint-order: stroke fill;
+    text-shadow: 0 var(--title-drop) 0 var(--outline);
+  }
+  .meta { margin: var(--sp-1) 0 0; color: var(--on-bg-quiet); font-size: 0.9375rem; }
+  .meta .champion { color: var(--on-bg); }
+
+  label.pick { display: flex; align-items: center; gap: var(--sp-2); color: var(--on-bg-quiet); font-size: 0.9375rem; max-width: 100%; }
+  .pick-box { position: relative; display: inline-block; min-width: 0; }
+  .pick-box::after {
+    content: "";
+    position: absolute;
+    right: 0.85rem; top: 50%;
+    border: 0.4rem solid transparent;
+    border-top-color: var(--outline);
+    border-bottom-width: 0;
+    translate: 0 -40%;
+    pointer-events: none;
+  }
   select {
+    appearance: none;
+    display: block;
+    max-width: min(24rem, 100%);
+    padding: 0.35rem 2.3rem 0.35rem 0.75rem;
     font: inherit;
-    color: var(--text);
+    color: var(--on-surface);
     background: var(--surface);
-    border: 1px solid var(--line);
-    border-radius: 6px;
-    padding: 0.3rem 0.5rem;
-    max-width: min(22rem, 100%);
+    border: var(--edge-pill) solid var(--outline);
+    border-radius: var(--radius-row);
+    box-shadow: var(--shadow);
+    text-overflow: ellipsis;
+    cursor: pointer;
+  }
+  select:hover { background: var(--accent); }
+  select:focus-visible, .board:focus-visible { outline: 3px solid var(--focus); outline-offset: 3px; }
+  /* Where the browser lets a real <select> be styled, its open list is kit list rows. */
+  @supports (appearance: base-select) {
+    select, ::picker(select) { appearance: base-select; }
+    select::picker-icon { display: none; }
+    ::picker(select) {
+      margin-top: var(--sp-2);
+      padding: var(--sp-1) var(--sp-4) var(--sp-2) var(--sp-1);
+      background: transparent;
+      border: 0;
+    }
+    option {
+      margin-bottom: 6px;
+      padding: 0.3rem 0.75rem;
+      color: var(--on-surface);
+      background: var(--surface);
+      border: var(--edge-pill) solid var(--outline);
+      border-radius: var(--radius-row);
+      box-shadow: var(--shadow);
+      transition: translate var(--m-hover) var(--ease);
+    }
+    option:nth-child(odd) { rotate: -0.5deg; }
+    option:nth-child(even) { rotate: 0.5deg; }
+    option:hover, option:focus-visible {
+      background: var(--accent);
+      rotate: 0deg;
+      translate: 10px 0;
+      outline: none;
+    }
+    option::checkmark { order: 1; margin-left: auto; }
   }
 
-  .status {
-    margin: 0 0 1rem;
-    padding: 0.5rem 0.75rem;
-    border-radius: 6px;
-    background: var(--notice-bg);
-    color: var(--muted);
-    font-size: 0.875rem;
+  /* ---- notices: one sentence on a sticker, like the kit's description strip ---- */
+  .notice {
+    width: fit-content;
+    max-width: 100%;
+    margin: 0 0 var(--sp-4);
+    padding: 0.3rem 0.8rem;
+    background: var(--surface);
+    color: var(--on-surface);
+    border: var(--edge) solid var(--outline);
+    border-radius: var(--radius-row);
+    box-shadow: var(--shadow);
+    font-size: 0.9375rem;
+    rotate: -0.6deg;
+  }
+  .notice.warn { color: var(--danger); border-color: var(--p1); }
+
+  /* ---- the run strip: one mark per round ---- */
+  .strip {
+    position: relative;
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--sp-2) 4.5rem;
+    margin: 0 0 var(--sp-5);
+    padding: 0.4rem 1.1rem 0.65rem;
+    background: var(--accent);
+    color: var(--on-surface);
+    border: var(--edge) solid var(--outline);
+    border-radius: var(--radius);
+    box-shadow: var(--shadow);
+  }
+  .grp-name { display: block; margin-bottom: 0.2rem; color: var(--on-surface-quiet); font-size: 0.8125rem; }
+  .marks { display: flex; align-items: center; gap: 0.6rem; min-height: 1.75rem; }
+  .mark { display: block; flex: none; width: 1.25rem; height: 1.25rem; border-radius: 50%; }
+  .mark.disc { background: var(--envoy-white); border: var(--edge) solid var(--outline); }
+  .mark.disc.done { background: var(--outline); }
+  .mark.now { margin: 0 5px; box-shadow: 0 0 0 2.5px var(--accent), 0 0 0 5px var(--outline); }
+  .mark.disc.now { background: var(--p1); border-width: var(--edge-pill); }
+  .mark.star { width: 2rem; height: 2rem; }
+  .mark.star svg {
+    display: block;
+    width: 100%; height: 100%;
+    overflow: visible;
+    fill: var(--envoy-white);
+    stroke: var(--outline);
+    stroke-width: 2.5;
+    stroke-linejoin: round;
+  }
+  .mark.star.done svg { fill: var(--outline); }
+  .mark.star.now svg { fill: var(--p1); }
+
+  /* ---- stamps and flags ---- */
+  .stamp, .flag {
+    position: absolute;
+    top: -0.95rem; right: 0.6rem;
+    padding: 0 0.45rem;
+    border-radius: 8px;
+    font-size: 0.75rem;
+    line-height: 1.25rem;
+    white-space: nowrap;
+  }
+  .stamp { right: 2.9rem; background: var(--envoy-white); color: var(--danger); border: var(--edge-pill) solid var(--p1); rotate: -5deg; }
+  .flag { background: var(--outline); color: var(--envoy-white); border: 2px solid var(--envoy-white); border-radius: 10px; }
+  /* Large display text, so the kit's coral on white holds (3.2:1, large-text floor 3:1). */
+  .stamp.big {
+    top: 50%; right: 1.25rem;
+    padding: 0.1rem 0.8rem;
+    color: var(--p1);
+    border-width: var(--edge);
+    border-radius: var(--radius-row);
+    font-size: 1.375rem;
+    line-height: 1.4;
+    translate: 0 -50%;
+    rotate: -7deg;
   }
 
-  .board { overflow-x: auto; padding-bottom: 0.75rem; }
+  /* ---- bracket ---- */
+  .board { overflow-x: auto; margin: 0 -0.75rem; padding: var(--sp-1) 0.75rem var(--sp-5); scrollbar-color: var(--on-bg-quiet) transparent; }
   .bracket {
     display: grid;
     grid-template-columns: max-content max-content;
-    grid-template-areas: "w f" "l f";
-    gap: 2.25rem 2rem;
+    grid-template-areas: "w f" "l l";
+    gap: 2.5rem 2rem;
     width: max-content;
   }
-  .side { display: flex; gap: 1.25rem; }
+  .side { display: flex; gap: 1.75rem; }
   .side.winners { grid-area: w; }
-  .side.losers { grid-area: l; padding-top: 1.25rem; border-top: 1px solid var(--line); }
-  .side.final { grid-area: f; align-self: center; }
+  .side.losers { grid-area: l; }
+  .side.final { grid-area: f; }
 
-  .round { display: flex; flex-direction: column; width: var(--card-w); }
-  .round h2 {
-    margin: 0 0 0.6rem;
-    font-size: 0.75rem;
-    font-weight: 600;
-    text-transform: uppercase;
-    letter-spacing: 0.06em;
-    color: var(--muted);
-  }
-  .sets { flex: 1; display: flex; flex-direction: column; justify-content: space-around; gap: 0.75rem; }
+  .round { display: flex; flex-direction: column; width: var(--set-w); }
+  h2 { margin: 0 0 var(--sp-4); font-size: 1.125rem; line-height: 1.2; white-space: nowrap; }
+  .sets { flex: 1; display: flex; flex-direction: column; justify-content: space-around; gap: 1.1rem; margin: 0; padding: 0; list-style: none; }
   .spacer { visibility: hidden; }
 
   .set {
     position: relative;
+    min-height: 4.5rem;
+    padding: 0.3rem 0.65rem 0.3rem 0.4rem;
     background: var(--surface);
-    border: 1px solid var(--line);
-    border-radius: 6px;
+    color: var(--on-surface);
+    border: var(--edge) solid var(--outline);
+    border-radius: var(--radius);
+    box-shadow: var(--shadow);
+    transition: rotate var(--m-hover) var(--ease), translate var(--m-hover) var(--ease), box-shadow var(--m-hover) var(--ease);
   }
-  .set.live { border-color: var(--live); }
-  .badge {
-    position: absolute;
-    top: -0.55rem;
-    right: 0.5rem;
-    padding: 0 0.35rem;
-    border-radius: 4px;
-    background: var(--live-bg);
-    color: var(--live);
-    font-size: 0.65rem;
-    font-weight: 700;
-    letter-spacing: 0.08em;
-    text-transform: uppercase;
-    line-height: 1.1rem;
+  /* Idle tilt: under 1.3 degrees, sign alternating down a column. */
+  .tl1 { rotate: -1.1deg; }
+  .tl2 { rotate: -0.6deg; }
+  .tr1 { rotate: 0.7deg; }
+  .tr2 { rotate: 1.2deg; }
+  .set:hover { rotate: 0deg; translate: 0 -4px; box-shadow: var(--shadow-hover); }
+  /* A live set rests in the kit's hovered look. */
+  .set.live, .set.live:hover {
+    background: var(--accent);
+    rotate: 0deg;
+    box-shadow: var(--ring-hover), 4px 6px 0 3px var(--outline);
   }
+  /* Nobody is known yet: the kit's dashed seat. */
+  .set.seat, .set.seat:hover {
+    display: grid;
+    place-items: center;
+    background: var(--envoy-cream);
+    color: var(--on-surface-quiet);
+    border-style: dashed;
+    box-shadow: none;
+    rotate: 0deg;
+    translate: none;
+    font-size: 0.875rem;
+  }
+
   .row {
     display: grid;
-    grid-template-columns: 1.6rem 1fr auto 0.8rem;
+    grid-template-columns: 1.4rem minmax(0, 1fr) auto;
     align-items: center;
-    gap: 0.25rem;
-    padding: 0.3rem 0.45rem;
-    min-height: 1.9rem;
+    column-gap: 0.4rem;
+    min-height: 1.875rem;
   }
-  .row + .row { border-top: 1px solid var(--line); }
-  .seed { color: var(--faint); font-size: 0.75rem; font-variant-numeric: tabular-nums; }
-  .tag { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; overflow-wrap: normal; }
-  .score { font-variant-numeric: tabular-nums; color: var(--muted); min-width: 1ch; text-align: right; }
-  .mark { color: var(--accent); font-size: 0.75rem; text-align: right; }
-  .decided {
-    padding: 0 0.3rem;
-    border: 1px solid var(--line);
-    border-radius: 4px;
-    color: var(--muted);
-    font-size: 0.65rem;
-    font-weight: 600;
-    letter-spacing: 0.04em;
-    text-transform: uppercase;
-    line-height: 1.05rem;
+  .seed { color: var(--on-surface-quiet); font-size: 0.75rem; text-align: right; font-variant-numeric: tabular-nums; }
+  .tag { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; overflow-wrap: normal; font-size: 0.9375rem; }
+  .score { display: flex; align-items: center; gap: 0.4rem; font-size: 1.1875rem; line-height: 1; font-variant-numeric: tabular-nums; }
+  .tick {
+    width: 0.4rem; height: 0.75rem;
+    margin: 0 0.1rem 0.2rem;
+    border: solid var(--outline);
+    border-width: 0 3px 3px 0;
+    rotate: 45deg;
   }
-  .row.win .tag { font-weight: 650; }
-  .row.win .score { color: var(--accent); font-weight: 650; }
-  .row.lose .tag { color: var(--muted); }
-  .row.empty .tag { color: var(--faint); font-style: italic; }
+  /* The one who lost goes quiet. The kit fades "others" to 36%, which text cannot take (2.2:1),
+     so the row takes the kit's quiet colour instead (7.2:1 on white). */
+  .row.lose .tag, .row.lose .score { color: var(--on-surface-quiet); }
+  .waiting {
+    justify-self: start;
+    padding: 0 0.5rem;
+    background: var(--envoy-cream);
+    color: var(--on-surface-quiet);
+    border: 2px dashed var(--outline);
+    border-radius: 9px;
+    font-size: 0.75rem;
+    line-height: 1.2rem;
+  }
 
-  .note { color: var(--muted); margin: 0.25rem 0 1rem; }
+  /* ---- champion: the kit's 16-point burst, tilted 8 degrees ---- */
+  .champ { position: relative; flex: none; align-self: center; width: 11rem; height: 11rem; margin: 0 var(--sp-2); rotate: 8deg; color: var(--on-surface); }
+  .champ svg {
+    position: absolute; inset: 0;
+    width: 100%; height: 100%;
+    overflow: visible;
+    fill: var(--accent);
+    stroke: var(--outline);
+    stroke-width: 3.5px;
+    stroke-linejoin: round;
+    vector-effect: non-scaling-stroke;
+    filter: drop-shadow(3px 4px 0 var(--outline));
+  }
+  .champ-text {
+    position: absolute; inset: 0;
+    display: flex; flex-direction: column; align-items: center; justify-content: center;
+    padding: 0 1.9rem;
+    text-align: center;
+  }
+  .champ-label { color: var(--on-surface-quiet); font-size: 0.8125rem; }
+  .champ-tag { max-width: 100%; font-size: 1.375rem; line-height: 1.05; }
+  .champ-tag.long { font-size: 1rem; }
+
+  /* ---- sign-up: entrants as list rows ---- */
+  .signup h2 { white-space: normal; }
   ol.entrants {
-    margin: 0;
-    padding-left: 2rem;
-    columns: 12rem auto;
-    column-gap: 2rem;
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(min(15rem, 100%), 1fr));
+    gap: var(--sp-3) var(--sp-5);
+    max-width: 68rem;
+    margin: 0 0 var(--sp-5);
+    padding: 0;
+    list-style: none;
   }
-  ol.entrants li { padding: 0.1rem 0; }
+  ol.entrants.few { grid-template-columns: min(17rem, 100%); }
+  .entrant {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    align-items: center;
+    gap: var(--sp-2);
+    min-height: 2rem;
+    padding: 0.15rem 0.75rem;
+    background: var(--surface);
+    color: var(--on-surface);
+    border: var(--edge) solid var(--outline);
+    border-radius: var(--radius-row);
+    box-shadow: var(--shadow);
+  }
+  .entrant .seed { text-align: left; }
 
-  footer { margin-top: 1.25rem; color: var(--muted); font-size: 0.8rem; }
-  .sr { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+  /* ---- motion: one entrance, on the first drawing of an event only ---- */
+  @keyframes sticker-in {
+    0% { opacity: 0; scale: 0.85; }
+    67% { opacity: 1; scale: 1.04; }
+    100% { opacity: 1; scale: 1; }
+  }
+  @keyframes burst-in {
+    0% { opacity: 0; scale: 0; }
+    57% { opacity: 1; scale: 1.2; }
+    100% { opacity: 1; scale: 1; }
+  }
+  .enter .strip, .enter .set, .enter .entrant {
+    animation: sticker-in var(--m-enter) var(--ease) both;
+    animation-delay: calc(var(--i, 0) * 3 * var(--frame));
+  }
+  .enter .entrant { animation-delay: calc(var(--i, 0) * var(--stagger) * var(--frame)); }
+  .enter .champ { animation: burst-in var(--m-burst) var(--ease) both; animation-delay: calc(13 * 3 * var(--frame)); }
+  .c1 { --i: 1; } .c2 { --i: 2; } .c3 { --i: 3; } .c4 { --i: 4; } .c5 { --i: 5; } .c6 { --i: 6; }
+  .c7 { --i: 7; } .c8 { --i: 8; } .c9 { --i: 9; } .c10 { --i: 10; } .c11 { --i: 11; } .c12 { --i: 12; }
+  @media (prefers-reduced-motion: reduce) {
+    *, *::before, *::after { animation: none !important; transition: none !important; }
+    .set:hover { translate: none; }
+    option:hover, option:focus-visible { translate: none; }
+  }
+
+  @media (max-width: 40rem) {
+    body { padding: var(--sp-4) var(--sp-4) 4.5rem; }
+    h1 { font-size: 1.75rem; }
+    footer { padding: var(--sp-2) var(--sp-4); }
+    .strip { gap: var(--sp-2) 1.5rem; padding-inline: 0.8rem; }
+    .stamp.big { top: auto; bottom: -1rem; right: 0.6rem; translate: none; font-size: 1.1875rem; }
+    .scene::before { width: 150vw; height: 150vw; right: -70vw; top: 30vh; }
+    .scene::after { width: 160vw; height: 100vw; left: -60vw; bottom: -80vw; }
+  }
 </style>
 </head>
 <body>
-<div class="wrap">
+<svg class="defs" width="0" height="0" aria-hidden="true" focusable="false">
+  <symbol id="i-star" viewBox="0 0 24 24"><polygon points="12.0,2.6 14.6,9.0 21.5,9.5 16.2,14.0 17.9,20.7 12.0,17.0 6.1,20.7 7.8,14.0 2.5,9.5 9.4,9.0"/></symbol>
+  <symbol id="i-burst" viewBox="0 0 100 100"><polygon points="50.0,3.0 57.4,12.7 68.0,6.6 71.1,18.4 83.2,16.8 81.6,28.9 93.4,32.0 87.3,42.6 97.0,50.0 87.3,57.4 93.4,68.0 81.6,71.1 83.2,83.2 71.1,81.6 68.0,93.4 57.4,87.3 50.0,97.0 42.6,87.3 32.0,93.4 28.9,81.6 16.8,83.2 18.4,71.1 6.6,68.0 12.7,57.4 3.0,50.0 12.7,42.6 6.6,32.0 18.4,28.9 16.8,16.8 28.9,18.4 32.0,6.6 42.6,12.7"/></symbol>
+</svg>
+<template id="t-star"><svg aria-hidden="true" focusable="false"><use href="#i-star"/></svg></template>
+<template id="t-burst"><svg aria-hidden="true" focusable="false"><use href="#i-burst"/></svg></template>
+<div class="scene" aria-hidden="true"></div>
+<div class="wrap" id="wrap">
   <header class="top">
     <div>
       <h1 id="title">Bracket</h1>
       <p class="meta" id="meta"></p>
     </div>
     <label class="pick" hidden id="pick-label">Event
-      <select id="picker"></select>
+      <span class="pick-box"><select id="picker"></select></span>
     </label>
   </header>
-  <p class="status" id="status" role="status" hidden></p>
+  <p class="notice warn" id="unverified" hidden></p>
+  <p class="notice" id="status" role="status" hidden></p>
+  <div id="strip"></div>
   <main id="board" class="board"></main>
-  <footer>Last updated <time id="updated">never</time> &middot; refreshes every 10 seconds</footer>
 </div>
+<footer>Last updated <time id="updated">never</time> &middot; refreshes every 10 seconds</footer>
 <script>
 "use strict";
 (function () {
   const POLL_MS = 10000;
-  const STATE_LABEL = { signup: "Signups open", running: "In progress", complete: "Complete" };
+  const STATE_LABEL = { signup: "Sign-ups open", running: "In progress", complete: "Complete" };
+  const FORMAT_LABEL = { SingleElim: "single elimination", DoubleElim: "double elimination" };
 
   const $ = (id) => document.getElementById(id);
   const picker = $("picker");
   let pickerKey = "";
+  let drawnKey = "";
+  let enteredFor = "";
   let timer = null;
   let seq = 0;
 
@@ -198,6 +506,12 @@
     if (cls) e.className = cls;
     if (text !== undefined && text !== null) e.textContent = String(text);
     return e;
+  }
+
+  // One of the page's own drawings, copied from its <template> (a fixed name, never data).
+  function icon(name) {
+    const from = $(name === "burst" ? "t-burst" : "t-star");
+    return from.content.firstElementChild.cloneNode(true);
   }
 
   async function getJson(path) {
@@ -211,8 +525,8 @@
     return m ? Number(m[1]) : null;
   }
 
-  function setStatus(text) {
-    const s = $("status");
+  function setNotice(id, text) {
+    const s = $(id);
     s.textContent = text;
     s.hidden = !text;
   }
@@ -247,81 +561,127 @@
     return set.state === "Skipped" || set.slots.some((s) => s === "Bye");
   }
 
-  function roundLabel(side, round, last, format) {
-    if (side === "GrandFinal") return round === 1 ? "Grand final" : "Reset";
-    if (format === "SingleElim") {
-      if (round === last) return "Final";
-      if (round === last - 1) return "Semifinals";
-      return "Round " + round;
-    }
-    const name = side === "Winners" ? "Winners" : "Losers";
-    if (round === last) return name + " final";
-    if (side === "Winners" && round === last - 1) return "Winners semis";
-    return name + " " + round;
+  // Round names (docs/api.md, "Round names"): each list counts back from the side's last round.
+  const ROUND_NAMES = {
+    Winners: ["Winners final", "Winners semis", "Winners quarters"],
+    Losers: ["Losers final", "Losers semis"],
+    Single: ["Final", "Semis", "Quarters"],
+  };
+
+  function roundName(side, round, last, format) {
+    if (side === "GrandFinal") return round === 1 ? "Grand final" : "Grand final reset";
+    if (format === "SingleElim") return ROUND_NAMES.Single[last - round] || "Round " + round;
+    const fromEnd = ROUND_NAMES[side][last - round];
+    return fromEnd || (side === "Winners" ? "Winners round " : "Losers round ") + round;
   }
 
-  // How a set decided without play is labelled in place of its score.
-  const DECIDED_LABEL = { award: "awarded", dq: "DQ", "double-dq": "DQ" };
+  // Idle tilt of the j-th sticker of a column: the sign alternates down the column, the
+  // amount comes from the set's id, so a refresh never changes it.
+  function tiltClass(j, id) {
+    const big = id % 2 === 0;
+    if (j % 2 === 0) return big ? "tl1" : "tl2";
+    return big ? "tr2" : "tr1";
+  }
+
+  // The rounds of one side that have something to draw, in order, each with its name and
+  // where it stands: "done" (every set decided), "now" (a set is ready to play) or "todo".
+  function sideRounds(bracket, side) {
+    const byRound = new Map();
+    for (const s of bracket.sets) {
+      if (s.side !== side) continue;
+      if (!byRound.has(s.round)) byRound.set(s.round, []);
+      byRound.get(s.round).push(s);
+    }
+    const nums = [...byRound.keys()].sort((a, b) => a - b);
+    const last = nums.length ? nums[nums.length - 1] : 0;
+    const out = [];
+    for (const r of nums) {
+      const sets = byRound.get(r).sort((a, b) => a.id - b.id);
+      const shown = sets.filter((s) => !isHidden(s));
+      if (!shown.length) continue;
+      let status = "todo";
+      if (shown.every((s) => doneWinner(s.state) !== null)) status = "done";
+      else if (shown.some((s) => s.state === "Ready")) status = "now";
+      const isFinal = side === "GrandFinal" || (bracket.format === "SingleElim" && r === last);
+      out.push({ name: roundName(side, r, last, bracket.format), sets, status, star: isFinal });
+    }
+    return out;
+  }
+
+  // How a set decided without play is stamped.
+  const DECIDED_LABEL = { award: "Awarded", dq: "DQ", "double-dq": "DQ" };
+
+  // What a set's row shows as its score: games played before an award or DQ still show; a
+  // bare 0-0 gives way to the stamp.
+  function scoreText(idx, set, score, decided) {
+    const winner = doneWinner(set.state);
+    const played = Array.isArray(score) && (score[0] > 0 || score[1] > 0);
+    if (played || (score && !decided)) return String(score[idx]);
+    if (!decided && winner !== null) return winner === idx ? "W" : "";
+    return "";
+  }
 
   function slotRow(slot, idx, set, score, decided, tagOf) {
     const entrant = slotEntrant(slot);
     const winner = doneWinner(set.state);
     let cls = "row";
-    if (entrant === null) cls += " empty";
-    else if (winner !== null) cls += winner === idx ? " win" : " lose";
+    if (winner !== null && entrant !== null) cls += winner === idx ? " win" : " lose";
     const row = el("div", cls);
     row.append(el("span", "seed", entrant === null ? "" : entrant + 1));
-    row.append(el("span", "tag", entrant === null ? "TBD" : tagOf(entrant)));
-    // Games played before an award or DQ still show; a bare 0-0 gives way to the tag.
-    const played = Array.isArray(score) && (score[0] > 0 || score[1] > 0);
-    let scoreText = "";
-    if (played || (score && !decided)) scoreText = score[idx];
-    else if (!decided && winner !== null) scoreText = winner === idx ? "W" : "";
-    const scoreCell = el("span", "score", scoreText);
-    if (decided && winner === idx) {
-      if (played) scoreCell.append(" ");
-      scoreCell.append(el("span", "decided", DECIDED_LABEL[decided] || decided));
+    if (entrant === null) {
+      row.append(el("span", "waiting", "Waiting"));
+      return row;
     }
-    row.append(scoreCell);
-    const mark = el("span", "mark", winner === idx ? "◂" : "");
-    if (winner === idx) mark.append(el("span", "sr", " winner"));
-    row.append(mark);
+    row.append(el("span", "tag", tagOf(entrant)));
+    const cell = el("span", "score");
+    if (winner === idx) cell.append(el("span", "tick"));
+    cell.append(scoreText(idx, set, score, decided));
+    row.append(cell);
     return row;
   }
 
-  function setCard(set, scores, decidedBy, tagOf) {
-    if (isHidden(set)) return el("div", "set spacer");
-    const live = set.state === "Ready";
-    const card = el("div", live ? "set live" : "set");
-    if (live) card.append(el("span", "badge", "Live"));
-    const score = scores.get(set.id);
-    const decided = decidedBy.get(set.id);
-    card.append(slotRow(set.slots[0], 0, set, score, decided, tagOf));
-    card.append(slotRow(set.slots[1], 1, set, score, decided, tagOf));
-    return card;
+  // The set in words, for a screen reader: "mango 2, zain 0, mango won".
+  function setWords(set, score, decided, tagOf) {
+    const names = set.slots.map((s) => (slotEntrant(s) === null ? null : tagOf(slotEntrant(s))));
+    if (names[0] === null && names[1] === null) return "Waiting for both players";
+    const parts = names.map((n, i) => {
+      if (n === null) return "waiting for an opponent";
+      const sc = scoreText(i, set, score, decided);
+      return sc === "" || sc === "W" ? n : n + " " + sc;
+    });
+    const winner = doneWinner(set.state);
+    if (winner !== null && names[winner] !== null) parts.push(names[winner] + " won");
+    if (decided) parts.push(DECIDED_LABEL[decided] || decided);
+    if (set.state === "Ready") parts.push("live");
+    return parts.join(", ");
   }
 
-  function sideColumns(sets, side, format, scores, decidedBy, tagOf) {
-    const byRound = new Map();
-    for (const s of sets) {
-      if (s.side !== side) continue;
-      if (!byRound.has(s.round)) byRound.set(s.round, []);
-      byRound.get(s.round).push(s);
+  function setCard(set, j, scores, decidedBy, tagOf) {
+    if (isHidden(set)) {
+      const gap = el("li", "set spacer");
+      gap.setAttribute("aria-hidden", "true");
+      return gap;
     }
-    const rounds = [...byRound.keys()].sort((a, b) => a - b);
-    const last = rounds.length ? rounds[rounds.length - 1] : 0;
-    const cols = [];
-    for (const r of rounds) {
-      const list = byRound.get(r).sort((a, b) => a.id - b.id);
-      if (list.every(isHidden)) continue;
-      const col = el("section", "round");
-      col.append(el("h2", null, roundLabel(side, r, last, format)));
-      const box = el("div", "sets");
-      for (const s of list) box.append(setCard(s, scores, decidedBy, tagOf));
-      col.append(box);
-      cols.push(col);
+    const score = scores.get(set.id);
+    const decided = decidedBy.get(set.id);
+    const words = el("span", "sr", setWords(set, score, decided, tagOf));
+    if (set.slots.every((s) => slotEntrant(s) === null)) {
+      const seat = el("li", "set seat");
+      const shown = el("span", null, "Waiting");
+      shown.setAttribute("aria-hidden", "true");
+      seat.append(words, shown);
+      return seat;
     }
-    return cols;
+    const live = set.state === "Ready";
+    const card = el("li", live ? "set live" : "set " + tiltClass(j, set.id));
+    const face = el("div");
+    face.setAttribute("aria-hidden", "true");
+    if (live) face.append(el("span", "flag", "Live"));
+    if (decided) face.append(el("span", "stamp", DECIDED_LABEL[decided] || decided));
+    face.append(slotRow(set.slots[0], 0, set, score, decided, tagOf));
+    face.append(slotRow(set.slots[1], 1, set, score, decided, tagOf));
+    card.append(words, face);
+    return card;
   }
 
   function champion(bracket) {
@@ -335,38 +695,130 @@
     return null;
   }
 
+  function championBurst(tag) {
+    const box = el("p", "champ");
+    box.append(icon("burst"));
+    const text = el("span", "champ-text");
+    text.append(el("span", "champ-label", "Champion"));
+    text.append(el("span", "sr", ": "));
+    text.append(el("span", tag.length > 9 ? "champ-tag long" : "champ-tag", tag));
+    box.append(text);
+    return box;
+  }
+
+  const SIDES = [
+    ["winners", "Winners", "Winners"],
+    ["losers", "Losers", "Losers"],
+    ["final", "GrandFinal", "Final"],
+  ];
+
   function renderBracket(view, tagOf) {
     const b = view.bracket;
     const scores = new Map((view.scores || []).map(([id, wins]) => [id, wins]));
-    // Sets decided without play (award, DQ): labelled instead of a 0-0 score.
+    // Sets decided without play (award, DQ): stamped instead of showing a 0-0 score.
     const decidedBy = new Map((view.decided_by || []).map(([id, how]) => [id, String(how)]));
     const grid = el("div", "bracket");
-    const parts = [
-      ["winners", "Winners"],
-      ["losers", "Losers"],
-      ["final", "GrandFinal"],
-    ];
-    for (const [cls, side] of parts) {
-      const cols = sideColumns(b.sets, side, b.format, scores, decidedBy, tagOf);
-      if (!cols.length) continue;
+    let finalRow = null;
+    let widest = 0;
+    for (const [cls, side] of SIDES) {
+      const rounds = sideRounds(b, side);
+      if (!rounds.length) continue;
       const row = el("div", "side " + cls);
-      row.append(...cols);
+      const first = side === "GrandFinal" ? widest : 0;
+      rounds.forEach((round, n) => {
+        const col = el("section", "round c" + Math.min(first + n, 12));
+        col.append(el("h2", null, round.name));
+        const list = el("ol", "sets");
+        let j = 0;
+        for (const s of round.sets) {
+          list.append(setCard(s, j, scores, decidedBy, tagOf));
+          if (!isHidden(s)) j++;
+        }
+        col.append(list);
+        row.append(col);
+      });
+      widest = Math.max(widest, rounds.length);
+      if (side === "GrandFinal") finalRow = row;
       grid.append(row);
+    }
+    const champ = champion(b);
+    if (champ !== null) {
+      if (!finalRow) {
+        finalRow = el("div", "side final");
+        grid.append(finalRow);
+      }
+      finalRow.append(championBurst(tagOf(champ)));
     }
     return grid;
   }
 
-  function rulesText(r, format) {
-    if (!r) return "";
-    const parts = ["Best of " + r.best_of];
+  // The run strip: one mark per round, grouped by side; the grand final is a star.
+  function renderStrip(view) {
+    const b = view.bracket;
+    const strip = el("div", "strip");
+    const said = [];
+    for (const [, side, label] of SIDES) {
+      const rounds = sideRounds(b, side);
+      if (!rounds.length) continue;
+      const name = b.format === "SingleElim" ? "Rounds" : label;
+      const grp = el("div", "grp");
+      grp.append(el("span", "grp-name", name));
+      const marks = el("span", "marks");
+      for (const r of rounds) {
+        const mark = el("span", "mark " + (r.star ? "star " : "disc ") + r.status);
+        if (r.star) mark.append(icon("star"));
+        marks.append(mark);
+      }
+      grp.append(marks);
+      strip.append(grp);
+      const done = rounds.filter((r) => r.status === "done").length;
+      let words = name + ": " + done + " of " + rounds.length + (rounds.length === 1 ? " round" : " rounds") + " done";
+      const now = rounds.filter((r) => r.status === "now").map((r) => r.name);
+      if (now.length) words += ", " + now.join(" and ") + " in play";
+      said.push(words);
+    }
+    for (const child of strip.children) child.setAttribute("aria-hidden", "true");
+    const complete = view.summary.state === "complete";
+    if (complete) {
+      const stamp = el("span", "stamp big", "Complete");
+      stamp.setAttribute("aria-hidden", "true");
+      strip.append(stamp);
+    }
+    strip.prepend(el("span", "sr", "Progress. " + said.join(". ") + (complete ? ". The event is complete." : ".")));
+    return strip;
+  }
+
+  function renderSignup(tags) {
+    const box = el("div", "signup");
+    const n = tags.length;
+    box.append(el("h2", null, n === 0 ? "Nobody has entered yet" : n + " entered so far"));
+    if (n) {
+      const list = el("ol", n <= 8 ? "entrants few" : "entrants");
+      tags.forEach((t, i) => {
+        const li = el("li", "entrant " + (i % 2 ? "tr1" : "tl2") + " c" + Math.min(i, 12));
+        li.append(el("span", "tag", t));
+        const seed = el("span", "seed");
+        seed.append(el("span", "sr", ", "), "Seed " + (i + 1));
+        li.append(seed);
+        list.append(li);
+      });
+      box.append(list);
+    }
+    box.append(el("p", "notice", "The bracket appears here when the event starts."));
+    return box;
+  }
+
+  function rulesBits(r, format) {
+    if (!r) return [];
+    const parts = ["best of " + r.best_of];
     // best_of_finals applies to grand final sets, which only double elimination has.
     if (format === "DoubleElim" && r.best_of_finals !== r.best_of) {
       parts.push("grand final best of " + r.best_of_finals);
     }
-    parts.push(r.stocks + " stocks");
+    parts.push(r.stocks + (r.stocks === 1 ? " stock" : " stocks"));
     const m = Math.floor(r.timer_secs / 60), s = r.timer_secs % 60;
-    parts.push(m + ":" + String(s).padStart(2, "0"));
-    return parts.join(", ");
+    parts.push(s === 0 ? m + (m === 1 ? " minute" : " minutes") : m + ":" + String(s).padStart(2, "0"));
+    return parts;
   }
 
   function renderView(view) {
@@ -376,50 +828,58 @@
     $("title").textContent = sum.name;
     document.title = sum.name + " · Bracket";
 
+    const format = view.bracket ? view.bracket.format : null;
+    const bits = [STATE_LABEL[sum.state] || sum.state];
+    if (FORMAT_LABEL[format]) bits.push(FORMAT_LABEL[format]);
+    bits.push(sum.entrants + (sum.entrants === 1 ? " entrant" : " entrants"));
+    bits.push(...rulesBits(view.ruleset, format));
     const meta = $("meta");
-    meta.replaceChildren();
-    const bits = [STATE_LABEL[sum.state] || sum.state, sum.entrants + (sum.entrants === 1 ? " entrant" : " entrants")];
-    const rules = rulesText(view.ruleset, view.bracket ? view.bracket.format : null);
-    if (rules) bits.push(rules);
-    meta.append(bits.join(" · "));
-    if (view.bracket) {
-      const champ = champion(view.bracket);
-      if (champ !== null) {
-        meta.append(" · Champion: ");
-        meta.append(el("span", "champion", tagOf(champ)));
-      }
-    }
-    const shown = $("unverified");
-    if (shown) shown.remove();
-    const unverified = view.unverified_games || 0;
-    if (unverified > 0) {
-      const line = el("p", "meta", unverified + (unverified === 1 ? " game was" : " games were") +
-        " counted without engine verification");
-      line.id = "unverified";
-      meta.after(line);
+    meta.replaceChildren(bits.join(", "));
+    const champ = view.bracket ? champion(view.bracket) : null;
+    if (champ !== null) {
+      meta.append(". Champion: ");
+      meta.append(el("span", "champion", tagOf(champ)));
     }
 
-    const board = $("board");
+    const unverified = view.unverified_games || 0;
+    setNotice("unverified", unverified > 0
+      ? unverified + (unverified === 1 ? " game was" : " games were") + " counted without engine verification"
+      : "");
+
+    // Nothing new since the last drawing: leave the page exactly as it is.
+    const key = JSON.stringify(view);
+    if (key === drawnKey) return;
+    drawnKey = key;
+    // The entrance plays on the first drawing of an event (and of its bracket), never on a refresh.
+    const what = sum.id + (view.bracket ? ":bracket" : ":signup");
+    $("wrap").classList.toggle("enter", what !== enteredFor);
+    enteredFor = what;
+
     if (view.bracket) {
-      board.replaceChildren(renderBracket(view, tagOf));
-      return;
+      $("strip").replaceChildren(renderStrip(view));
+      $("board").replaceChildren(renderBracket(view, tagOf));
+      $("board").tabIndex = 0;
+      $("board").setAttribute("aria-label", "Bracket, scrolls sideways");
+    } else {
+      $("strip").replaceChildren();
+      $("board").replaceChildren(renderSignup(tags));
+      $("board").removeAttribute("tabindex");
+      $("board").removeAttribute("aria-label");
     }
-    const nodes = [el("p", "note", "The bracket appears here when the event starts.")];
-    if (tags.length) {
-      const list = el("ol", "entrants");
-      for (const t of tags) list.append(el("li", null, t));
-      nodes.push(list);
-    }
-    board.replaceChildren(...nodes);
   }
 
   function renderNoEvents() {
     $("title").textContent = "Bracket";
     document.title = "Bracket";
     $("meta").textContent = "";
-    const shown = $("unverified");
-    if (shown) shown.remove();
-    $("board").replaceChildren(el("p", "note", "No events yet. This page will update when one is created."));
+    setNotice("unverified", "");
+    drawnKey = "";
+    enteredFor = "";
+    $("wrap").classList.remove("enter");
+    $("strip").replaceChildren();
+    $("board").replaceChildren(el("p", "notice", "No events yet. This page will update when one is created."));
+    $("board").removeAttribute("tabindex");
+    $("board").removeAttribute("aria-label");
   }
 
   // ---- polling -----------------------------------------------------------
@@ -437,11 +897,11 @@
       renderPicker(events, id);
       if (view) renderView(view);
       else renderNoEvents();
-      setStatus("");
+      setNotice("status", "");
       $("updated").textContent = new Date().toLocaleTimeString();
     } catch (err) {
       if (mine !== seq) return;
-      setStatus("Couldn’t reach the server just now. Showing the last update; trying again in a few seconds.");
+      setNotice("status", "Couldn’t reach the server just now. Showing the last update; trying again in a few seconds.");
     } finally {
       if (mine === seq) timer = setTimeout(refresh, POLL_MS);
     }

@@ -2,18 +2,37 @@
 
 use std::sync::LazyLock;
 
-use axum::http::header;
-use axum::response::{Html, IntoResponse};
+use axum::extract::Path;
+use axum::http::{header, StatusCode};
+use axum::response::{Html, IntoResponse, Response};
 use sha2::{Digest, Sha256};
+
+use super::ApiError;
 
 const PAGE: &str = include_str!("../../assets/bracket.html");
 
+/// The page's fonts by file name (`assets/fonts/README.md` says where they come from).
+const FONTS: [(&str, &[u8]); 2] = [
+    (
+        "bricolage-grotesque-800.woff2",
+        include_bytes!("../../assets/fonts/bricolage-grotesque-800.woff2"),
+    ),
+    (
+        "autobracket-text-700.woff2",
+        include_bytes!("../../assets/fonts/autobracket-text-700.woff2"),
+    ),
+];
+
+/// How long a font may be cached: a year, and never revalidated. A changed font gets a new
+/// file name.
+const FONT_CACHE: &str = "public, max-age=31536000, immutable";
+
 /// The page's Content-Security-Policy: nothing but its own inline script and style (by hash),
-/// requests to this server, the empty `data:` icon, and no framing.
+/// requests to this server, fonts from this server, the empty `data:` icon, and no framing.
 static CSP: LazyLock<String> = LazyLock::new(|| {
     format!(
         "default-src 'none'; script-src 'sha256-{}'; style-src 'sha256-{}'; \
-         connect-src 'self'; img-src data:; base-uri 'none'; form-action 'none'; \
+         connect-src 'self'; font-src 'self'; img-src data:; base-uri 'none'; form-action 'none'; \
          frame-ancestors 'none'",
         inline_hash("script"),
         inline_hash("style"),
@@ -29,6 +48,23 @@ pub async fn page() -> impl IntoResponse {
         ],
         Html(PAGE),
     )
+}
+
+/// `GET /assets/fonts/{file}`: one of the page's fonts; any other name is a 404.
+pub async fn font(Path(file): Path<String>) -> Result<Response, ApiError> {
+    let (_, bytes) = FONTS
+        .iter()
+        .find(|(name, _)| *name == file)
+        .ok_or_else(|| ApiError::new(StatusCode::NOT_FOUND, "no such font"))?;
+    Ok((
+        [
+            (header::CONTENT_TYPE, "font/woff2"),
+            (header::CACHE_CONTROL, FONT_CACHE),
+            (header::X_CONTENT_TYPE_OPTIONS, "nosniff"),
+        ],
+        *bytes,
+    )
+        .into_response())
 }
 
 /// Base64 SHA-256 of the text inside the page's one `<tag>…</tag>` block (empty if absent).
