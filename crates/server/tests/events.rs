@@ -276,6 +276,29 @@ async fn unaccepted_build_is_403() {
 }
 
 #[tokio::test]
+async fn a_version_only_accepted_build_matches_at_signup() {
+    let version = "melee (rust) 0.1.0 development build";
+    let app = TestApp::spawn(|c| c.accepted_builds = vec![version.into()]).await;
+    let event = create_event(&app, Format::DoubleElim).await;
+
+    let p = app.player("Mango").await;
+    let build = format!("{version}+0123456789ab");
+    assert_eq!(
+        signup(&p, event, &build).await.status(),
+        StatusCode::CREATED
+    );
+
+    let other = app.player("Armada").await;
+    let res = signup(&other, event, "melee (rust) 0.2.0+0123456789ab").await;
+    assert_eq!(res.status(), StatusCode::FORBIDDEN);
+    let body: Value = res.json().await.unwrap();
+    assert_eq!(
+        body,
+        json!({"error": "engine build not accepted", "accepted": [version]})
+    );
+}
+
+#[tokio::test]
 async fn three_entrants_start() {
     let app = TestApp::spawn(|_| {}).await;
     let event = create_event(&app, Format::DoubleElim).await;

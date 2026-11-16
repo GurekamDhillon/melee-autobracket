@@ -26,6 +26,9 @@ async fn root_serves_html() {
     // Sets decided without play are labelled rather than shown as 0-0.
     assert!(body.contains("decided_by"));
     assert!(body.contains("awarded"));
+    // Games counted while the verifier was unavailable are mentioned under the header.
+    assert!(body.contains("view.unverified_games"));
+    assert!(body.contains("counted without engine verification"));
 }
 
 #[tokio::test]

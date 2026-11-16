@@ -62,11 +62,11 @@ pub async fn signup(
         }
     }
 
-    let accepted = &state.cfg.accepted_builds;
-    if !accepted.is_empty() && !accepted.contains(&body.engine_build) {
+    // The same rule as the verifier's: the whole build string, or its part before `+`.
+    if !state.cfg.build_accepted(&body.engine_build) {
         return Err(ApiError(
             StatusCode::FORBIDDEN,
-            json!({ "error": "engine build not accepted", "accepted": accepted }),
+            json!({ "error": "engine build not accepted", "accepted": &state.cfg.accepted_builds }),
         ));
     }
 

@@ -62,6 +62,7 @@ enum AdminCmd {
 #[derive(Subcommand)]
 enum EntrantCmd {
     /// Take a player out of an event that is still open for sign-up; later seeds move up.
+    /// The tag matches in any case.
     Remove { event: i64, tag: String },
 }
 

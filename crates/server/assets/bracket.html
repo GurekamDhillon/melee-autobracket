@@ -389,6 +389,15 @@
         meta.append(el("span", "champion", tagOf(champ)));
       }
     }
+    const shown = $("unverified");
+    if (shown) shown.remove();
+    const unverified = view.unverified_games || 0;
+    if (unverified > 0) {
+      const line = el("p", "meta", unverified + (unverified === 1 ? " game was" : " games were") +
+        " counted without engine verification");
+      line.id = "unverified";
+      meta.after(line);
+    }
 
     const board = $("board");
     if (view.bracket) {

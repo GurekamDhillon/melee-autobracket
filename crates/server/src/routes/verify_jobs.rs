@@ -14,10 +14,8 @@ use super::{parse_body, ApiError};
 use crate::auth::Verifier;
 use crate::db::{begin_write, now_unix};
 use crate::logging::{key_prefix, label, resim_kind};
+use crate::resim::CLAIM_TTL_SECS;
 use crate::state::AppState;
-
-/// A claim older than this is presumed abandoned and the job is offered again.
-const CLAIM_TTL_SECS: i64 = 300;
 
 /// `POST /v1/verify/claim`: takes the oldest job that is queued, or whose claim has gone
 /// stale. `200 VerifyJob`, or `204` when there is none.

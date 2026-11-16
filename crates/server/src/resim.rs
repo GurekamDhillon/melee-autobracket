@@ -286,6 +286,9 @@ pub const VERIFIER_ONLINE_WINDOW: Duration = Duration::from_secs(60);
 /// How long a check waits for an unclaimed job when no verifier is online before giving up
 /// (instead of the full timeout).
 pub const VERIFIER_OFFLINE_WAIT: Duration = Duration::from_secs(15);
+/// A claim older than this is presumed abandoned: the claim route offers the job again, and
+/// it no longer shows that a verifier is at work.
+pub const CLAIM_TTL_SECS: i64 = 300;
 /// How often a waiting check re-reads its job, in case a wake-up was missed.
 const EXTERNAL_RECHECK: Duration = Duration::from_secs(1);
 
@@ -293,8 +296,9 @@ const EXTERNAL_RECHECK: Duration = Duration::from_secs(1);
 /// claims it over the API and posts the result, and `check` returns that result.
 ///
 /// A check waits up to its timeout for the result. When no verifier has called the server
-/// within the online window and nobody claimed the job, it gives up after the shorter
-/// offline wait (`Unavailable("no verifier online")`) instead.
+/// within the online window, none is at work on a claimed job (claim not stale), and nobody
+/// claimed this job, it gives up after the shorter offline wait
+/// (`Unavailable("no verifier online")`) instead.
 ///
 /// `build()` is `"external"`; `check_with_build` returns the build the verifier posted with
 /// the result (`"external"` when there was no result).
@@ -403,7 +407,11 @@ impl ExternalResim {
             if now >= deadline {
                 break JobEnd::TimedOut;
             }
-            if now >= give_up_early && state == "queued" && !self.verifier_online() {
+            if now >= give_up_early
+                && state == "queued"
+                && !self.verifier_online()
+                && !claim_in_progress(db).await?
+            {
                 break JobEnd::NoVerifierOnline;
             }
             tokio::select! {
@@ -429,6 +437,18 @@ impl ExternalResim {
         tx.commit().await?;
         Ok(result.map_or(end, JobEnd::Result))
     }
+}
+
+/// Whether some job is claimed and its claim is not stale: a verifier is at work on it (it
+/// does not call the server while its engine runs).
+async fn claim_in_progress(db: &SqlitePool) -> anyhow::Result<bool> {
+    let busy: bool = sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM resim_jobs WHERE state = 'claimed' AND claimed_at >= ?)",
+    )
+    .bind(crate::db::now_unix() - CLAIM_TTL_SECS)
+    .fetch_one(db)
+    .await?;
+    Ok(busy)
 }
 
 /// The state of job `id`, and its posted result once it is `done`.

@@ -70,8 +70,8 @@ pub async fn create_event(
 
 /// `DELETE /v1/admin/events/{id}/entrants/{tag}`: takes the player with `tag` out of an event
 /// that is still open for sign-up. Entrants seeded after them move up one seed, so the seeds
-/// stay contiguous. `404` for an unknown event or a player not entered, `409` once the event
-/// has started.
+/// stay contiguous. The tag matches in any case. `404` for an unknown event or a player not
+/// entered, `409` once the event has started.
 pub async fn remove_entrant(
     State(state): State<AppState>,
     path: Result<Path<(i64, String)>, PathRejection>,
@@ -89,11 +89,15 @@ pub async fn remove_entrant(
         Some("signup") => {}
         Some(_) => return Err(lifecycle::LifecycleError::AlreadyStarted.into()),
     }
+    // Tags are unique whatever their case. Should an older database still hold case
+    // variants, the exact spelling wins, then the one that is not a marked duplicate.
     let entrant: Option<(String, i64)> = sqlx::query_as(
         "SELECT n.player_key, n.seed FROM entrants n JOIN players p ON p.key = n.player_key
-         WHERE n.event_id = ? AND p.tag = ?",
+         WHERE n.event_id = ? AND p.tag = ? COLLATE NOCASE
+         ORDER BY p.tag = ? DESC, p.tag_case_duplicate LIMIT 1",
     )
     .bind(event)
+    .bind(&tag)
     .bind(&tag)
     .fetch_optional(&mut *tx)
     .await?;

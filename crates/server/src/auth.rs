@@ -22,8 +22,8 @@ const NONCE_TTL_SECS: i64 = 300;
 pub const MAX_JSON_BODY_BYTES: usize = 64 * 1024;
 /// How long the body of a request may take to arrive.
 pub const BODY_TIMEOUT: Duration = Duration::from_secs(30);
-/// How long the body of a replay upload may take to arrive.
-pub const UPLOAD_BODY_TIMEOUT: Duration = Duration::from_secs(60);
+/// How long the body of a replay upload may take to arrive: as long as the client allows.
+pub const UPLOAD_BODY_TIMEOUT: Duration = Duration::from_secs(120);
 
 /// Rejections use the same `{"error": ...}` JSON body as handler errors.
 pub type Rejection = ApiError;
