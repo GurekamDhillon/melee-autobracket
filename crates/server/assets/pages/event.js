@@ -11,8 +11,47 @@
   let enteredFor = "";
   let polling = null;
 
-  // The picker sits beside the title.
-  $("head-side").append($("pick-label"));
+  // The picker, the layout toggle and "Jump to live" sit beside the title.
+  $("head-side").append($("pick-label"), $("lay-h").parentNode, $("jump-live"));
+
+  // ---- layout: rounds side by side, or stacked for portrait screens -------------
+
+  const LAYOUT_KEY = "bracket-layout";
+  const PORTRAIT = matchMedia("(orientation: portrait)");
+  const board = $("board");
+
+  // Storage is touched only here and in storeLayout, each guarded: a browser that refuses it
+  // (private mode, blocked site data) gets the automatic choice.
+  function readLayout() {
+    try { return localStorage.getItem(LAYOUT_KEY); } catch (e) { return null; }
+  }
+
+  // The remembered choice, or null where nothing (or nonsense) is stored.
+  function storedLayout() {
+    const value = readLayout();
+    return value === "horizontal" || value === "vertical" ? value : null;
+  }
+
+  function storeLayout(value) {
+    try { localStorage.setItem(LAYOUT_KEY, value); } catch (e) {}
+  }
+
+  function applyLayout() {
+    const layout = storedLayout() || (PORTRAIT.matches ? "vertical" : "horizontal");
+    board.dataset.layout = layout;
+    $("lay-h").setAttribute("aria-pressed", String(layout === "horizontal"));
+    $("lay-v").setAttribute("aria-pressed", String(layout === "vertical"));
+  }
+
+  function jumpToLive() {
+    document.querySelector(".set.live")?.scrollIntoView({ block: "center", behavior: "auto" });
+  }
+
+  PORTRAIT.addEventListener("change", applyLayout);
+  $("lay-h").addEventListener("click", () => { storeLayout("horizontal"); applyLayout(); });
+  $("lay-v").addEventListener("click", () => { storeLayout("vertical"); applyLayout(); });
+  $("jump-live").addEventListener("click", jumpToLive);
+  applyLayout();
 
   function renderPicker(events) {
     const key = JSON.stringify(events.map((e) => [e.id, e.name, e.state]));
@@ -294,11 +333,13 @@
       $("board").replaceChildren(renderBracket(view, tagOf));
       $("board").tabIndex = 0;
       $("board").setAttribute("aria-label", "Bracket, scrolls sideways");
+      $("jump-live").hidden = !document.querySelector(".set.live");
     } else {
       $("strip").replaceChildren();
       $("board").replaceChildren(renderSignup(tags));
       $("board").removeAttribute("tabindex");
       $("board").removeAttribute("aria-label");
+      $("jump-live").hidden = true;
     }
   }
 

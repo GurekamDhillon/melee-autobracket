@@ -367,6 +367,45 @@ h2 { margin: 0 0 var(--sp-4); font-size: 1.125rem; line-height: 1.2; white-space
   line-height: 1.2rem;
 }
 
+/* ---- vertical layout: rounds stacked top to bottom (winners, losers, grand final), every set
+   as wide as the page; chosen for portrait screens or by the toggle ---- */
+.board[data-layout="vertical"] { overflow-x: clip; }
+.board[data-layout="vertical"] .bracket { display: block; width: auto; }
+/* On a wide screen that chose Vertical, the column stays card-shaped: the idle tilt over a
+   page-wide card would read as a skew. */
+.board[data-layout="vertical"] .bracket { max-width: 40rem; }
+.board[data-layout="vertical"] .side { display: block; }
+.board[data-layout="vertical"] .round { width: auto; margin-bottom: var(--sp-5); }
+.board[data-layout="vertical"] .sets { gap: var(--sp-3); }
+.board[data-layout="vertical"] .set { width: 100%; min-height: 0; }
+.board[data-layout="vertical"] .spacer { display: none; }
+.board[data-layout="vertical"] .champ { margin: var(--sp-4) auto; }
+.board[data-layout="vertical"] h2 { white-space: normal; }
+
+/* ---- layout toggle and "Jump to live": pill stickers beside the picker ---- */
+#head-side { display: flex; flex-wrap: wrap; align-items: center; gap: var(--sp-3) var(--sp-4); max-width: 100%; }
+.layout { display: flex; gap: var(--sp-2); }
+.layout button, .jump {
+  padding: 0.2rem 0.85rem;
+  font: inherit;
+  font-size: 0.9375rem;
+  color: var(--on-surface);
+  background: var(--surface);
+  border: var(--edge-pill) solid var(--outline);
+  border-radius: var(--radius-row);
+  box-shadow: var(--shadow);
+  cursor: pointer;
+  transition: translate var(--m-hover) var(--ease), box-shadow var(--m-hover) var(--ease);
+}
+.layout button:hover, .jump:hover, .layout button:focus-visible, .jump:focus-visible {
+  background: var(--accent);
+  translate: 0 -3px;
+  box-shadow: var(--shadow-hover);
+  outline: none;
+}
+.layout button:focus-visible, .jump:focus-visible { box-shadow: var(--ring-hover), 4px 6px 0 3px var(--outline); }
+.layout button[aria-pressed="true"] { background: var(--accent); }
+
 /* ---- champion: the kit's 16-point burst, tilted 8 degrees ---- */
 .champ { position: relative; flex: none; align-self: center; width: 11rem; height: 11rem; margin: 0 var(--sp-2); rotate: 8deg; color: var(--on-surface); }
 .champ svg {
@@ -590,5 +629,6 @@ a.card:hover, a.card:focus-visible { background: var(--accent); rotate: 0deg; tr
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation: none !important; transition: none !important; }
   .set:hover, .nav a:hover, .nav a:focus-visible, a.card:hover, a.card:focus-visible { translate: none; }
+  .layout button:hover, .jump:hover, .layout button:focus-visible, .jump:focus-visible { translate: none; }
   option:hover, option:focus-visible { translate: none; }
 }
