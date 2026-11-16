@@ -726,3 +726,230 @@ async fn running_worker_judges_uploads() {
     }
     assert_eq!(set_row(&app, event, 0).await, ("ready".into(), 1, 0));
 }
+
+/// A verifier whose machinery always fails (an internal error, not a verdict).
+struct Broken;
+
+#[async_trait::async_trait]
+impl autobracket_server::Resim for Broken {
+    async fn check(&self, _: &std::path::Path, _: i32) -> ResimOutcome {
+        unreachable!("the worker calls check_with_build")
+    }
+    fn build(&self) -> String {
+        "broken".into()
+    }
+    async fn check_with_build(
+        &self,
+        _: &std::path::Path,
+        _: i32,
+    ) -> anyhow::Result<(ResimOutcome, String)> {
+        anyhow::bail!("scratch directory: no space left on device\nforged line")
+    }
+}
+
+/// A game that cannot be judged is retried, at most five times, then goes to the organiser
+/// as `judging-failed` with the last error; it never counts.
+#[tokio::test]
+async fn judging_failures_are_bounded_and_reach_the_organiser() {
+    let app = TestApp::spawn_with(in_process, Arc::new(Broken)).await;
+    let (app, host, guest, event) = two_player(app).await;
+    for (p, start) in [(&host, START_A), (&guest, START_B)] {
+        assert_eq!(
+            upload(p, event, 0, 1, simple_game(1, start)).await,
+            StatusCode::ACCEPTED
+        );
+    }
+    for attempt in 1..=4 {
+        assert!(judge_due(&app.state).await.is_err());
+        let (state, attempts): (String, i64) =
+            sqlx::query_as("SELECT state, judge_attempts FROM games")
+                .fetch_one(&app.state.db)
+                .await
+                .unwrap();
+        assert_eq!((state.as_str(), attempts), ("uploading", attempt));
+        assert!(queue_reasons(&app, event).await.is_empty());
+    }
+    assert!(judge_due(&app.state).await.is_err());
+    let (state, verdict, slot, _, _) = game(&app, event, 0, 1).await;
+    assert_eq!((state.as_str(), verdict, slot), ("review", None, None));
+    assert_eq!(set_row(&app, event, 0).await, ("review".into(), 0, 0));
+    assert_eq!(queue_reasons(&app, event).await, vec!["judging-failed"]);
+    let detail: String = sqlx::query_scalar("SELECT detail FROM queue")
+        .fetch_one(&app.state.db)
+        .await
+        .unwrap();
+    assert!(detail.contains("no space left on device"), "{detail}");
+    assert!(!detail.contains('\n'), "cleaned: {detail:?}");
+    // Nothing is due any more.
+    assert_eq!(judge_due(&app.state).await.unwrap(), 0);
+}
+
+/// A verifier that panics on its first check, then matches.
+struct PanicsOnce(std::sync::atomic::AtomicBool);
+
+#[async_trait::async_trait]
+impl autobracket_server::Resim for PanicsOnce {
+    async fn check(&self, _: &std::path::Path, _: i32) -> ResimOutcome {
+        if !self.0.swap(true, std::sync::atomic::Ordering::SeqCst) {
+            panic!("verifier bug");
+        }
+        ResimOutcome::Match
+    }
+    fn build(&self) -> String {
+        "panicky".into()
+    }
+}
+
+/// The running worker survives a panic while judging a game: the game is handed back and
+/// judged again.
+#[tokio::test]
+async fn worker_survives_a_panic_while_judging() {
+    let resim = Arc::new(PanicsOnce(Default::default()));
+    let app = TestApp::spawn_with(|c| c.worker_enabled = true, resim).await;
+    let (app, host, guest, event) = two_player(app).await;
+    for (p, start) in [(&host, START_A), (&guest, START_B)] {
+        assert_eq!(
+            upload(p, event, 0, 1, simple_game(1, start)).await,
+            StatusCode::ACCEPTED
+        );
+    }
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while game(&app, event, 0, 1).await.0 != "counted" {
+        assert!(Instant::now() < deadline, "the game was never judged again");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    let attempts: i64 = sqlx::query_scalar("SELECT judge_attempts FROM games")
+        .fetch_one(&app.state.db)
+        .await
+        .unwrap();
+    assert_eq!(attempts, 1);
+    assert_eq!(game(&app, event, 0, 1).await.1, Some(Verdict::Verified));
+}
+
+/// A verifier that holds every check until the test releases it, counting how many run at
+/// once.
+struct Gate {
+    release: tokio::sync::Semaphore,
+    running: std::sync::atomic::AtomicUsize,
+    most: std::sync::atomic::AtomicUsize,
+}
+
+impl Default for Gate {
+    fn default() -> Self {
+        Gate {
+            release: tokio::sync::Semaphore::new(0),
+            running: Default::default(),
+            most: Default::default(),
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl autobracket_server::Resim for Gate {
+    async fn check(&self, _: &std::path::Path, _: i32) -> ResimOutcome {
+        use std::sync::atomic::Ordering::SeqCst;
+        let now = self.running.fetch_add(1, SeqCst) + 1;
+        self.most.fetch_max(now, SeqCst);
+        self.release.acquire().await.unwrap().forget();
+        self.running.fetch_sub(1, SeqCst);
+        ResimOutcome::Match
+    }
+    fn build(&self) -> String {
+        "gate".into()
+    }
+}
+
+/// Three events with an agreeing pair uploaded for game 1 of their set.
+async fn three_due_games(app: &TestApp) -> Vec<i64> {
+    let host = app.player("Alice").await;
+    let guest = app.player("Bob").await;
+    let mut events = Vec::new();
+    for _ in 0..3 {
+        let event = app
+            .started_event(Format::SingleElim, &[&host, &guest])
+            .await;
+        for (p, start) in [(&host, START_A), (&guest, START_B)] {
+            assert_eq!(
+                upload(p, event, 0, 1, simple_game(1, start)).await,
+                StatusCode::ACCEPTED
+            );
+        }
+        events.push(event);
+    }
+    events
+}
+
+/// `verifier.jobs` games are judged at once, never more.
+#[tokio::test]
+async fn judging_runs_up_to_jobs_games_at_once() {
+    use std::sync::atomic::Ordering::SeqCst;
+    for jobs in [1, 2] {
+        let gate = Arc::new(Gate::default());
+        let app = TestApp::spawn_with(|c| c.verifier.jobs = jobs, gate.clone()).await;
+        let events = three_due_games(&app).await;
+        let st = app.state.clone();
+        let judging = tokio::spawn(async move { judge_due(&st).await });
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while gate.running.load(SeqCst) < jobs {
+            assert!(Instant::now() < deadline, "{jobs} checks never ran at once");
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        // Give a wrongly started extra check time to show up, then let them all finish.
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        assert_eq!(gate.running.load(SeqCst), jobs);
+        gate.release.add_permits(3);
+        let judged = tokio::time::timeout(Duration::from_secs(10), judging)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert_eq!(judged, 3);
+        assert_eq!(gate.most.load(SeqCst), jobs);
+        for event in events {
+            assert_eq!(game(&app, event, 0, 1).await.0, "counted");
+        }
+    }
+}
+
+/// Stalled sets are flagged on their own schedule, even while every judging slot is busy.
+#[tokio::test]
+async fn stall_check_does_not_wait_for_judging() {
+    let gate = Arc::new(Gate::default());
+    let app = TestApp::spawn_with(
+        |c| {
+            c.worker_enabled = true;
+            c.verifier.jobs = 1;
+            c.set_stall_secs = 1;
+        },
+        gate.clone(),
+    )
+    .await;
+    let host = app.player("Alice").await;
+    let guest = app.player("Bob").await;
+    let busy = app
+        .started_event(Format::SingleElim, &[&host, &guest])
+        .await;
+    let idle = app
+        .started_event(Format::SingleElim, &[&host, &guest])
+        .await;
+    for (p, start) in [(&host, START_A), (&guest, START_B)] {
+        assert_eq!(
+            upload(p, busy, 0, 1, simple_game(1, start)).await,
+            StatusCode::ACCEPTED
+        );
+    }
+    let deadline = Instant::now() + Duration::from_secs(15);
+    while queue_reasons(&app, idle).await.is_empty() {
+        assert!(Instant::now() < deadline, "the idle set was never flagged");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert_eq!(queue_reasons(&app, idle).await, vec!["stalled"]);
+    // The busy set's game is still being judged, so that set is not stalled.
+    assert_eq!(
+        gate.running.load(std::sync::atomic::Ordering::SeqCst),
+        1,
+        "judging is still blocked"
+    );
+    assert!(queue_reasons(&app, busy).await.is_empty());
+    gate.release.add_permits(1);
+}

@@ -248,6 +248,8 @@ pub async fn apply_verdict(
         .bind(game_id)
         .execute(&mut *tx)
         .await?;
+        // The replay is kept for study as it would have been on time.
+        quarantine(&mut tx, game_id, v).await?;
         tx.commit().await?;
         warn!(
             game_id,
@@ -338,19 +340,31 @@ pub async fn apply_verdict(
         .await?;
     }
 
+    quarantine(&mut tx, game_id, v).await?;
+    tx.commit().await?;
+    journal.emit();
+    Ok(())
+}
+
+/// Adds the game to the quarantine corpus when its verdict is one kept for study: the
+/// re-simulation diverged (`VerifiedInexact`, `Inexact`), the uploads disagree
+/// (`Conflicted`), or only one arrived (`Single`).
+async fn quarantine(
+    conn: &mut SqliteConnection,
+    game_id: i64,
+    v: &Verdict,
+) -> Result<(), LifecycleError> {
     if matches!(
         v,
         Verdict::VerifiedInexact | Verdict::Inexact | Verdict::Conflicted | Verdict::Single
     ) {
         sqlx::query("INSERT INTO quarantine (game_id, kind, created_at) VALUES (?, ?, ?)")
             .bind(game_id)
-            .bind(name)
+            .bind(verdict_name(v))
             .bind(now_unix())
-            .execute(&mut *tx)
+            .execute(&mut *conn)
             .await?;
     }
-    tx.commit().await?;
-    journal.emit();
     Ok(())
 }
 

@@ -735,11 +735,12 @@ async fn late_noncounting_verdict_does_not_reopen_set() {
     assert_eq!(game_states(&app, event, 0).await, vec!["void"]);
     assert_eq!(set_row(&app, event, 0).await, ("done".into(), 0, 0));
     assert_eq!(open_queue_rows(&app).await, 0);
-    let quarantined: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM quarantine")
-        .fetch_one(&app.state.db)
+    // The replay still joins the corpus, as it would have on time.
+    let quarantined: Vec<(i64, String)> = sqlx::query_as("SELECT game_id, kind FROM quarantine")
+        .fetch_all(&app.state.db)
         .await
         .unwrap();
-    assert_eq!(quarantined, 0);
+    assert_eq!(quarantined, vec![(game_id, "Conflicted".to_string())]);
     assert_eq!(judge_due(&app.state).await.unwrap(), 0);
 }
 
