@@ -37,6 +37,8 @@ pub enum GameCtx<'a> {
     },
     Later {
         legal: &'a [u16],
+        /// Clamped silently to (distinct legal stages - 1) so a pick stays possible; a single
+        /// legal stage is chosen at once, like a single starter in `First`.
         bans: u8,
         prev_winner: u8,
     },
@@ -44,7 +46,8 @@ pub enum GameCtx<'a> {
 
 #[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug)]
 pub struct Selection {
-    /// Stages still available, in list order.
+    /// Stages not struck or banned, in list order. The chosen stage stays in the pool in both
+    /// modes (so once complete, `chosen` is always a member of `pool`).
     pub pool: Vec<u16>,
     /// Stages struck or banned, in move order.
     pub removed: Vec<u16>,
@@ -66,6 +69,9 @@ pub enum StageError {
     Complete,
     #[error("slot must be 0 or 1")]
     BadSlot,
+    /// Only from `apply`: the stored history is itself invalid (never an illegal next move).
+    #[error("stored move history is invalid")]
+    BadHistory,
 }
 
 fn dedup(list: &[u16]) -> Vec<u16> {
@@ -132,7 +138,8 @@ impl State {
                 let pool = dedup(legal);
                 let bans = (bans as usize).min(pool.len().saturating_sub(1)) as u8;
                 let picker = 1 - prev_winner;
-                let turn = if pool.is_empty() {
+                let chosen = if pool.len() == 1 { Some(pool[0]) } else { None };
+                let turn = if pool.is_empty() || chosen.is_some() {
                     None
                 } else if bans > 0 {
                     Some(Turn {
@@ -151,7 +158,7 @@ impl State {
                     pool,
                     removed: Vec::new(),
                     turn,
-                    chosen: None,
+                    chosen,
                     turn_no: 0,
                     picker,
                     first: false,
@@ -183,13 +190,14 @@ impl State {
                 StageError::NotInPool
             });
         };
-        self.pool.remove(idx);
         let left = turn.count - 1;
         if mv.kind == StageKind::Pick {
+            // The chosen stage stays in `pool`, as in First games.
             self.chosen = Some(mv.stage);
             self.turn = None;
             return Ok(());
         }
+        self.pool.remove(idx);
         self.removed.push(mv.stage);
         if self.first {
             if self.pool.len() == 1 {
@@ -238,11 +246,13 @@ pub fn replay(ctx: GameCtx, moves: &[Move]) -> Result<Selection, StageError> {
     Ok(st.finish())
 }
 
-/// `replay` of `moves + [next]`.
+/// `replay` of `moves + [next]`; an invalid stored history is `BadHistory`, an illegal `next`
+/// keeps its own error.
 pub fn apply(ctx: GameCtx, moves: &[Move], next: Move) -> Result<Selection, StageError> {
     let mut st = State::new(ctx)?;
-    for mv in moves.iter().chain(std::iter::once(&next)) {
-        st.step(*mv)?;
+    for mv in moves {
+        st.step(*mv).map_err(|_| StageError::BadHistory)?;
     }
+    st.step(next)?;
     Ok(st.finish())
 }

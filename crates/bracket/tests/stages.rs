@@ -293,3 +293,124 @@ fn later_game_errors() {
     let h = [mv(1, Ban, 1), mv(1, Ban, 2), mv(0, Pick, 3)];
     assert_eq!(apply(ctx, &h, mv(1, Ban, 4)), Err(StageError::Complete));
 }
+
+#[test]
+fn chosen_stays_in_pool_in_both_modes() {
+    let sel = replay(
+        GameCtx::First {
+            starters: &[1, 2, 3],
+        },
+        &[mv(0, Strike, 1), mv(1, Strike, 3)],
+    )
+    .unwrap();
+    assert_eq!((sel.chosen, sel.pool.clone()), (Some(2), vec![2]));
+    let ctx = GameCtx::Later {
+        legal: &[1, 2, 3],
+        bans: 1,
+        prev_winner: 0,
+    };
+    let sel = replay(ctx, &[mv(0, Ban, 1), mv(1, Pick, 3)]).unwrap();
+    assert_eq!(sel.chosen, Some(3));
+    assert_eq!(sel.pool, vec![2, 3]);
+    assert_eq!(sel.removed, vec![1]);
+}
+
+#[test]
+fn later_empty_list_has_no_turn() {
+    let ctx = GameCtx::Later {
+        legal: &[],
+        bans: 2,
+        prev_winner: 0,
+    };
+    let sel = replay(ctx, &[]).unwrap();
+    assert_eq!((sel.chosen, sel.turn), (None, None));
+    assert_eq!(apply(ctx, &[], mv(1, Pick, 1)), Err(StageError::Complete));
+}
+
+#[test]
+fn later_single_stage_is_chosen_at_once() {
+    let ctx = GameCtx::Later {
+        legal: &[7, 7],
+        bans: 2,
+        prev_winner: 1,
+    };
+    let sel = replay(ctx, &[]).unwrap();
+    assert_eq!((sel.chosen, sel.turn), (Some(7), None));
+    assert_eq!(apply(ctx, &[], mv(0, Pick, 7)), Err(StageError::Complete));
+}
+
+#[test]
+fn opponent_cannot_move_mid_two_move_turn() {
+    let ctx = GameCtx::First {
+        starters: &[1, 2, 3, 4, 5],
+    };
+    let h = [mv(0, Strike, 1), mv(1, Strike, 2)];
+    assert_eq!(
+        apply(ctx, &h, mv(0, Strike, 3)),
+        Err(StageError::NotYourTurn)
+    );
+}
+
+#[test]
+fn strikes_in_any_order_keep_pool_in_list_order() {
+    let ctx = GameCtx::First {
+        starters: &[10, 20, 30, 40, 50],
+    };
+    let h = [
+        mv(0, Strike, 30),
+        mv(1, Strike, 50),
+        mv(1, Strike, 10),
+        mv(0, Strike, 40),
+    ];
+    let sel = replay(ctx, &h).unwrap();
+    assert_eq!(sel.removed, vec![30, 50, 10, 40]);
+    assert_eq!(sel.pool, vec![20]);
+    assert_eq!(sel.chosen, Some(20));
+    let sel = replay(ctx, &h[..2]).unwrap();
+    assert_eq!(sel.pool, vec![10, 20, 40]);
+}
+
+#[test]
+fn apply_tells_bad_history_from_bad_move() {
+    let ctx = GameCtx::First {
+        starters: &[1, 2, 3],
+    };
+    let bad = [mv(1, Strike, 1)];
+    assert_eq!(replay(ctx, &bad), Err(StageError::NotYourTurn));
+    assert_eq!(
+        apply(ctx, &bad, mv(0, Strike, 2)),
+        Err(StageError::BadHistory)
+    );
+    assert_eq!(
+        apply(ctx, &[], mv(1, Strike, 2)),
+        Err(StageError::NotYourTurn)
+    );
+}
+
+#[test]
+fn serde_round_trip() {
+    let m = mv(1, Ban, 28);
+    let t = Turn {
+        slot: 0,
+        kind: Pick,
+        count: 1,
+    };
+    let ctx = GameCtx::Later {
+        legal: &[1, 2, 3],
+        bans: 1,
+        prev_winner: 0,
+    };
+    let sel = replay(ctx, &[mv(0, Ban, 1)]).unwrap();
+    assert_eq!(
+        serde_json::from_str::<Move>(&serde_json::to_string(&m).unwrap()).unwrap(),
+        m
+    );
+    assert_eq!(
+        serde_json::from_str::<Turn>(&serde_json::to_string(&t).unwrap()).unwrap(),
+        t
+    );
+    assert_eq!(
+        serde_json::from_str::<Selection>(&serde_json::to_string(&sel).unwrap()).unwrap(),
+        sel
+    );
+}
