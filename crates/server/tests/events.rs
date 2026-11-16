@@ -11,6 +11,8 @@ fn create_req(format: Format) -> EventCreateReq {
         format,
         ruleset: None,
         best_of: None,
+        starts_at: None,
+        description: None,
     }
 }
 
@@ -39,6 +41,22 @@ async fn start(app: &TestApp, event: i64) -> reqwest::Response {
     app.as_to()
         .post_json(&format!("/v1/admin/events/{event}/start"), &json!({}))
         .await
+}
+
+/// `POST /v1/admin/events/{event}/schedule` as the organiser.
+async fn schedule(app: &TestApp, event: i64, body: &Value) -> reqwest::Response {
+    app.as_to()
+        .post_json(&format!("/v1/admin/events/{event}/schedule"), body)
+        .await
+}
+
+/// The stored schedule columns of an event.
+async fn schedule_row(app: &TestApp, event: i64) -> (Option<i64>, Option<String>) {
+    sqlx::query_as("SELECT starts_at, description FROM events WHERE id = ?")
+        .bind(event)
+        .fetch_one(&app.state.db)
+        .await
+        .unwrap()
 }
 
 async fn sets_rows(app: &TestApp, event: i64) -> Vec<(i64, String)> {
@@ -331,4 +349,144 @@ async fn full_event_refuses_signup() {
     assert_eq!(res.status(), StatusCode::CONFLICT);
     let body: Value = res.json().await.unwrap();
     assert_eq!(body, json!({"error": "event is full"}));
+}
+
+#[tokio::test]
+async fn create_carries_schedule_fields() {
+    let app = TestApp::spawn(|_| {}).await;
+    let before = autobracket_server::db::now_unix();
+    let res = app
+        .as_to()
+        .post_json(
+            "/v1/admin/events",
+            &json!({
+                "name": "Friday", "format": "SingleElim", "ruleset": null,
+                "starts_at": 1795000000, "description": "Bo3, Friday 8pm" }),
+        )
+        .await;
+    assert_eq!(res.status(), StatusCode::CREATED);
+    let s: EventSummary = res.json().await.unwrap();
+    assert_eq!(
+        (s.starts_at, s.description.as_deref()),
+        (Some(1795000000), Some("Bo3, Friday 8pm"))
+    );
+    assert!(s.created_at >= before && s.created_at <= autobracket_server::db::now_unix() + 1);
+    let list: Vec<EventSummary> = reqwest::get(format!("{}/v1/events", app.url))
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(list[0].starts_at, Some(1795000000));
+    assert_eq!(list[0], s);
+    let view: EventView = reqwest::get(format!("{}/v1/events/{}", app.url, s.id))
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(view.summary.description.as_deref(), Some("Bo3, Friday 8pm"));
+    assert_eq!(view.summary, s);
+}
+
+#[tokio::test]
+async fn schedule_route_replaces_both_fields() {
+    let app = TestApp::spawn(|_| {}).await;
+    let event = create_event(&app, Format::SingleElim).await;
+    assert_eq!(schedule_row(&app, event).await, (None, None));
+
+    let res = schedule(
+        &app,
+        event,
+        &json!({"starts_at": 1795000000, "description": "x"}),
+    )
+    .await;
+    assert_eq!(res.status(), StatusCode::NO_CONTENT);
+    assert_eq!(
+        schedule_row(&app, event).await,
+        (Some(1795000000), Some("x".into()))
+    );
+    let view: EventView = reqwest::get(format!("{}/v1/events/{event}", app.url))
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(view.summary.starts_at, Some(1795000000));
+    assert_eq!(view.summary.description.as_deref(), Some("x"));
+
+    // An omitted field clears it.
+    let res = schedule(&app, event, &json!({})).await;
+    assert_eq!(res.status(), StatusCode::NO_CONTENT);
+    assert_eq!(schedule_row(&app, event).await, (None, None));
+
+    // Whitespace is no description.
+    let res = schedule(&app, event, &json!({"description": "   "})).await;
+    assert_eq!(res.status(), StatusCode::NO_CONTENT);
+    assert_eq!(schedule_row(&app, event).await, (None, None));
+
+    // The event's state does not matter.
+    sign_up_n(&app, event, 2).await;
+    assert_eq!(start(&app, event).await.status(), StatusCode::OK);
+    let res = schedule(&app, event, &json!({"starts_at": 7})).await;
+    assert_eq!(res.status(), StatusCode::NO_CONTENT);
+    assert_eq!(schedule_row(&app, event).await, (Some(7), None));
+}
+
+#[tokio::test]
+async fn schedule_rejects_bad_values() {
+    let app = TestApp::spawn(|_| {}).await;
+    let event = create_event(&app, Format::SingleElim).await;
+    let bad = [
+        (json!({"starts_at": -1}), "starts_at"),
+        (json!({"starts_at": 4102444801_i64}), "starts_at"),
+        (json!({"description": "a".repeat(281)}), "description"),
+        (json!({"description": "a\nb"}), "description"),
+        (json!({"description": "a\u{202e}b"}), "description"),
+    ];
+    for (body, field) in &bad {
+        let res = schedule(&app, event, body).await;
+        assert_eq!(res.status(), StatusCode::BAD_REQUEST, "{body}");
+        let err: Value = res.json().await.unwrap();
+        assert!(
+            err["error"].as_str().unwrap().contains(field),
+            "{body}: {err}"
+        );
+
+        let mut create = json!({"name": "Weekly", "format": "SingleElim", "ruleset": null});
+        for (k, v) in body.as_object().unwrap() {
+            create[k] = v.clone();
+        }
+        let res = app.as_to().post_json("/v1/admin/events", &create).await;
+        assert_eq!(res.status(), StatusCode::BAD_REQUEST, "create {create}");
+        let err: Value = res.json().await.unwrap();
+        assert!(
+            err["error"].as_str().unwrap().contains(field),
+            "create {create}: {err}"
+        );
+    }
+    assert_eq!(schedule_row(&app, event).await, (None, None));
+    let n: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM events")
+        .fetch_one(&app.state.db)
+        .await
+        .unwrap();
+    assert_eq!(n, 1);
+
+    // 280 characters, accented, is stored as sent.
+    let accented = "é".repeat(280);
+    let res = schedule(&app, event, &json!({"description": accented})).await;
+    assert_eq!(res.status(), StatusCode::NO_CONTENT);
+    assert_eq!(schedule_row(&app, event).await, (None, Some(accented)));
+
+    let res = schedule(&app, 999, &json!({"starts_at": 1})).await;
+    assert_eq!(res.status(), StatusCode::NOT_FOUND);
+
+    let p = app.player("Mango").await;
+    let res = p
+        .post_json(
+            &format!("/v1/admin/events/{event}/schedule"),
+            &json!({"starts_at": 1}),
+        )
+        .await;
+    assert_eq!(res.status(), StatusCode::FORBIDDEN);
 }

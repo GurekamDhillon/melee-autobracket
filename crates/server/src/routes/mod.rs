@@ -29,6 +29,7 @@ pub fn router() -> Router<AppState> {
         .route("/v1/events/{id}/entrants", post(events::signup))
         .route("/v1/admin/events", post(admin::create_event))
         .route("/v1/admin/events/{id}/start", post(admin::start_event))
+        .route("/v1/admin/events/{id}/schedule", post(admin::schedule))
         .route(
             "/v1/admin/events/{id}/entrants/{tag}",
             delete(admin::remove_entrant),
@@ -105,6 +106,10 @@ pub(crate) async fn json_errors(res: Response) -> Response {
 pub(crate) const MAX_BUILD_CHARS: usize = 64;
 /// Longest event name.
 pub(crate) const MAX_EVENT_NAME_CHARS: usize = 80;
+/// Longest event description.
+pub(crate) const MAX_EVENT_DESCRIPTION_CHARS: usize = 280;
+/// Latest event start time (`starts_at`), unix seconds: the year 2100.
+pub(crate) const MAX_STARTS_AT: i64 = 4_102_444_800;
 
 /// An error response: a status code and a JSON body of the form `{"error": "...", ...}`.
 #[derive(Debug)]
@@ -145,6 +150,30 @@ pub(crate) fn check_text(field: &str, value: &str, max_chars: usize) -> Result<(
             StatusCode::BAD_REQUEST,
             format!("{field} must be at most {max_chars} printable characters"),
         ))
+    }
+}
+
+/// 400 unless an event's schedule fields are in range: `starts_at` in `0..=MAX_STARTS_AT`,
+/// `description` at most [`MAX_EVENT_DESCRIPTION_CHARS`] printable characters. Returns the
+/// description to store: `None` for an empty or all-whitespace one.
+pub(super) fn check_schedule(
+    starts_at: Option<i64>,
+    description: Option<String>,
+) -> Result<Option<String>, ApiError> {
+    if let Some(t) = starts_at {
+        if !(0..=MAX_STARTS_AT).contains(&t) {
+            return Err(ApiError::new(
+                StatusCode::BAD_REQUEST,
+                format!("starts_at must be unix seconds from 0 to {MAX_STARTS_AT}"),
+            ));
+        }
+    }
+    match description {
+        Some(d) => {
+            check_text("description", &d, MAX_EVENT_DESCRIPTION_CHARS)?;
+            Ok((!d.trim().is_empty()).then_some(d))
+        }
+        None => Ok(None),
     }
 }
 

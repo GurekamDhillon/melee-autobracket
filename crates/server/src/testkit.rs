@@ -111,6 +111,8 @@ impl TestApp {
             format,
             ruleset: None,
             best_of: None,
+            starts_at: None,
+            description: None,
         };
         let res = self.as_to().post_json("/v1/admin/events", &req).await;
         assert_eq!(res.status(), reqwest::StatusCode::CREATED, "creating event");

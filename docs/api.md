@@ -207,6 +207,8 @@ A client polling `GET /v1/me/next` every 2 seconds uses 0.5 requests per second.
 | tag | 2-16 characters of `A-Z a-z 0-9 _`; unique regardless of case (`Mango` and `MANGO` are one tag) |
 | `engine_build`, `x-ab-build` | at most 64 printable characters |
 | event name | at most 80 printable characters |
+| event `description` | at most 280 printable characters; empty or whitespace is stored as null |
+| event `starts_at` | unix seconds, 0 to 4102444800 |
 | no-show `detail` | at most 200 printable characters |
 | room code | 4 characters of `A-Z 0-9` (a relay room); or, only where the server sets `allow_direct_connect`, `HOST:PORT` (host 1-253 characters of `A-Z a-z 0-9 . -`, port 1-65535) |
 
@@ -233,6 +235,7 @@ described above; the tables list the other statuses.
 | POST | `/v1/sets/{event}/{set}/games/{n}/replay` | player of the set | the `.slp` file's bytes; header `x-ab-build` optional | 202 stored; 200 this exact file was already stored for this slot | 400 not a readable replay, bad `x-ab-build`; 403; 404; 409 `n` is not the current game, a different file is stored for this slot, the game no longer takes uploads, the set is not in play; 413 |
 | POST | `/v1/admin/events` | organiser | `EventCreateReq` | 201 `EventSummary` | 400 |
 | POST | `/v1/admin/events/{id}/start` | organiser | ignored (send `{}`) | 200 `EventView` | 404; 409 already started, fewer than 2 entrants |
+| POST | `/v1/admin/events/{id}/schedule` | organiser | `EventScheduleReq` | 204, empty; replaces both fields, an omitted or null field clears it | 400; 404 |
 | DELETE | `/v1/admin/events/{id}/entrants/{tag}` | organiser | — | 204, empty; only while the event is in sign-up; later seeds shift down; `{tag}` matches in any case | 400 bad path; 404 no such event, or no such entrant; 409 event not in sign-up |
 | POST | `/v1/admin/invites` | organiser | ignored (send `{}`) | 201 `{"code":"<12 characters A-Z 2-7>"}` | — |
 | GET | `/v1/admin/queue` | organiser | — | 200 `[QueueItem]`, open items, oldest first | — |
@@ -334,10 +337,34 @@ absent. In requests, a field marked optional may be left out.
 | `format` | `"SingleElim"` or `"DoubleElim"` | |
 | `ruleset` | `Ruleset` or null | null: the server's configured ruleset |
 | `best_of` | integer or null, optional | overrides the ruleset's `best_of`; odd |
+| `starts_at` | integer or null, optional | when the event starts, unix seconds (see [Limits](#3-limits)) |
+| `description` | string or null, optional | what the event is about, at most 280 printable characters; empty or whitespace counts as null |
 
 <!-- checked: EventCreateReq -->
 ```json
-{"name": "Weekly #12", "format": "DoubleElim", "ruleset": null, "best_of": 3}
+{
+  "name": "Weekly #12",
+  "format": "DoubleElim",
+  "ruleset": null,
+  "best_of": 3,
+  "starts_at": 1795000000,
+  "description": "Bo3, Friday 8pm"
+}
+```
+
+### EventScheduleReq
+
+Sets when an event starts and what it is about, in any state. Both fields are replaced by the
+request: an omitted or null field clears it, as does an empty or all-whitespace description.
+
+| Field | Type | |
+|---|---|---|
+| `starts_at` | integer or null, optional | unix seconds, 0 to 4102444800 |
+| `description` | string or null, optional | at most 280 printable characters |
+
+<!-- checked: EventScheduleReq -->
+```json
+{"starts_at": 1795000000, "description": "Bo3, Friday 8pm"}
 ```
 
 ### Ruleset
@@ -369,11 +396,21 @@ In a request every field is optional (missing ones take the defaults shown here)
 
 ### EventSummary
 
-`state` is `"signup"`, `"running"` or `"complete"`.
+`state` is `"signup"`, `"running"` or `"complete"`. `starts_at` is when the event starts
+(unix seconds) and `description` what it is about, both as the organiser set them or null;
+`created_at` is when the event was created (unix seconds).
 
 <!-- checked: EventSummary -->
 ```json
-{"id": 1, "name": "Weekly #12", "state": "running", "entrants": 2}
+{
+  "id": 1,
+  "name": "Weekly #12",
+  "state": "running",
+  "entrants": 2,
+  "starts_at": 1795000000,
+  "description": "Bo3, Friday 8pm",
+  "created_at": 1763200000
+}
 ```
 
 ### EventView
@@ -396,7 +433,15 @@ In a request every field is optional (missing ones take the defaults shown here)
 <!-- checked: EventView -->
 ```json
 {
-  "summary": {"id": 1, "name": "Weekly #12", "state": "running", "entrants": 2},
+  "summary": {
+    "id": 1,
+    "name": "Weekly #12",
+    "state": "running",
+    "entrants": 2,
+    "starts_at": 1795000000,
+    "description": "Bo3, Friday 8pm",
+    "created_at": 1763200000
+  },
   "ruleset": {
     "stocks": 4,
     "timer_secs": 480,

@@ -139,9 +139,13 @@ $EDITOR autobracket.toml
 # 3. Run the server.
 autobracket serve --config autobracket.toml
 
-# 4. Create an event. The response is the new event as JSON, including its id.
+# 4. Create an event. The response is the new event as JSON, including its id. The start
+#    time (unix seconds; `date -d '2026-11-20 20:00' +%s` gives one) and the description are
+#    optional and show on the public schedule; `event schedule ID --starts-at ... --description
+#    ...` changes them later (an omitted flag clears that field).
 autobracket admin --server http://localhost:8080 --key-file to.key \
-  event create --name "Nightly" --format double --best-of 3
+  event create --name "Nightly" --format double --best-of 3 \
+  --starts-at "$(date -d '2026-11-20 20:00' +%s)" --description "Bo3, Friday 8pm"
 
 # 5. Once players have signed up, start it. Seeds follow sign-up order.
 autobracket admin --server http://localhost:8080 --key-file to.key event start 1

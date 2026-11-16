@@ -16,15 +16,28 @@ use crate::state::AppState;
 
 /// `GET /v1/events`: every event, oldest first.
 pub async fn list(State(state): State<AppState>) -> Result<Json<Vec<EventSummary>>, ApiError> {
-    let rows: Vec<(i64, String, String, i64)> = sqlx::query_as(
+    let rows: Vec<SummaryRow> = sqlx::query_as(
         "SELECT e.id, e.name, e.state,
-                (SELECT COUNT(*) FROM entrants n WHERE n.event_id = e.id)
+                (SELECT COUNT(*) FROM entrants n WHERE n.event_id = e.id),
+                e.starts_at, e.description, e.created_at
          FROM events e ORDER BY e.id",
     )
     .fetch_all(&state.db)
     .await?;
     rows.into_iter()
-        .map(|(id, name, state, entrants)| summary(id, name, state, entrants))
+        .map(
+            |(id, name, state, entrants, starts_at, description, created_at)| {
+                summary(
+                    id,
+                    name,
+                    state,
+                    entrants,
+                    starts_at,
+                    description,
+                    created_at,
+                )
+            },
+        )
         .collect::<Result<_, _>>()
         .map(Json)
 }
@@ -113,12 +126,15 @@ pub async fn signup(
 pub(super) async fn event_view(db: &SqlitePool, id: i64) -> Result<EventView, ApiError> {
     // Read-only, so a deferred transaction: one consistent snapshot.
     let mut tx = db.begin().await?;
-    let row: Option<(String, String, String)> =
-        sqlx::query_as("SELECT name, state, ruleset_json FROM events WHERE id = ?")
-            .bind(id)
-            .fetch_optional(&mut *tx)
-            .await?;
-    let (name, state, ruleset_json) = row.ok_or(LifecycleError::NoSuchEvent)?;
+    let row: Option<EventRow> = sqlx::query_as(
+        "SELECT name, state, ruleset_json, starts_at, description, created_at
+         FROM events WHERE id = ?",
+    )
+    .bind(id)
+    .fetch_optional(&mut *tx)
+    .await?;
+    let (name, state, ruleset_json, starts_at, description, created_at) =
+        row.ok_or(LifecycleError::NoSuchEvent)?;
     let ruleset: Ruleset = serde_json::from_str(&ruleset_json)
         .map_err(|e| ApiError::internal(format_args!("event {id} ruleset_json: {e}")))?;
 
@@ -162,7 +178,15 @@ pub(super) async fn event_view(db: &SqlitePool, id: i64) -> Result<EventView, Ap
 
     let entrants = i64::try_from(tags.len()).unwrap_or(i64::MAX);
     Ok(EventView {
-        summary: summary(id, name, state, entrants)?,
+        summary: summary(
+            id,
+            name,
+            state,
+            entrants,
+            starts_at,
+            description,
+            created_at,
+        )?,
         ruleset,
         tags,
         bracket,
@@ -172,17 +196,31 @@ pub(super) async fn event_view(db: &SqlitePool, id: i64) -> Result<EventView, Ap
     })
 }
 
+/// One `events` row as `list` reads it: id, name, state, entrant count, `starts_at`,
+/// `description`, `created_at`.
+type SummaryRow = (i64, String, String, i64, Option<i64>, Option<String>, i64);
+
+/// One `events` row as `event_view` reads it: name, state, `ruleset_json`, `starts_at`,
+/// `description`, `created_at`.
+type EventRow = (String, String, String, Option<i64>, Option<String>, i64);
+
 pub(super) fn summary(
     id: i64,
     name: String,
     state: String,
     entrants: i64,
+    starts_at: Option<i64>,
+    description: Option<String>,
+    created_at: i64,
 ) -> Result<EventSummary, ApiError> {
     Ok(EventSummary {
         id,
         name,
         state,
         entrants: to_int(entrants)?,
+        starts_at,
+        description,
+        created_at,
     })
 }
 
