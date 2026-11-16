@@ -137,12 +137,21 @@ async fn bad_tag_400_dup_tag_409() {
         assert_eq!(res.status(), StatusCode::CREATED, "tag {good:?}");
     }
 
-    // The same tag under a new key.
-    let res = signed_register(&app, &new_key(), now(), &reg("Hbox_99", None))
-        .send()
+    // The same tag under a new key, in any case.
+    for taken in ["Hbox_99", "HBOX_99", "hbox_99"] {
+        let res = signed_register(&app, &new_key(), now(), &reg(taken, None))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::CONFLICT, "{taken}");
+        let body: serde_json::Value = res.json().await.unwrap();
+        assert_eq!(body, serde_json::json!({"error": "tag is taken"}));
+    }
+    let n: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM players WHERE tag LIKE 'hbox_99'")
+        .fetch_one(&app.state.db)
         .await
         .unwrap();
-    assert_eq!(res.status(), StatusCode::CONFLICT);
+    assert_eq!(n, 1);
 
     // The same key under a new tag.
     let sk = new_key();

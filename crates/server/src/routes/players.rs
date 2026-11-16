@@ -35,6 +35,18 @@ pub async fn register(State(state): State<AppState>, req: AnyKey) -> Result<Stat
         ));
     }
 
+    // Tags are unique regardless of case. The unique index of migration 0004 (which also
+    // covers the case-variant groups older databases may hold) enforces it at insert; this
+    // lookup gives the same 409 without relying on that.
+    let taken: Option<i64> =
+        sqlx::query_scalar("SELECT 1 FROM players WHERE tag = ? COLLATE NOCASE LIMIT 1")
+            .bind(&body.tag)
+            .fetch_optional(&mut *tx)
+            .await?;
+    if taken.is_some() {
+        return Err(ApiError::new(StatusCode::CONFLICT, "tag is taken"));
+    }
+
     if state.cfg.require_invite {
         let code = body
             .invite
