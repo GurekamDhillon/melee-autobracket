@@ -29,9 +29,12 @@ pub trait Resim: Send + Sync {
     /// Identifies the engine build doing the checking.
     fn build(&self) -> String;
 
-    /// Hands the verifier the opened store; `build_app` calls it once. Only verifiers that
-    /// keep state in the store ([`ExternalResim`]) need it.
-    fn attach(&self, _db: &SqlitePool) {}
+    /// Hands the verifier the opened store; `build_app` calls it once at start-up, before
+    /// the judging worker starts. Only verifiers that keep state in the store
+    /// ([`ExternalResim`]) need it.
+    async fn attach(&self, _db: &SqlitePool) -> anyhow::Result<()> {
+        Ok(())
+    }
 
     /// Tells the verifier an external result was just recorded (by the result route).
     fn result_posted(&self) {}
@@ -315,8 +318,24 @@ impl Resim for ExternalResim {
             .unwrap_or_else(|| "external".into())
     }
 
-    fn attach(&self, db: &SqlitePool) {
+    /// Also retires every job a previous run left unfinished. Nothing waits for them any
+    /// more (the waiting `check` died with that run, and `worker::recover` re-queues the game,
+    /// which queues a fresh job), so a verifier would only waste a run on them. They are
+    /// marked `done` without a result rather than deleted, like a job whose wait timed out:
+    /// the row stays as a record, and a late result for it is refused with 409.
+    async fn attach(&self, db: &SqlitePool) -> anyhow::Result<()> {
+        let retired = sqlx::query("UPDATE resim_jobs SET state = 'done' WHERE state != 'done'")
+            .execute(db)
+            .await
+            .context("retiring unfinished verifier jobs")?;
+        if retired.rows_affected() > 0 {
+            eprintln!(
+                "external verifier: retired {} job(s) left unfinished by a previous run",
+                retired.rows_affected()
+            );
+        }
         let _ = self.db.set(db.clone());
+        Ok(())
     }
 
     fn result_posted(&self) {

@@ -38,7 +38,10 @@ pub async fn build_app(cfg: Config, resim: Arc<dyn Resim>) -> anyhow::Result<(Ro
     let db = db::open(&cfg.db_path)
         .await
         .with_context(|| format!("opening database {}", cfg.db_path.display()))?;
-    resim.attach(&db);
+    resim
+        .attach(&db)
+        .await
+        .context("attaching the verifier to the store")?;
 
     // Replenish one request every 1/rate_per_sec seconds, per peer IP.
     let governor = GovernorConfigBuilder::default()

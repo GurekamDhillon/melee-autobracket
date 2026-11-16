@@ -41,7 +41,8 @@ enum Cmd {
     /// Re-simulate replays for a server in external verifier mode: claim jobs, run the
     /// engine locally, and post the results.
     VerifyWorker {
-        /// Server base URL, e.g. `http://bracket.example:8080`.
+        /// Server base URL. Use `https://` in production: with plain `http://` the server's
+        /// answers (the jobs and their replays) can be tampered with on the way.
         #[arg(long, value_name = "URL")]
         server: String,
         /// Secret key file written by `autobracket keygen`.
@@ -72,8 +73,7 @@ async fn main() -> anyhow::Result<()> {
             let engine = Slpcheck::new(engine, iso, Duration::from_secs(timeout_secs))
                 .await
                 .context("the engine cannot be run")?;
-            verify_worker::run(server, key, engine).await;
-            Ok(())
+            verify_worker::run(server, key, engine).await
         }
     }
 }

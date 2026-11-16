@@ -15,6 +15,10 @@ use crate::resim::{Resim, ScratchDir, Slpcheck};
 const IDLE_SLEEP: Duration = Duration::from_secs(2);
 /// Pause after a network or server error.
 const ERROR_SLEEP: Duration = Duration::from_secs(5);
+/// How long establishing a connection to the server may take.
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+/// How long one request may take in all, response body included (enough for a 16 MiB replay).
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
 /// Name of the downloaded replay. Stored replays are named after their slot, which says
 /// nothing; the engine ignores the name.
 const REPLAY_FILE: &str = "match.slp";
@@ -30,13 +34,34 @@ pub fn read_key_file(path: &Path) -> anyhow::Result<SigningKey> {
     Ok(SigningKey::from_bytes(&bytes))
 }
 
-/// Claims and checks jobs forever. Errors are logged and retried, never returned.
-pub async fn run(server: String, key: SigningKey, engine: Slpcheck) {
-    let client = Client {
-        base: server.trim_end_matches('/').to_owned(),
-        key,
-        http: reqwest::Client::new(),
-    };
+/// A warning when `server` is plain `http://` to a host that is not this machine: the
+/// server's answers (the job and its replay) would then be unauthenticated.
+pub fn insecure_server_warning(server: &str) -> Option<String> {
+    let url = reqwest::Url::parse(server).ok()?;
+    if url.scheme() != "http" {
+        return None;
+    }
+    let host = url.host_str()?;
+    let ip = host.trim_start_matches('[').trim_end_matches(']');
+    let loopback = host.eq_ignore_ascii_case("localhost")
+        || ip
+            .parse::<std::net::IpAddr>()
+            .is_ok_and(|ip| ip.is_loopback());
+    (!loopback).then(|| {
+        format!(
+            "verify-worker: warning: {server} is plain http; anyone on the path can swap the \
+             replays this worker checks. Use https:// in production."
+        )
+    })
+}
+
+/// Claims and checks jobs forever. Errors are logged and retried; only setting up the
+/// HTTP client can fail.
+pub async fn run(server: String, key: SigningKey, engine: Slpcheck) -> anyhow::Result<()> {
+    if let Some(warning) = insecure_server_warning(&server) {
+        eprintln!("{warning}");
+    }
+    let client = Client::new(&server, key, CONNECT_TIMEOUT, REQUEST_TIMEOUT)?;
     eprintln!(
         "verify-worker: checking jobs from {} with engine build {}",
         client.base,
@@ -54,17 +79,25 @@ pub async fn run(server: String, key: SigningKey, engine: Slpcheck) {
     }
 }
 
-/// Claims one job and checks it. `false` when there was no job.
-async fn step(client: &Client, engine: &Slpcheck) -> anyhow::Result<bool> {
+/// Asks the server for a job: `None` when there is none.
+pub async fn claim(client: &Client) -> anyhow::Result<Option<VerifyJob>> {
     let res = client
         .send(Method::POST, "/v1/verify/claim", Vec::new())
         .await?;
     match res.status() {
-        StatusCode::NO_CONTENT => return Ok(false),
+        StatusCode::NO_CONTENT => return Ok(None),
         StatusCode::OK => {}
         _ => bail!("claiming a job: {}", describe(res).await),
     }
-    let job: VerifyJob = res.json().await.context("reading the claimed job")?;
+    let job = res.json().await.context("reading the claimed job")?;
+    Ok(Some(job))
+}
+
+/// Claims one job and checks it. `false` when there was no job.
+async fn step(client: &Client, engine: &Slpcheck) -> anyhow::Result<bool> {
+    let Some(job) = claim(client).await? else {
+        return Ok(false);
+    };
 
     let res = client
         .send(
@@ -111,13 +144,34 @@ async fn step(client: &Client, engine: &Slpcheck) -> anyhow::Result<bool> {
     Ok(true)
 }
 
-struct Client {
+/// A signing HTTP client for one server.
+pub struct Client {
     base: String,
     key: SigningKey,
     http: reqwest::Client,
 }
 
 impl Client {
+    /// `connect_timeout` bounds establishing a connection, `timeout` each whole request, so
+    /// a stalled server surfaces as an error instead of blocking the worker.
+    pub fn new(
+        server: &str,
+        key: SigningKey,
+        connect_timeout: Duration,
+        timeout: Duration,
+    ) -> anyhow::Result<Self> {
+        let http = reqwest::Client::builder()
+            .connect_timeout(connect_timeout)
+            .timeout(timeout)
+            .build()
+            .context("building the HTTP client")?;
+        Ok(Client {
+            base: server.trim_end_matches('/').to_owned(),
+            key,
+            http,
+        })
+    }
+
     /// Sends a request signed with the worker's key.
     async fn send(
         &self,
@@ -148,4 +202,50 @@ async fn describe(res: reqwest::Response) -> String {
     let status = res.status();
     let body = res.text().await.unwrap_or_default();
     format!("server answered {status}: {}", body.trim())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn stalled_server_is_an_error() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        // Accepts connections and never answers.
+        let server = tokio::spawn(async move {
+            let mut held = Vec::new();
+            while let Ok((socket, _)) = listener.accept().await {
+                held.push(socket);
+            }
+        });
+        let key = SigningKey::from_bytes(&[7; 32]);
+        let client = Client::new(
+            &format!("http://{addr}"),
+            key,
+            Duration::from_millis(200),
+            Duration::from_millis(300),
+        )
+        .unwrap();
+        let claimed = tokio::time::timeout(Duration::from_secs(5), claim(&client))
+            .await
+            .expect("claim gives up instead of hanging");
+        assert!(claimed.is_err(), "{claimed:?}");
+        server.abort();
+    }
+
+    #[test]
+    fn plain_http_warning_only_for_remote_hosts() {
+        for remote in ["http://bracket.example:8080", "http://10.0.0.5/"] {
+            assert!(insecure_server_warning(remote).is_some(), "{remote}");
+        }
+        for fine in [
+            "https://bracket.example",
+            "http://localhost:8080",
+            "http://127.0.0.1:1",
+            "http://[::1]:8080",
+        ] {
+            assert_eq!(insecure_server_warning(fine), None, "{fine}");
+        }
+    }
 }

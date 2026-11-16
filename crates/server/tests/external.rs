@@ -404,3 +404,49 @@ async fn worker_binary_end_to_end() {
     let build = build.unwrap();
     assert!(build.starts_with("fake 0.0+"), "verifier_build {build:?}");
 }
+
+#[tokio::test]
+async fn orphaned_jobs_are_retired_at_startup() {
+    let vk = SigningKey::generate(&mut OsRng);
+    let app = TestApp::spawn_with(
+        external(&vk),
+        Arc::new(ExternalResim::new(Duration::from_secs(30))),
+    )
+    .await;
+    // What a previous run left behind: a queued job, a claimed one, and a finished one.
+    sqlx::query(
+        "INSERT INTO resim_jobs (id, game_id, path, replay_last_frame, state, result_json, claimed_at)
+         VALUES (1, 0, '/a.slp', 1, 'queued', NULL, NULL),
+                (2, 0, '/b.slp', 1, 'claimed', NULL, ?),
+                (3, 0, '/c.slp', 1, 'done', '{\"kept\":true}', NULL)",
+    )
+    .bind(now_unix())
+    .execute(&app.state.db)
+    .await
+    .unwrap();
+
+    // Start-up attaches the verifier to the store.
+    let restarted = ExternalResim::new(Duration::from_secs(30));
+    restarted.attach(&app.state.db).await.unwrap();
+
+    let rows: Vec<(i64, String, Option<String>)> =
+        sqlx::query_as("SELECT id, state, result_json FROM resim_jobs ORDER BY id")
+            .fetch_all(&app.state.db)
+            .await
+            .unwrap();
+    assert_eq!(
+        rows,
+        vec![
+            (1, "done".into(), None),
+            (2, "done".into(), None),
+            (3, "done".into(), Some("{\"kept\":true}".into())),
+        ]
+    );
+    let verifier = Signer::new(vk, &app.url);
+    assert_eq!(verifier.claim().await.status(), StatusCode::NO_CONTENT);
+    let result = VerifyResult {
+        outcome: ResimOutcome::Match,
+        build: "late".into(),
+    };
+    assert_eq!(verifier.post_result(2, &result).await, StatusCode::CONFLICT);
+}
