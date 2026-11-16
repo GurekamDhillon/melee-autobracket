@@ -9,9 +9,11 @@ permissions:
 
 jobs:
   check:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
       # The workspace's rust-version (Cargo.toml).
       - uses: dtolnay/rust-toolchain@1.94
         with:

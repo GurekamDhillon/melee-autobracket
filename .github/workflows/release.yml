@@ -11,11 +11,13 @@ permissions:
 
 jobs:
   release:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     permissions:
       contents: write # create the release and upload its files
     steps:
       - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
       # The workspace's rust-version (Cargo.toml). No build cache: a release builds from clean.
       - uses: dtolnay/rust-toolchain@1.94
       - name: Tag matches the workspace version

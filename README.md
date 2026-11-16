@@ -38,8 +38,9 @@ re-simulates them. Turning verification on is optional; see
 
 The repository is private and has no published release yet: `<release URL>` below stands for
 the address of a release's files once there is one. Until then, build the same archive
-yourself with `scripts/build-release.sh` (path C). The binaries are built on Ubuntu
-(GitHub's `ubuntu-latest`) and need a glibc at least that new (Debian 13, Ubuntu 24.04).
+yourself with `scripts/build-release.sh` (path C). The binaries are built on Ubuntu 24.04
+(the release workflow's runner, `ubuntu-24.04`), which is the baseline: they need glibc 2.39
+or newer (Ubuntu 24.04, Debian 13 or later).
 
 ```sh
 curl -LO <release URL>/autobracket-0.1.0-x86_64-unknown-linux-gnu.tar.gz
