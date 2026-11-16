@@ -456,6 +456,15 @@ itself. IPv6 clients are limited per /64. Players behind one NAT (a venue) share
 address: a client polls every 2 s, so raise `rate_per_sec` and `rate_burst` for a venue
 event. `max_connections` (default 512) caps connections handled at once.
 
+The gateway address `10.203.47.1` was verified with Docker's default userland proxy enabled;
+other setups (userland proxy disabled, rootless Docker, Podman) were not tested, and there the
+proxy's connections may arrive from a different address. The image has no tool that shows a
+connection's remote address, so read the gateway with
+`docker network inspect autobracket_default --format '{{range .IPAM.Config}}{{.Gateway}}{{end}}'`:
+that is the address to trust. A wrong value fails safe against spoofing but not for usability:
+the header is ignored, so every player appears as the proxy's one address and shares one rate
+limit, and players get HTTP 429.
+
 ### Logs
 
 The server logs to stderr (the journal, under systemd), one plain-text line per event with

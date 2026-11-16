@@ -9,7 +9,13 @@
 #     through Docker's port publishing and arrives from the gateway of this project's
 #     network, which is pinned below to 10.203.47.0/28: the gateway is 10.203.47.1. Trust
 #     that one address and nothing wider: a trusted range that holds any client's own
-#     address lets that client choose the address the server sees.
+#     address lets that client choose the address the server sees. The gateway address was
+#     verified with Docker's default userland proxy enabled; other setups (userland proxy
+#     disabled, rootless Docker, Podman) were not tested. The image has no tool that shows a
+#     connection's remote address; read the gateway, which is the address to trust, with
+#       docker network inspect autobracket_default --format '{{range .IPAM.Config}}{{.Gateway}}{{end}}'
+#     With a wrong address the header is ignored (safe against spoofing, not for usability):
+#     every player appears as one address and shares one rate limit, so players get HTTP 429.
 #
 #       docker compose -f deploy/docker-compose.yml build
 #       docker compose -f deploy/docker-compose.yml run --rm autobracket init --dir /data \

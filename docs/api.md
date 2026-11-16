@@ -21,9 +21,10 @@ Contents:
 
 - **Transport.** The server speaks plain HTTP/1.1. Run it behind a TLS reverse proxy for any
   public deployment: room codes and invite codes cross the wire, and `Next` (relay address,
-  room code, stocks, timer) feeds the game's command line. The owner's deployment is nginx in
-  Docker in front of the server: requests arrive from the Docker bridge network, so the server
-  is configured with `trusted_proxies = ["172.16.0.0/12"]` (see [Limits](#3-limits)).
+  room code, stocks, timer) feeds the game's command line. Behind a proxy every request arrives
+  from the proxy's address, so the server is configured to trust that one address and nothing
+  wider, for example `trusted_proxies = ["10.203.47.1/32"]`, the pinned gateway of
+  `deploy/docker-compose.yml` (see [Limits](#3-limits)).
 - **Bodies.** Request and response bodies are JSON (UTF-8), except a replay upload's request
   body and a replay download's response body, which are the raw `.slp` bytes
   (`application/octet-stream`). The server does not look at `content-type` on requests.
@@ -186,10 +187,15 @@ address in `X-Forwarded-For` that is not itself a trusted proxy (each proxy appe
 it received the request from, so anything further left is the client's own claim and is
 ignored). Without `trusted_proxies`, `X-Forwarded-For` is ignored entirely, so a client cannot
 escape its bucket by sending one. IPv6 clients are counted per /64 (one subscriber usually
-holds a whole /64). Behind a reverse proxy, set `trusted_proxies` to the proxy's address range,
-otherwise every client shares the proxy's single bucket: for nginx in Docker,
-`trusted_proxies = ["172.16.0.0/12"]` and in nginx
-`proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;`.
+holds a whole /64). Behind a reverse proxy, set `trusted_proxies` to the single address the
+proxy's connections arrive from, otherwise every client shares the proxy's single bucket: for
+example `trusted_proxies = ["10.203.47.1/32"]` (the pinned gateway of
+`deploy/docker-compose.yml`, with the proxy on the host) and in nginx
+`proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;`. Never put a range in
+`trusted_proxies` that contains any client's address: every trusted entry is skipped in the
+walk from the right, so such a client gets the entry to its left believed, which is one it
+wrote itself. The README's "TLS and reverse proxies" section gives the reasoning and the
+address to trust in each setup.
 
 A client polling `GET /v1/me/next` every 2 seconds uses 0.5 requests per second.
 
