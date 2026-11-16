@@ -62,7 +62,8 @@ Contents:
 
 There are no accounts or passwords. A participant is an Ed25519 key pair; the public key is
 their identity. Every route except the public ones (`GET /`, `GET /assets/fonts/{file}`,
-`GET /v1/events`, `GET /v1/events/{id}`) must be signed with four headers:
+`GET /v1/events`, `GET /v1/events/{id}`, `GET /v1/history`, `GET /v1/players`,
+`GET /v1/players/{tag}`) must be signed with four headers:
 
 | Header | Value |
 |---|---|
@@ -227,6 +228,9 @@ described above; the tables list the other statuses.
 | GET | `/assets/fonts/{file}` | public | — | 200 `font/woff2`, one of the page's fonts | 404 |
 | GET | `/v1/events` | public | — | 200 `[EventSummary]` | — |
 | GET | `/v1/events/{id}` | public | — | 200 `EventView` | 400, 404 |
+| GET | `/v1/history` | public | — | 200 `[EventResult]`, complete events, newest first | — |
+| GET | `/v1/players` | public | — | 200 `[PlayerSummary]`, every registered player, by tag ignoring case | — |
+| GET | `/v1/players/{tag}` | public | — | 200 `PlayerProfile`; `{tag}` matches in any case | 404 no such player |
 | POST | `/v1/players` | any key | `RegisterReq` | 201, empty | 400 tag or body; 403 invite missing, unknown or used; 409 key already registered, tag taken |
 | POST | `/v1/events/{id}/entrants` | player | `SignupReq` | 201, empty | 400; 403 `{"error":"engine build not accepted","accepted":[…]}`; 404; 409 not in sign-up, already entered, event full (1024) |
 | GET | `/v1/me/next?event={id}` | player | — | 200 `Next` | 400; 404 no such event |
@@ -652,6 +656,110 @@ A game kept for study (a re-simulation divergence, a conflict), with its evidenc
   "client_builds": ["b1", "b1"],
   "created_at": 1763200000,
   "judged_at": 1763200004
+}
+```
+
+### EventResult
+
+A complete event and its final placings (`GET /v1/history`). Placings are computed from the
+bracket: the champion is 1st; every other entrant is ranked by the highest `(side, round)` set
+they lost (Winners < Losers < GrandFinal) and placed 1 + the number of entrants ranked
+strictly higher, so equal ranks share a place (single elimination gives 1, 2, 3, 3, 5, 5, 5,
+5; double elimination 1, 2, 3, 4, 5, 5, 7, 7). Ordered by place, then seed.
+
+| Field | Type | |
+|---|---|---|
+| `summary` | `EventSummary` | `state` is always `"complete"` |
+| `placings` | [`Placing`] | one per entrant: `place` (1-based) and `tag` |
+
+<!-- checked: EventResult -->
+```json
+{
+  "summary": {
+    "id": 1,
+    "name": "Weekly #12",
+    "state": "complete",
+    "entrants": 4,
+    "starts_at": 1795000000,
+    "description": "Bo3, Friday 8pm",
+    "created_at": 1763200000
+  },
+  "placings": [
+    {"place": 1, "tag": "Mango"},
+    {"place": 2, "tag": "Armada"},
+    {"place": 3, "tag": "Zain"},
+    {"place": 3, "tag": "Cody"}
+  ]
+}
+```
+
+### PlayerSummary
+
+One row of the players index (`GET /v1/players`): every registered player, including those
+who never entered an event (all zeros), ordered by tag ignoring case.
+
+Counting rules, shared with [PlayerProfile](#playerprofile):
+
+- A **set** counts for both players once its bracket set is `Done` with an entrant in both
+  slots, whatever decided it (played games, an award, a DQ). Sets of running events count as
+  they finish; a set resolved by a bye is not a set.
+- **Games** are the set's stored wins (`scores` in `EventView`): the games played, including
+  those before an award or DQ. A set awarded before any game was played counts as a set with
+  no games.
+- **Events** counts entries in any state. **Titles** counts complete events the player won.
+
+| Field | Type | |
+|---|---|---|
+| `tag` | string | the canonical spelling |
+| `events` | integer | events entered, in any state |
+| `titles` | integer | complete events won |
+| `sets` | [won, lost] | |
+
+<!-- checked: PlayerSummary -->
+```json
+{"tag": "Mango", "events": 1, "titles": 1, "sets": [2, 0]}
+```
+
+### PlayerProfile
+
+A player's record (`GET /v1/players/{tag}`; the tag matches in any case and `tag` in the
+answer is the canonical spelling). Counting rules as under
+[PlayerSummary](#playersummary); `place` comes from the event's placings and is null unless
+the event is complete; `seed` is the entrant's index in the event's `tags` (0 = top seed).
+
+| Field | Type | |
+|---|---|---|
+| `tag` | string | the canonical spelling |
+| `since` | integer | when the player registered, unix seconds |
+| `events` | [`PlayerEvent`] | newest first: `event` (`EventSummary`), `seed`, `place` (or null), `sets` and `games` (each [won, lost]) in that event |
+| `head_to_head` | [`HeadToHead`] | one per opponent ever played, by sets played descending then tag: `tag`, `sets` and `games` (each [won, lost]) |
+
+<!-- checked: PlayerProfile -->
+```json
+{
+  "tag": "Mango",
+  "since": 1763100000,
+  "events": [
+    {
+      "event": {
+        "id": 1,
+        "name": "Weekly #12",
+        "state": "complete",
+        "entrants": 4,
+        "starts_at": 1795000000,
+        "description": "Bo3, Friday 8pm",
+        "created_at": 1763200000
+      },
+      "seed": 0,
+      "place": 1,
+      "sets": [2, 0],
+      "games": [4, 1]
+    }
+  ],
+  "head_to_head": [
+    {"tag": "Armada", "sets": [1, 0], "games": [2, 1]},
+    {"tag": "Cody", "sets": [1, 0], "games": [2, 0]}
+  ]
 }
 ```
 

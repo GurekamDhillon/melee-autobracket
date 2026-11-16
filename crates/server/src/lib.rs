@@ -25,6 +25,7 @@ pub mod lifecycle;
 pub mod logging;
 pub mod net;
 pub mod resim;
+pub mod results;
 pub mod review;
 pub mod routes;
 pub mod state;
