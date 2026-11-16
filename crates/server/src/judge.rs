@@ -71,6 +71,11 @@ pub fn pre_judge(uploads: [Option<&[u8]>; 2], rules: &Ruleset) -> Pre {
     if let Err(word) = legality(&facts, rules) {
         return Pre::Final(Verdict::Illegal(word.to_string()));
     }
+    // No frames at all (`last_frame` keeps the parser's `i32::MIN` sentinel): nothing was
+    // played, so there is nothing to re-simulate and no winner, whatever Game End says.
+    if facts.last_frame == i32::MIN {
+        return Pre::Final(Verdict::Undecided);
+    }
     // Only TIME! (1), GAME! (2) and No Contest (7, decided by the LRAS
     // initiator) can produce an accepted winner.
     if !matches!(

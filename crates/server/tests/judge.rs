@@ -238,6 +238,40 @@ fn only_known_end_methods_decide() {
     }
 }
 
+/// No contest decides only through an LRAS initiator who is one of the two players.
+#[test]
+fn no_contest_without_player_initiator_is_undecided() {
+    assert_eq!(
+        judge_pair(&base().end(7, None).build()),
+        Pre::Final(Verdict::Undecided),
+        "no initiator"
+    );
+    assert_eq!(
+        judge_pair(&base().end(7, Some(3)).build()),
+        Pre::Final(Verdict::Undecided),
+        "initiator on an empty port"
+    );
+}
+
+/// A replay with a Game Start and a decisive-looking Game End but no frames has
+/// nothing to re-simulate and decides nothing.
+#[test]
+fn replay_without_frames_is_undecided() {
+    let empty = || {
+        SlpBuilder::new()
+            .player(1, 2, PlayerKind::Human)
+            .player(2, 9, PlayerKind::Human)
+    };
+    assert_eq!(
+        judge_pair(&empty().end(7, Some(1)).build()),
+        Pre::Final(Verdict::Undecided)
+    );
+    assert_eq!(
+        judge_pair(&empty().end(2, None).build()),
+        Pre::Final(Verdict::Undecided)
+    );
+}
+
 #[test]
 fn unreadable_raw_is_conflicted() {
     let good = simple_game(1, T0);
