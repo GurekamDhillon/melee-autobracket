@@ -1,12 +1,15 @@
 <p class="notice" id="status" role="status" hidden></p>
-<main id="schedule">
-  <section id="now" hidden>
-    <h2>Happening now</h2>
-    <ol class="cards" id="now-list"></ol>
-  </section>
-  <section id="soon" hidden>
-    <h2>Coming up</h2>
-    <ol class="cards" id="soon-list"></ol>
-  </section>
-  <div id="howto"></div>
+<main id="schedule" class="schedule">
+  <div class="sched-list">
+    <ol class="sched" id="loading" aria-busy="true"><li class="skeleton"></li><li class="skeleton"></li></ol>
+    <section id="now" hidden>
+      <h2 class="section-title">Happening now</h2>
+      <ol class="sched" id="now-list"></ol>
+    </section>
+    <section id="soon" hidden>
+      <h2 class="section-title">Coming up</h2>
+      <div id="soon-list"></div>
+    </section>
+  </div>
+  <div id="howto" class="sched-side"></div>
 </main>

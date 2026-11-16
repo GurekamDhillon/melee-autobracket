@@ -109,8 +109,9 @@ const AB = (function () {
 
   const SIDES = ["Winners", "Losers", "GrandFinal"];
 
-  // "Mango vs Zain · Winners semis · 1–0" for every ready set of an event's view, in bracket
-  // order; none when the event has no bracket yet.
+  // Every ready set of an event's view, in bracket order: its id, the two tags, the round, the
+  // games won so far, and the whole set in words ("Mango vs Zain, Winners semis, 1–0") for a
+  // screen reader; none when the event has no bracket yet.
   function liveSetLines(view) {
     if (!view.bracket) return [];
     const tags = view.tags || [];
@@ -124,11 +125,88 @@ const AB = (function () {
           const [a, b] = set.slots.map(slotEntrant);
           if (a === null || b === null) continue;
           const score = scores.get(set.id) || [0, 0];
-          lines.push(tagOf(a) + " vs " + tagOf(b) + " · " + round.name + " · " + score[0] + "–" + score[1]);
+          const tagA = tagOf(a), tagB = tagOf(b);
+          lines.push({
+            id: set.id, a: tagA, b: tagB, round: round.name, score,
+            words: tagA + " vs " + tagB + ", " + round.name + ", " + score[0] + "–" + score[1],
+          });
         }
       }
     }
     return lines;
+  }
+
+  // One live set as a scoreboard row linking to its sticker on the bracket:
+  // [P1] Mango  1 – 0  Zain [P2]   Winners semis
+  function scoreboard(line, eventId) {
+    const a = el("a", "board-row");
+    a.href = eventHref(eventId) + "#set-" + line.id;
+    a.setAttribute("aria-label", line.words);
+    const face = el("span", "board-face");
+    face.setAttribute("aria-hidden", "true");
+    const lead = line.score[0] === line.score[1] ? -1 : line.score[0] > line.score[1] ? 0 : 1;
+    const side = (i) => {
+      const s = el("span", "board-side s" + i);
+      s.append(el("span", "port p" + (i + 1), "P" + (i + 1)), el("span", "board-tag", i ? line.b : line.a));
+      return s;
+    };
+    const nums = el("span", "board-score");
+    nums.append(
+      el("span", lead === 1 ? "trail" : "", line.score[0]),
+      el("span", "dash", "–"),
+      el("span", lead === 0 ? "trail" : "", line.score[1]),
+    );
+    face.append(side(0), nums, side(1), el("span", "chip round", line.round));
+    a.append(face);
+    return a;
+  }
+
+  // ---- small parts shared by the pages ------------------------------------------------------
+
+  // A pill link; `cls` adds "sunny" for the one main action.
+  function pill(text, href, cls) {
+    const a = el("a", cls ? "pill " + cls : "pill", text);
+    a.href = href;
+    return a;
+  }
+
+  // A flat label on a sticker: a date, a count, a format.
+  function chip(text, cls) {
+    return el("span", cls ? "chip " + cls : "chip", text);
+  }
+
+  // Where an event stands, in the site's three words: live, sign-ups open, done.
+  const STATUS_WORD = { running: "Live", signup: "Sign-ups open", complete: "Done" };
+  function statusTag(state) {
+    const t = el("span", "status " + (state || "unknown"), STATUS_WORD[state] || state);
+    return t;
+  }
+
+  // An initial disc for a player, its face picked from the tag so it never changes.
+  const DISC_FACES = 5;
+  function avatar(tag, big) {
+    const text = String(tag);
+    let h = 0;
+    for (const ch of text.toLowerCase()) h = (h * 31 + ch.codePointAt(0)) >>> 0;
+    const d = el("span", "disc f" + (h % DISC_FACES) + (big ? " big" : ""), [...text][0] || "?");
+    d.setAttribute("aria-hidden", "true");
+    return d;
+  }
+
+  // "n entrants", or "1 entrant".
+  function entrantsText(n) {
+    return n + (n === 1 ? " entrant" : " entrants");
+  }
+
+  // The sign-up event that comes first: by start time (unannounced last), then by id.
+  function nextUp(events) {
+    const open = events.filter((e) => e.state === "signup");
+    open.sort((a, b) => {
+      const ta = knownTime(a.starts_at) ? a.starts_at : Infinity;
+      const tb = knownTime(b.starts_at) ? b.starts_at : Infinity;
+      return ta - tb || a.id - b.id;
+    });
+    return open[0] || null;
   }
 
   // ---- time, in the viewer's zone ---------------------------------------------------------
@@ -257,7 +335,8 @@ const AB = (function () {
   return {
     el, icon, getJson, setNotice,
     STATE_LABEL, FORMAT_LABEL, ROUND_NAMES, roundName, ordinal,
-    slotEntrant, doneWinner, isHidden, sideRounds, liveSetLines,
+    slotEntrant, doneWinner, isHidden, sideRounds, liveSetLines, scoreboard,
+    pill, chip, statusTag, avatar, entrantsText, nextUp,
     fmtWhen, fmtDate, knownTime, eventDate, eventHref, playerHref,
     poll, markNav, howToEnter,
   };

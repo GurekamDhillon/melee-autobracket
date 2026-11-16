@@ -1,7 +1,30 @@
-<main id="main">
-<p class="notice" id="no-stream" hidden></p>
-<iframe id="player" class="player" title="Live stream" allow="autoplay; fullscreen" referrerpolicy="no-referrer" hidden></iframe>
-<p id="open" hidden><a id="open-link" rel="noopener" target="_blank">Open the stream in a new tab</a></p>
-<h2>Now playing</h2>
+<main id="main" class="stream">
+<section class="tv-col">
+<div class="tv">
+  <div class="tv-lip">
+    <span class="status off" id="air">Off air</span>
+    <p id="open" hidden><a id="open-link" class="pill small" rel="noopener" target="_blank">Open the stream in a new tab</a></p>
+  </div>
+  <div class="tv-screen">
+    <iframe id="player" class="player" title="Live stream" allow="autoplay; fullscreen" referrerpolicy="no-referrer" hidden></iframe>
+    <div class="offair" id="offair">
+      <svg class="offair-scene" viewBox="0 0 160 90" preserveAspectRatio="xMidYMax slice" aria-hidden="true" focusable="false">
+        <circle class="sun" cx="134" cy="24" r="11"/>
+        <ellipse class="hill-far" cx="40" cy="98" rx="78" ry="40"/>
+        <ellipse class="hill-near" cx="130" cy="104" rx="70" ry="34"/>
+      </svg>
+      <div class="offair-text">
+        <h2 class="offair-title">Nothing on air right now</h2>
+        <p class="notice" id="no-stream" hidden></p>
+        <p class="offair-next" id="offair-next" hidden></p>
+        <p class="actions"><button type="button" class="pill sunny" id="try" hidden>Try the stream anyway</button></p>
+      </div>
+    </div>
+  </div>
+</div>
+</section>
+<section class="now-col">
+<h2 class="section-title">Now playing</h2>
 <div id="now"></div>
+</section>
 </main>

@@ -1,7 +1,7 @@
 // A player's profile: /players/{tag}. The tag in the path is matched in any case; the page
 // shows the canonical spelling the server answers with.
 (function () {
-  const { el, getJson, setNotice, ordinal } = AB;
+  const { el, icon, getJson, setNotice, ordinal, chip } = AB;
   const $ = (id) => document.getElementById(id);
 
   // The tag as typed in the address bar; a malformed escape is just an unknown player.
@@ -22,10 +22,6 @@
     return pairs.reduce((acc, [w, l]) => [acc[0] + w, acc[1] + l], [0, 0]);
   }
 
-  function plural(n, unit) {
-    return n + " " + unit + (n === 1 ? "" : "s");
-  }
-
   function headerRow(names) {
     const li = el("li", "row-line head");
     li.append(el("span", null, names[0]));
@@ -37,7 +33,33 @@
   // the event stands.
   function outcome(entry) {
     if (typeof entry.place === "number") return ordinal(entry.place);
-    return entry.event.state === "signup" ? "not started" : "in progress";
+    return entry.event.state === "signup" ? "Not started" : "In progress";
+  }
+
+  // The outcome as a chip: a title is sunny with a star; an open entry says where it stands.
+  function outcomeChip(entry) {
+    const box = el("span", "num");
+    let cls = "";
+    if (entry.place === 1) cls = "gold";
+    else if (typeof entry.place !== "number") cls = entry.event.state === "signup" ? "seat-chip" : "hot";
+    const c = cls === "seat-chip" ? el("span", "seat-chip", outcome(entry)) : chip(outcome(entry), cls);
+    if (entry.place === 1) c.prepend(icon("star"));
+    box.append(c);
+    return box;
+  }
+
+  // Won as a whole percentage of the pair, or "" before anything is played.
+  function pct([won, lost]) {
+    return won + lost ? Math.round((100 * won) / (won + lost)) + "%" : "";
+  }
+
+  // One of the four number stickers under the name.
+  function stat(label, value, extra) {
+    const li = el("li", "stat");
+    li.append(el("span", "stat-num", value));
+    if (extra) li.append(el("span", "stat-extra", extra));
+    li.append(el("span", "stat-label", label));
+    return li;
   }
 
   function eventRow(entry) {
@@ -48,7 +70,7 @@
     li.append(a);
     li.append(el("span", "num quiet", AB.eventDate(ev) || ""));
     li.append(el("span", "num quiet", "seed " + (entry.seed + 1)));
-    li.append(el("span", "num", outcome(entry)));
+    li.append(outcomeChip(entry));
     li.append(el("span", "num", record(entry.sets)));
     li.append(el("span", "num", record(entry.games)));
     return li;
@@ -72,13 +94,16 @@
 
     const titles = events.filter((e) => e.place === 1 && e.event.state === "complete").length;
     const since = new Date(profile.since * 1000).toLocaleDateString(undefined, { month: "long", year: "numeric" });
-    $("meta").textContent = [
-      "playing since " + since,
-      plural(events.length, "event"),
-      plural(titles, "title"),
-      "sets " + record(sum(events.map((e) => e.sets))),
-      "games " + record(sum(events.map((e) => e.games))),
-    ].join(" · ");
+    const sets = sum(events.map((e) => e.sets));
+    const games = sum(events.map((e) => e.games));
+    $("meta").textContent = "playing since " + since;
+    $("title").before(AB.avatar(profile.tag, true));
+    $("stats").replaceChildren(
+      stat(events.length === 1 ? "Event" : "Events", events.length),
+      stat(titles === 1 ? "Title" : "Titles", titles),
+      stat("Sets", record(sets), pct(sets)),
+      stat("Games", record(games), pct(games)),
+    );
 
     const list = $("events");
     if (events.length) {

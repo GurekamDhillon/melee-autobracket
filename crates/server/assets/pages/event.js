@@ -10,9 +10,13 @@
   let drawnKey = "";
   let enteredFor = "";
   let polling = null;
+  let scrolledToHash = false;
 
-  // The picker, the layout toggle and "Jump to live" sit beside the title.
-  $("head-side").append($("pick-label"), $("lay-h").parentNode, $("jump-live"));
+  // The picker, the layout toggle, "Jump to live" and when the page last heard from the server
+  // sit together beside the title, as one toolbar.
+  const toolbar = el("div", "toolbar");
+  toolbar.append($("pick-label"), $("lay-h").parentNode, $("jump-live"));
+  $("head-side").append(toolbar, $("fresh"));
 
   // ---- layout: rounds side by side, or stacked for portrait screens -------------
 
@@ -186,6 +190,8 @@
     }
     const live = set.state === "Ready";
     const card = el("li", live ? "set live" : "set " + tiltClass(j, set.id));
+    // Other pages link straight to a set: /events/N#set-M.
+    card.id = "set-" + set.id;
     const face = el("div");
     face.setAttribute("aria-hidden", "true");
     if (live) face.append(el("span", "flag", "Live"));
@@ -385,6 +391,12 @@
       $("jump-live").hidden = true;
     }
     labelBoard();
+    // Arrived from a scoreboard elsewhere: bring that set into view, once.
+    if (!scrolledToHash) {
+      scrolledToHash = true;
+      const target = /^#set-\d+$/.test(location.hash) ? document.getElementById(location.hash.slice(1)) : null;
+      if (target) target.scrollIntoView({ block: "center", inline: "center" });
+    }
   }
 
   // ---- polling -----------------------------------------------------------
@@ -396,7 +408,12 @@
       renderPicker(events);
       renderView(view);
       setNotice("status", "");
-      $("updated").textContent = new Date().toLocaleTimeString();
+      $("updated").textContent = new Date().toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit", second: "2-digit" });
+      // The dot blinks once per refresh (only where motion is allowed; see site.css).
+      const dot = document.querySelector(".fresh-dot");
+      dot.classList.remove("blink");
+      void dot.offsetWidth;
+      dot.classList.add("blink");
     } catch (err) {
       if (err && err.status === 404) {
         // The event was deleted under us: say so once and stop asking.

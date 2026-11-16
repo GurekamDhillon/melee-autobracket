@@ -470,19 +470,18 @@ async fn zero_start_time_is_unknown_everywhere() {
     }
 }
 
-/// Wide screens: the landing's three sections sit side by side (two when nothing is live),
-/// and row lists stop at a readable width.
+/// Wide screens: the landing puts its hero and the champion side by side over the run of
+/// events, every page sits in one centred column, and row lists fill it.
 #[tokio::test]
 async fn wide_layouts_use_the_width() {
     let app = TestApp::spawn(|_| {}).await;
     let css = fetch(&app, "/").await.text().await.unwrap();
     let wide = css.split("@media (min-width: 75rem)").nth(1).unwrap();
-    assert!(wide.contains(".home { grid-template-columns: repeat(3, minmax(0, 1fr)); }"));
     assert!(wide.contains(
-        ".home:has(#live[hidden]) { grid-template-columns: repeat(2, minmax(0, 1fr)); }"
+        r#".home { grid-template-columns: minmax(0, 1fr) 20rem; grid-template-areas: "lead side" "run side"; }"#
     ));
-    assert!(wide.contains("#live { grid-column: auto; }"));
-    assert!(css.contains(".rows { display: grid; gap: var(--sp-2); max-width: 48rem;"));
+    assert!(css.contains(".wrap { width: 100%; max-width: 76rem; margin-inline: auto;"));
+    assert!(css.contains(".rows { display: grid; gap: var(--sp-2); max-width: 100%;"));
 }
 
 /// A description that ends in a full stop is not followed by a second one before "Champion".

@@ -16,7 +16,8 @@
 }
 
 /* ---- Envoy "Party pack" tokens, copied from design/envoy/tokens.css. Rules below use them by
-   name only, so a change to the kit's values is an edit to this block. ---- */
+   name only, so a change to the kit's values is an edit to this block. The game has one theme,
+   and so does the site: the violet scene for every visitor. ---- */
 :root {
   --envoy-sunny: #FFD84A;        /* cursor, hovered sticker, ready, highlights */
   --envoy-ink: #2A1A6E;          /* grape ink: every outline, hard shadow, text on white */
@@ -30,6 +31,9 @@
   --envoy-cream: #FBF6DD;        /* dashed empty seat */
   --envoy-violet: #4C3D9E;       /* scene base (scenery only, no outline) */
   --envoy-violet-d: #33257C;     /* scene ground */
+  --envoy-track: #170E45;        /* bar track */
+  --envoy-technique: #C866F2;
+  --envoy-frost: #62CCF5;
 
   /* semantic aliases (dark = the game) */
   --bg: var(--envoy-violet);
@@ -44,8 +48,11 @@
   --p1: var(--envoy-coral);
   --p2: var(--envoy-lagoon);
   --danger: var(--envoy-coral-deep);
+  /* Port faces that carry white text at AA (the kit's coral and lagoon do not: 3.2:1, 2.9:1). */
+  --p1-face: var(--envoy-coral-deep);
+  --p2-face: #00756D;
 
-  /* shape */
+  /* shape: two shadow sizes only, rest and lifted */
   --edge: 3px;                         /* sticker outline (2.5 pills, 2 name tags) */
   --radius: 12px;                      /* general; 10 list rows; 9-11 pills */
   --radius-row: 10px;
@@ -56,13 +63,19 @@
   /* type */
   --font-display: "Bricolage Grotesque", "Autobracket Text", "Source Sans 3", system-ui, sans-serif; /* 800, -0.02em */
   --font-text: "Autobracket Text", "Source Sans 3", system-ui, sans-serif;                            /* 700 */
+  --t-display: clamp(2.25rem, 1.5rem + 3vw, 4.25rem);
+  --t-h2: 1.75rem;
+  --t-h3: 1.375rem;
 
   /* spacing rhythm */
   --sp-1: 4px; --sp-2: 8px; --sp-3: 12px; --sp-4: 16px; --sp-5: 24px;
+  --section: 3rem;                     /* between sections */
+  --gutter: var(--sp-5);               /* page side padding */
   --stagger: 2;                        /* frames between list items (3 for cards) */
 
   /* motion: 60 fps frames in ms */
   --m-hover: 67ms;
+  --m-press: 100ms;
   --m-enter: 150ms;      /* scale .85 -> 1.04 -> 1, opacity 0 -> 1 */
   --m-burst: 117ms;      /* scale 0 -> 1.2 -> 1 */
   --ease: cubic-bezier(.22, 1, .36, 1);
@@ -71,25 +84,11 @@
   --frame: 16.67ms;
   --edge-pill: 2.5px;
   --hill: color-mix(in srgb, var(--bg) 90%, var(--envoy-white));  /* scenery, one step lighter */
-  --focus: var(--envoy-white);         /* keyboard focus ring */
+  --focus: var(--envoy-sunny);         /* keyboard focus ring, outside the ink edge */
   --title-edge: 5px;                   /* ink edge round the white title */
-  --title-drop: 3px;
+  --title-drop: 4px;
   --set-w: 13rem;
   color-scheme: dark;
-}
-/* DERIVED LIGHT VARIANT (from tokens.css; not in the game): paper page, same ink and accent. */
-@media (prefers-color-scheme: light) {
-  :root:not([data-theme="dark"]) {
-    --bg: #F3F0FF; --bg-ground: #E6E1FA;
-    --on-bg: var(--envoy-ink); --on-bg-quiet: var(--envoy-lilac);
-    --surface: #FFFFFF; --on-surface: var(--envoy-ink);
-    --shadow: 3px 4px 0 var(--envoy-ink);
-    --hill: var(--bg-ground);
-    --focus: var(--envoy-ink);
-    --title-edge: 0px;
-    --title-drop: 0px;
-    color-scheme: light;
-  }
 }
 
 * { box-sizing: border-box; }
@@ -98,17 +97,38 @@ html { -webkit-text-size-adjust: 100%; }
 body {
   margin: 0;
   min-height: 100vh;
-  padding: var(--sp-5) var(--sp-5) 5rem;
+  display: flex;
+  flex-direction: column;
   background: var(--bg);
   color: var(--on-bg);
-  font: 700 1rem/1.35 var(--font-text);
+  font: 700 1rem/1.4 var(--font-text);
   overflow-wrap: anywhere;
   overflow-x: clip;
 }
-h1, h2, .score, .champ-tag, .stamp.big {
+h1, h2, h3, .score, .champ-tag, .stamp.big, .word {
   font-family: var(--font-display);
   font-weight: 800;
   letter-spacing: -0.02em;
+}
+h2 { margin: 0 0 var(--sp-5); font-size: var(--t-h2); line-height: 1.15; }
+h3 { margin: 0 0 var(--sp-1); font-size: var(--t-h3); line-height: 1.15; }
+a { color: inherit; }
+/* Names that link (events, players): no underline until pointed at. Prose links keep theirs. */
+h2 a, h3 a, .who-tag, .run-name, .hist-champ-tag, .chip a, .podium a, a.tag, a.champ-tag {
+  text-decoration: none;
+}
+h2 a:hover, h3 a:hover, h2 a:focus-visible, h3 a:focus-visible, .run-name:hover, .run-name:focus-visible,
+.hist-champ-tag:hover, .chip a:hover, .podium a:hover, a.tag:hover, a.tag:focus-visible,
+a.champ-tag:hover, a.champ-tag:focus-visible {
+  text-decoration: underline 3px;
+  text-decoration-color: currentColor;
+  text-underline-offset: 4px;
+}
+:focus-visible { outline: 3px solid var(--focus); outline-offset: 3px; }
+/* On a white or sunny face a sunny ring would vanish; there it is ink. */
+.hero :focus-visible, .side-card :focus-visible, .howto :focus-visible, .empty :focus-visible,
+.hist-row :focus-visible, .sched-row :focus-visible, .event-run :focus-visible, .row-line :focus-visible {
+  outline-color: var(--outline);
 }
 .sr { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
 .defs { position: absolute; }
@@ -118,35 +138,183 @@ h1, h2, .score, .champ-tag, .stamp.big {
 .scene::before, .scene::after { content: ""; position: absolute; border-radius: 50%; }
 .scene::before { width: 78vw; height: 78vw; right: -18vw; top: 22vh; background: var(--hill); }
 .scene::after { width: 90vw; height: 60vw; left: -30vw; bottom: -48vw; background: var(--bg-ground); }
-footer {
-  position: fixed;
-  left: 0; right: 0; bottom: 0;
-  padding: var(--sp-3) var(--sp-5);
-  background: var(--bg-ground);
-  color: var(--on-bg-quiet);
-  font-size: 0.8125rem;
-}
 
-/* ---- header ---- */
+/* ---- the column every page sits in ---- */
+.wrap { width: 100%; max-width: 76rem; margin-inline: auto; padding-inline: var(--gutter); }
+.page { flex: 1; padding-block: 2.5rem var(--section); }
+[data-page="history"] .page, [data-page="players"] .page, [data-page="player"] .page { max-width: 62rem; }
+[data-page="event"] .wrap { max-width: 100rem; }
+
+/* ---- site bar: brand mark and wordmark, then the nav ---- */
+header.site {
+  position: sticky;
+  top: 0;
+  z-index: 10;
+  background: var(--bg-ground);
+  border-bottom: var(--edge) solid var(--outline);
+}
+.bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sp-3) var(--sp-5);
+  min-height: 4.25rem;
+  padding-block: var(--sp-2);
+}
+.brand {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.6rem;
+  color: var(--on-bg);
+  text-decoration: none;
+  border-radius: var(--radius-row);
+}
+.brand-mark { flex: none; width: 2.9rem; height: 2.9rem; rotate: 8deg; transition: rotate var(--m-hover) var(--ease); }
+.brand:hover .brand-mark { rotate: -4deg; }
+.word {
+  font-size: 1.5rem;
+  line-height: 1;
+  -webkit-text-stroke: 4px var(--outline);
+  paint-order: stroke fill;
+  text-shadow: 0 3px 0 var(--outline);
+}
+.nav { display: flex; gap: var(--sp-2); }
+.nav a {
+  display: flex;
+  align-items: center;
+  min-height: 2.5rem;
+  padding: 0 0.95rem;
+  color: var(--on-bg);
+  background: transparent;
+  border: var(--edge-pill) solid transparent;
+  border-radius: var(--radius-row);
+  font-size: 0.9375rem;
+  text-decoration: none;
+  white-space: nowrap;
+  transition: translate var(--m-hover) var(--ease), box-shadow var(--m-hover) var(--ease), background var(--m-hover) var(--ease);
+}
+.nav a:hover, .nav a:focus-visible {
+  color: var(--on-surface);
+  background: var(--surface);
+  border-color: var(--outline);
+  translate: 0 -2px;
+  box-shadow: var(--shadow);
+}
+/* This page ("page"), or the section it belongs to ("true"). */
+.nav a[aria-current] {
+  color: var(--on-surface);
+  background: var(--accent);
+  border-color: var(--outline);
+  box-shadow: var(--shadow);
+}
+.nav a:active { translate: 3px 4px; box-shadow: none; }
+
+/* ---- page heading: the kit's results title ---- */
 header.top {
   display: flex;
   flex-wrap: wrap;
   align-items: flex-end;
   justify-content: space-between;
-  gap: var(--sp-3) var(--sp-5);
-  margin-bottom: var(--sp-4);
+  gap: var(--sp-4) var(--sp-5);
+  margin-bottom: 2rem;
 }
+.top-text { min-width: 0; }
 h1 {
   margin: 0;
-  font-size: 2.25rem;
-  line-height: 1.1;
+  font-size: var(--t-display);
+  line-height: 1;
   -webkit-text-stroke: var(--title-edge) var(--outline);
   paint-order: stroke fill;
   text-shadow: 0 var(--title-drop) 0 var(--outline);
+  rotate: -1deg;
+  transform-origin: left bottom;
 }
-.meta { margin: var(--sp-1) 0 0; color: var(--on-bg-quiet); font-size: 0.9375rem; }
+.meta { max-width: 48rem; margin: var(--sp-3) 0 0; color: var(--on-bg-quiet); font-size: 0.9375rem; }
 .meta .champion { color: var(--on-bg); }
+/* The landing leads with its hero, not a title; the brand bar already names the site. */
+[data-page="home"] header.top { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); margin: 0; }
+#head-side { display: flex; flex-wrap: wrap; align-items: center; gap: var(--sp-3) var(--sp-4); max-width: 100%; }
+.section-title { font-size: var(--t-h2); margin: 0 0 var(--sp-5); }
 
+/* ---- footer: a ground band under a zigzag seam ---- */
+footer.site {
+  position: relative;
+  margin-top: var(--section);
+  background: var(--bg-ground);
+  border-top: var(--edge) solid var(--outline);
+  color: var(--on-bg-quiet);
+  font-size: 0.875rem;
+}
+footer.site::before {
+  content: "";
+  position: absolute;
+  left: 0; right: 0; top: calc(-1 * var(--edge) - 9px);
+  height: 10px;
+  background:
+    linear-gradient(135deg, transparent 50%, var(--outline) 50%) 0 0 / 18px 10px repeat-x,
+    linear-gradient(225deg, transparent 50%, var(--outline) 50%) 0 0 / 18px 10px repeat-x;
+}
+.foot {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--sp-4) 2rem;
+  padding-block: 2rem;
+}
+.foot-line { flex: 1 1 18rem; margin: 0; }
+.brand.small .brand-mark { width: 2.25rem; height: 2.25rem; }
+.brand.small .word { font-size: 1.25rem; }
+.foot-nav { display: flex; flex-wrap: wrap; gap: var(--sp-2) var(--sp-4); }
+.foot-nav a { color: var(--on-bg); text-underline-offset: 3px; display: inline-block; padding-block: 0.6rem; }
+
+/* ---- chips, tags, stamps: the site's labels ---- */
+.chips { display: flex; flex-wrap: wrap; align-items: center; gap: var(--sp-2); margin: 0; }
+.chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  padding: 0 0.55rem;
+  background: var(--surface);
+  color: var(--on-surface);
+  border: 2px solid var(--outline);
+  border-radius: 9px;
+  font-size: 0.8125rem;
+  line-height: 1.5rem;
+  white-space: nowrap;
+}
+.chip.hot, .chip.gold { background: var(--accent); }
+.chip svg { width: 0.95rem; height: 0.95rem; fill: var(--envoy-white); stroke: var(--outline); stroke-width: 2.5; stroke-linejoin: round; overflow: visible; }
+.chip .place, .podium .place { color: var(--on-surface-quiet); margin-right: 0.15rem; }
+/* An open seat: the kit's dashed cream seat, as a label ("Time to be announced"). */
+.seat-chip {
+  display: inline-block;
+  padding: 0 0.55rem;
+  background: var(--envoy-cream);
+  color: var(--on-surface-quiet);
+  border: 2px dashed var(--outline);
+  border-radius: 9px;
+  font-size: 0.8125rem;
+  line-height: 1.5rem;
+  white-space: nowrap;
+}
+.seat-chip::first-letter, [data-page="player"] .meta::first-letter { text-transform: uppercase; }
+/* Where an event stands, in three words. Colour is never the only cue: the word is always there. */
+.status {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  padding: 0 0.6rem;
+  border: 2px solid var(--outline);
+  border-radius: 9px;
+  font-size: 0.8125rem;
+  line-height: 1.5rem;
+  white-space: nowrap;
+  color: var(--on-surface);
+  background: var(--envoy-faded);
+}
+.status.running { background: var(--p1-face); color: var(--envoy-white); }
+.status.running::before { content: ""; width: 0.45rem; height: 0.45rem; border-radius: 50%; background: var(--envoy-white); }
+.status.signup { background: var(--accent); }
 label.pick { display: flex; align-items: center; gap: var(--sp-2); color: var(--on-bg-quiet); font-size: 0.9375rem; max-width: 100%; }
 .pick-box { position: relative; display: inline-block; min-width: 0; }
 .pick-box::after {
@@ -205,22 +373,6 @@ select:focus-visible, .board:focus-visible { outline: 3px solid var(--focus); ou
   }
   option::checkmark { order: 1; margin-left: auto; }
 }
-
-/* ---- notices: one sentence on a sticker, like the kit's description strip ---- */
-.notice {
-  width: fit-content;
-  max-width: 100%;
-  margin: 0 0 var(--sp-4);
-  padding: 0.3rem 0.8rem;
-  background: var(--surface);
-  color: var(--on-surface);
-  border: var(--edge) solid var(--outline);
-  border-radius: var(--radius-row);
-  box-shadow: var(--shadow);
-  font-size: 0.9375rem;
-  rotate: -0.6deg;
-}
-.notice.warn { color: var(--danger); border-color: var(--p1); }
 
 /* ---- the run strip: one mark per round ---- */
 .strip {
@@ -296,7 +448,7 @@ select:focus-visible, .board:focus-visible { outline: 3px solid var(--focus); ou
 .side.final { grid-area: f; }
 
 .round { display: flex; flex-direction: column; width: var(--set-w); }
-h2 { margin: 0 0 var(--sp-4); font-size: 1.125rem; line-height: 1.2; white-space: nowrap; }
+.round h2 { margin: 0 0 var(--sp-4); font-size: 1.25rem; line-height: 1.2; white-space: nowrap; }
 .sets { flex: 1; display: flex; flex-direction: column; justify-content: space-around; gap: 1.1rem; margin: 0; padding: 0; list-style: none; }
 .spacer { visibility: hidden; }
 
@@ -335,6 +487,8 @@ h2 { margin: 0 0 var(--sp-4); font-size: 1.125rem; line-height: 1.2; white-space
   translate: none;
   font-size: 0.875rem;
 }
+/* A seat far in the future: quieter, so the rounds that are being played lead. */
+.set.seat, .set.seat:hover { min-height: 3rem; border-width: var(--edge-pill); }
 
 .row {
   display: grid;
@@ -459,73 +613,334 @@ ol.entrants.few { grid-template-columns: min(17rem, 100%); }
 }
 .entrant .seed { text-align: left; }
 
-/* ---- site navigation: a row of pill stickers under the title ---- */
-.nav {
+
+/* ---- event toolbar: picker, layout and jump grouped on one sticker; when it last refreshed ---- */
+.toolbar {
   display: flex;
   flex-wrap: wrap;
-  gap: var(--sp-3) var(--sp-3);
-  margin: 0 0 var(--sp-5);
+  align-items: center;
+  gap: var(--sp-2) var(--sp-3);
+  padding: 0.45rem 0.6rem;
+  background: var(--bg-ground);
+  border: var(--edge) solid var(--outline);
+  border-radius: var(--radius);
 }
-.nav a {
-  display: block;
-  padding: 0.2rem 0.85rem;
+.toolbar label.pick { color: var(--on-bg-quiet); }
+.fresh {
+  display: inline-block;
+  margin: 0;
+  color: var(--on-bg-quiet);
+  font-size: 0.8125rem;
+  font-variant-numeric: tabular-nums;
+}
+.fresh-dot { display: inline-block; vertical-align: middle; margin: -2px 0.45rem 0 0; width: 6px; height: 6px; border-radius: 50%; background: var(--accent); }
+
+/* ---- pills: the site's buttons and button-links; they lift on hover and press onto their shadow ---- */
+.pill {
+  display: inline-flex;
+  align-items: center;
+  min-height: 2.5rem;
+  padding: 0 1rem;
   color: var(--on-surface);
   background: var(--surface);
   border: var(--edge-pill) solid var(--outline);
   border-radius: var(--radius-row);
   box-shadow: var(--shadow);
+  font: inherit;
   font-size: 0.9375rem;
   text-decoration: none;
-  transition: rotate var(--m-hover) var(--ease), translate var(--m-hover) var(--ease), box-shadow var(--m-hover) var(--ease);
+  white-space: nowrap;
+  cursor: pointer;
+  transition: translate var(--m-hover) var(--ease), box-shadow var(--m-hover) var(--ease), background var(--m-hover) var(--ease);
 }
-.nav a:nth-child(odd) { rotate: -0.8deg; }
-.nav a:nth-child(even) { rotate: 0.8deg; }
-.nav a:hover, .nav a:focus-visible { background: var(--accent); rotate: 0deg; translate: 0 -3px; box-shadow: var(--shadow-hover); outline: none; }
-/* This page ("page"), or the section it belongs to ("true"). */
-.nav a[aria-current] { background: var(--accent); rotate: 0deg; }
-.nav a:focus-visible { box-shadow: var(--ring-hover), 4px 6px 0 3px var(--outline); }
+.pill.sunny { background: var(--accent); }
+.pill.small { min-height: 2rem; padding: 0 0.7rem; font-size: 0.8125rem; }
+.pill:hover, .pill:focus-visible { background: var(--accent); translate: 0 -3px; box-shadow: var(--shadow-hover); }
+.pill.sunny:hover, .pill.sunny:focus-visible { background: var(--surface); }
+.pill:focus-visible { outline: 3px solid var(--focus); outline-offset: 3px; box-shadow: var(--ring-hover), var(--shadow-hover); }
+.pill:active, .layout button:active, .jump:active { translate: 3px 4px; box-shadow: none; transition-duration: var(--m-press); }
+.actions { display: flex; flex-wrap: wrap; gap: var(--sp-3); margin: var(--sp-5) 0 0; }
 
-/* ---- cards: a sticker list (events, results) ---- */
-.cards {
-  display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(min(18rem, 100%), 1fr));
-  gap: var(--sp-4) var(--sp-5);
-  margin: 0 0 var(--sp-5);
-  padding: 0;
-  list-style: none;
+/* ---- notices (one sentence on a sticker, like the kit's description strip) and empty states ---- */
+.notice {
+  width: fit-content;
+  max-width: 100%;
+  margin: 0 0 var(--sp-4);
+  padding: 0.35rem 0.85rem;
+  background: var(--surface);
+  color: var(--on-surface);
+  border: var(--edge) solid var(--outline);
+  border-radius: var(--radius-row);
+  box-shadow: var(--shadow);
+  font-size: 0.9375rem;
+  rotate: -0.6deg;
 }
-.card {
-  position: relative;
-  display: block;
-  padding: var(--sp-3) var(--sp-4);
+.notice.warn { color: var(--danger); border-color: var(--p1); }
+.empty {
+  max-width: 36rem;
+  margin: 0 0 var(--sp-5);
+  padding: 1.25rem 1.5rem;
   background: var(--surface);
   color: var(--on-surface);
   border: var(--edge) solid var(--outline);
   border-radius: var(--radius);
   box-shadow: var(--shadow);
-  text-decoration: none;
-  transition: rotate var(--m-hover) var(--ease), translate var(--m-hover) var(--ease), box-shadow var(--m-hover) var(--ease);
+  list-style: none;
+  rotate: -0.6deg;
 }
-.card h2 { margin: 0 0 var(--sp-1); white-space: normal; }
-.card .quiet { color: var(--on-surface-quiet); font-size: 0.875rem; }
-a.card:hover, a.card:focus-visible { background: var(--accent); rotate: 0deg; translate: 0 -4px; box-shadow: var(--shadow-hover); outline: none; }
+.empty p { margin: var(--sp-2) 0 0; color: var(--on-surface-quiet); }
+.empty .actions { margin-top: var(--sp-4); }
+/* Before the first answer: empty seats where the rows will be. */
+.skeleton {
+  height: 4rem;
+  list-style: none;
+  background: color-mix(in srgb, var(--envoy-cream) 12%, transparent);
+  border: var(--edge-pill) dashed color-mix(in srgb, var(--envoy-cream) 45%, transparent);
+  border-radius: var(--radius-row);
+}
 
-/* A card that is not itself a link (schedule, history): its name links, the rest is text. */
-.card p { margin: 0 0 var(--sp-1); }
-.card a { color: inherit; }
-.card time { font-variant-numeric: tabular-nums; }
-.card .rows { margin: var(--sp-3) 0 var(--sp-2); }
+/* ---- the landing: the hero leads, the champion beside it, the run of events below ---- */
+.home {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  grid-template-areas: "lead" "side" "run";
+  gap: var(--section) 3rem;
+  align-items: start;
+  padding-top: var(--sp-3);
+}
+@media (min-width: 75rem) {
+  .home { grid-template-columns: minmax(0, 1fr) 20rem; grid-template-areas: "lead side" "run side"; }
+  .home { grid-template-rows: auto 1fr; }
+}
+.lead { grid-area: lead; min-width: 0; }
+.side-col { grid-area: side; min-width: 0; display: grid; gap: 2.5rem; align-content: start; }
+.run { grid-area: run; min-width: 0; }
+
+.hero {
+  position: relative;
+  padding: 2.25rem 2.25rem 2rem;
+  background: var(--surface);
+  color: var(--on-surface);
+  border: var(--edge) solid var(--outline);
+  border-radius: 16px;
+  box-shadow: var(--ring-hover), 6px 8px 0 3px var(--outline);
+  rotate: -0.8deg;
+}
+.hero.live { background: var(--accent); }
+.hero-stamp {
+  position: absolute;
+  top: -1.1rem; left: 1.75rem; right: auto;
+  padding: 0.05rem 0.8rem;
+  border: var(--edge) solid var(--outline);
+  border-radius: var(--radius-row);
+  font-family: var(--font-display);
+  font-weight: 800;
+  font-size: 1.125rem;
+  line-height: 1.5;
+  rotate: -4deg;
+}
+.hero-stamp.live { background: var(--p1-face); color: var(--envoy-white); }
+.hero-stamp.next { background: var(--accent); color: var(--on-surface); }
+.side-card .hero-stamp { position: static; display: inline-block; margin-bottom: var(--sp-3); font-size: 0.9375rem; }
+.hero-name { margin: 0.4rem 0 var(--sp-4); font-size: var(--t-display); line-height: 1; letter-spacing: -0.03em; }
+.hero-facts { display: flex; flex-wrap: wrap; align-items: center; gap: var(--sp-3) var(--sp-5); margin-bottom: var(--sp-5); }
+.hero-quiet, .hero-desc { margin: 0; color: var(--on-surface-quiet); max-width: 40rem; }
+.hero.live .hero-quiet { color: var(--on-surface); }
+.hero-desc { margin-top: var(--sp-3); color: var(--on-surface); }
+.hero-when { display: flex; flex-wrap: wrap; align-items: center; gap: var(--sp-2) var(--sp-3); margin: 0; }
+.when-big { font-family: var(--font-display); font-weight: 800; font-size: 1.5rem; letter-spacing: -0.02em; line-height: 1.2; }
+.side-card .when-big { font-size: 1.125rem; }
+.also { margin: var(--sp-4) 0 0; font-size: 0.9375rem; }
+.hero .howto { margin: var(--sp-5) 0 0; rotate: 0deg; box-shadow: none; border-width: var(--edge-pill); width: auto; }
+.hero .howto code { white-space: pre-wrap; }
+
+/* The run strip, small, for the hero. */
+.mini-strip { display: flex; flex-wrap: wrap; align-items: center; gap: var(--sp-2) 1.25rem; }
+.mini-strip .marks { gap: 0.45rem; min-height: 1.5rem; }
+.mini-strip .mark { width: 1rem; height: 1rem; }
+.mini-strip .mark.disc { border-width: var(--edge-pill); }
+.mini-strip .mark.star { width: 1.5rem; height: 1.5rem; }
+
+/* Seats filling up: an ink dot per entrant, dashed cream seats for the rest of the bracket. */
+.seats { display: flex; flex-wrap: wrap; align-items: center; gap: var(--sp-2) var(--sp-3); margin-top: var(--sp-4); }
+.seat-row { display: flex; flex-wrap: wrap; gap: 5px; }
+.seat-dot { width: 1rem; height: 1rem; border-radius: 50%; background: var(--envoy-cream); border: 2px dashed var(--outline); }
+.seat-dot.in { background: var(--outline); border-style: solid; }
+.seat-words { color: var(--on-surface-quiet); font-size: 0.875rem; }
+
+/* Beside the hero: the last champion in the burst, then the event it won. */
+.latest .section-title, .run .section-title { font-size: 1.375rem; margin-bottom: var(--sp-4); }
+.home-champ { width: 12rem; height: 12rem; margin: 0 auto var(--sp-4); }
+.home-champ .champ-tag { font-size: 1.625rem; }
+.home-champ .champ-tag.long { font-size: 1.125rem; }
+.side-card {
+  position: relative;
+  padding: var(--sp-4) 1.15rem;
+  background: var(--surface);
+  color: var(--on-surface);
+  border: var(--edge) solid var(--outline);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+}
+.side-card h3 { font-size: 1.25rem; margin-bottom: var(--sp-2); }
+.side-card .actions { margin-top: var(--sp-4); }
+.side-card .seats { margin-top: var(--sp-3); }
+.podium { display: flex; flex-wrap: wrap; gap: var(--sp-2); margin: var(--sp-3) 0 0; padding: 0; list-style: none; }
+.podium li {
+  padding: 0 0.55rem;
+  border: 2px solid var(--outline);
+  border-radius: 9px;
+  font-size: 0.875rem;
+  line-height: 1.6rem;
+}
+
+/* Under it all: the run of events, one mark each (done ink, now coral, later white). */
+.event-run {
+  display: grid;
+  grid-auto-flow: column;
+  grid-auto-columns: minmax(11rem, 1fr);
+  gap: var(--sp-3);
+  margin: 0;
+  padding: 1rem 1.25rem 1.1rem;
+  list-style: none;
+  overflow-x: auto;
+  background: var(--accent);
+  color: var(--on-surface);
+  border: var(--edge) solid var(--outline);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+  scrollbar-width: thin;
+}
+.run-item { position: relative; display: grid; gap: 0.15rem; justify-items: start; padding-top: 0.15rem; }
+.run-item:not(:last-child)::after {
+  content: "";
+  position: absolute;
+  top: calc(0.15rem + 0.625rem - 1.5px);
+  left: 2.1rem; right: 0.1rem;
+  height: 3px;
+  border-radius: 2px;
+  background: var(--outline);
+}
+.run-item .mark { margin-bottom: var(--sp-2); }
+.run-item.next .mark, .run-item.now .mark { margin-left: 5px; }
+.run-name { font-family: var(--font-display); font-weight: 800; font-size: 1.125rem; line-height: 1.15; letter-spacing: -0.02em; }
+.run-when { color: var(--on-surface-quiet); font-size: 0.8125rem; }
+.run-item.now .run-when { color: var(--danger); }
+
+/* ---- scoreboards: one live set, P1 on the left, P2 on the right ---- */
+.boards { display: grid; gap: 0.7rem; margin: 0; padding: 0; list-style: none; }
+.board-row {
+  display: block;
+  color: var(--on-surface);
+  background: var(--surface);
+  border: var(--edge-pill) solid var(--outline);
+  border-radius: var(--radius-row);
+  box-shadow: var(--shadow);
+  text-decoration: none;
+  transition: rotate var(--m-hover) var(--ease), translate var(--m-hover) var(--ease), box-shadow var(--m-hover) var(--ease), background var(--m-hover) var(--ease);
+}
+.boards li:nth-child(odd) .board-row { rotate: -0.5deg; }
+.boards li:nth-child(even) .board-row { rotate: 0.5deg; }
+.board-row:hover, .board-row:focus-visible { rotate: 0deg; translate: 10px 0; box-shadow: var(--shadow-hover); }
+.hero:not(.live) .board-row:hover, .now-col .board-row:hover, .now-col .board-row:focus-visible { background: var(--accent); }
+.board-row:active { translate: 3px 4px; box-shadow: none; }
+.board-face {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr) auto;
+  align-items: center;
+  column-gap: var(--sp-4);
+  min-height: 3.25rem;
+  padding: 0.35rem 0.85rem;
+}
+.board-side { display: flex; align-items: center; gap: 0.55rem; min-width: 0; }
+.board-side.s1 { flex-direction: row-reverse; }
+.board-tag { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; overflow-wrap: normal; font-size: 1.0625rem; }
+.port {
+  flex: none;
+  padding: 0 0.35rem;
+  border: 2px solid var(--outline);
+  border-radius: 9px;
+  color: var(--envoy-white);
+  font-size: 0.75rem;
+  line-height: 1.25rem;
+}
+.port.p1 { background: var(--p1-face); }
+.port.p2 { background: var(--p2-face); }
+.board-score {
+  display: flex;
+  align-items: baseline;
+  gap: 0.4rem;
+  font-family: var(--font-display);
+  font-weight: 800;
+  font-size: 1.625rem;
+  line-height: 1;
+  font-variant-numeric: tabular-nums;
+}
+.board-score .trail { color: var(--on-surface-quiet); }
+.board-score .dash { color: var(--on-surface-quiet); font-size: 1.125rem; }
+.chip.round { justify-self: end; padding: 0; background: transparent; color: var(--on-surface-quiet); border: 0; }
+
+/* ---- stream: the player in a TV sticker, off-air card in front until a set is live ---- */
+.stream { display: grid; grid-template-columns: minmax(0, 1fr); gap: var(--section) 2.5rem; align-items: start; }
+@media (min-width: 75rem) {
+  .stream { grid-template-columns: minmax(0, 2fr) minmax(0, 1fr); }
+}
+.tv {
+  overflow: hidden;
+  background: var(--outline);
+  border: var(--edge) solid var(--outline);
+  border-radius: 16px;
+  box-shadow: var(--ring-hover), 6px 8px 0 3px var(--outline);
+}
+.tv-lip {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sp-2);
+  min-height: 3rem;
+  padding: var(--sp-2) var(--sp-3);
+  background: var(--bg-ground);
+  border-bottom: var(--edge) solid var(--outline);
+}
+.tv-lip #open { margin: 0; }
+.tv-lip .pill { box-shadow: none; }
+.tv-lip .pill:hover, .tv-lip .pill:focus-visible { box-shadow: var(--shadow); }
+.tv-screen { position: relative; aspect-ratio: 16 / 9; background: var(--envoy-track); }
+.player { display: block; width: 100%; height: 100%; border: 0; background: var(--envoy-track); }
+.offair { position: absolute; inset: 0; display: flex; align-items: flex-end; overflow: hidden; background: var(--bg); }
+.offair-scene { position: absolute; inset: 0; width: 100%; height: 100%; }
+.offair-scene .sun { fill: var(--accent); stroke: var(--outline); stroke-width: 1.2; }
+.offair-scene .hill-far { fill: var(--hill); }
+.offair-scene .hill-near { fill: var(--bg-ground); }
+.offair-text { position: relative; padding: clamp(1rem, 4%, 2.25rem); max-width: 34rem; }
+.offair-title {
+  margin: 0 0 var(--sp-3);
+  font-size: clamp(1.5rem, 1rem + 2.2vw, 2.75rem);
+  line-height: 1.05;
+  -webkit-text-stroke: 4px var(--outline);
+  paint-order: stroke fill;
+  text-shadow: 0 3px 0 var(--outline);
+}
+.offair-next { margin: 0; color: var(--on-bg); }
+.offair-next a { color: var(--accent); text-underline-offset: 3px; }
+.offair .actions { margin-top: var(--sp-4); }
+.offair .notice { margin-bottom: 0; }
+.now-col h3 { margin: var(--sp-5) 0 var(--sp-3); font-size: 1.25rem; }
+.now-col h3:first-child { margin-top: 0; }
+/* The narrow column: the round goes under the players. */
+.now-col .board-face { grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr); row-gap: 0.2rem; }
+.now-col .chip.round { grid-column: 1 / -1; justify-self: center; }
 
 /* ---- rows: list rows for tables (players, placings, head to head) ---- */
-/* Rows stop at a readable width; a wide screen does not stretch "Player … 2 1 2–1" across it. */
-.rows { display: grid; gap: var(--sp-2); max-width: 48rem; margin: 0 0 var(--sp-5); padding: 0; list-style: none; }
+.rows { display: grid; gap: var(--sp-2); max-width: 100%; margin: 0 0 var(--section); padding: 0; list-style: none; }
 .row-line {
   display: grid;
   grid-template-columns: minmax(0, 1fr) repeat(var(--cols, 3), auto);
   align-items: center;
   column-gap: var(--sp-4);
-  min-height: 2rem;
-  padding: 0.15rem 0.75rem;
+  min-height: 2.75rem;
+  padding: 0.2rem 0.9rem;
   background: var(--surface);
   color: var(--on-surface);
   border: var(--edge-pill) solid var(--outline);
@@ -533,8 +948,11 @@ a.card:hover, a.card:focus-visible { background: var(--accent); rotate: 0deg; tr
   box-shadow: var(--shadow);
   font-variant-numeric: tabular-nums;
 }
-.row-line.head { background: var(--accent); font-size: 0.8125rem; }
-.row-line a { color: inherit; }
+.rows > li:nth-child(even) > .row-line, .rows > .row-line:nth-child(even) { rotate: 0.25deg; }
+.rows > li:nth-child(odd) > .row-line, .rows > .row-line:nth-child(odd):not(.head) { rotate: -0.25deg; }
+.row-line.head { min-height: 2.25rem; background: var(--accent); font-size: 0.8125rem; rotate: 0deg; }
+.row-line a { color: inherit; text-decoration: none; }
+.row-line a:hover, .row-line a:focus-visible { text-decoration: underline 3px; text-underline-offset: 4px; }
 .row-line .num { text-align: right; }
 /* A placing: the ordinal, then the tag. */
 .row-line.placing { grid-template-columns: 2.6rem minmax(0, 1fr); }
@@ -543,70 +961,58 @@ a.card:hover, a.card:focus-visible { background: var(--accent); rotate: 0deg; tr
 .rows.cols-2 .row-line { --cols: 2; }
 .rows.cols-5 .row-line { --cols: 5; }
 .rows > .notice { rotate: 0deg; }
+.rows .chip { justify-self: end; }
 
-/* ---- podium: the first three places, as stickers ---- */
-.podium { display: flex; flex-wrap: wrap; gap: var(--sp-3); margin: 0 0 var(--sp-4); padding: 0; list-style: none; }
-.podium li {
-  padding: 0.2rem 0.75rem;
-  background: var(--surface);
+/* ---- players: a leaderboard, every row a link ---- */
+.board-list .row-line { grid-template-columns: minmax(0, 1fr) 4rem 5.5rem 4.5rem 9rem; }
+.player-row {
+  text-decoration: none;
+  transition: rotate var(--m-hover) var(--ease), translate var(--m-hover) var(--ease), box-shadow var(--m-hover) var(--ease), background var(--m-hover) var(--ease);
+}
+.player-row:hover, .player-row:focus-visible { background: var(--accent); rotate: 0deg; translate: 10px 0; box-shadow: var(--shadow-hover); }
+.player-row:active { translate: 3px 4px; box-shadow: none; }
+.player-row.top { background: var(--accent); box-shadow: var(--ring-hover), var(--shadow-hover); }
+.who { display: flex; align-items: center; gap: var(--sp-3); min-width: 0; }
+.who-tag { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; overflow-wrap: normal; font-size: 1.0625rem; }
+.player-row.top .who-tag { font-family: var(--font-display); font-weight: 800; font-size: 1.25rem; }
+.disc {
+  flex: none;
+  display: grid;
+  place-items: center;
+  width: 2.25rem; height: 2.25rem;
+  border: 2px solid var(--outline);
+  border-radius: 50%;
   color: var(--on-surface);
-  border: var(--edge-pill) solid var(--outline);
-  border-radius: var(--radius-row);
-  box-shadow: var(--shadow);
+  font-family: var(--font-display);
+  font-weight: 800;
+  font-size: 1.125rem;
+  line-height: 1;
+  text-transform: uppercase;
 }
-.podium li:first-child { background: var(--accent); }
-.podium .place { color: var(--on-surface-quiet); font-size: 0.8125rem; margin-right: 0.4rem; }
-
-/* ---- how to enter: the two client commands on a sticker ---- */
-.howto {
-  width: fit-content;
-  max-width: 100%;
-  margin: 0 0 var(--sp-5);
-  padding: var(--sp-3) var(--sp-4);
-  background: var(--surface);
-  color: var(--on-surface);
-  border: var(--edge) solid var(--outline);
-  border-radius: var(--radius);
-  box-shadow: var(--shadow);
-  rotate: 0.6deg;
-}
-.howto h2 { white-space: normal; margin-bottom: var(--sp-2); }
-.howto p { margin: 0; }
-/* The client commands, folded away for testers. */
-.howto details { margin-top: var(--sp-3); }
-.howto summary { cursor: pointer; color: var(--on-surface-quiet); font-size: 0.875rem; }
-.howto code {
-  display: block;
-  margin: var(--sp-2) 0 0;
-  padding: 0.3rem 0.6rem;
-  background: var(--envoy-cream);
-  color: var(--envoy-ink);
-  border: 2px dashed var(--outline);
-  border-radius: 9px;
-  font: 0.875rem/1.4 ui-monospace, "SF Mono", Menlo, Consolas, monospace;
-  white-space: pre;
-  overflow-x: auto;
-}
-
-/* ---- stream: the 16:9 frame ---- */
-.player {
-  display: block;
-  aspect-ratio: 16 / 9;
-  width: 100%;
-  max-width: 72rem;
-  margin: 0 0 var(--sp-4);
-  background: var(--envoy-ink);
-  border: var(--edge) solid var(--outline);
-  border-radius: var(--radius);
-  box-shadow: var(--shadow);
-}
-
-/* ---- filter: the search input, styled as the select ---- */
+.disc.f0 { background: var(--p1); }
+.disc.f1 { background: var(--p2); }
+.disc.f2 { background: var(--accent); }
+.disc.f3 { background: var(--envoy-technique); }
+.disc.f4 { background: var(--envoy-frost); }
+.disc.big { width: 5rem; height: 5rem; border-width: var(--edge); font-size: 2.5rem; box-shadow: var(--shadow); rotate: -6deg; }
+.titles .stars { display: inline-flex; align-items: center; justify-content: flex-end; gap: 1px; }
+.titles svg { width: 1.15rem; height: 1.15rem; fill: var(--accent); stroke: var(--outline); stroke-width: 2.5; stroke-linejoin: round; overflow: visible; }
+.player-row.top .titles svg { fill: var(--envoy-white); }
+.titles .none { color: var(--on-surface-quiet); }
+.rate { display: inline-flex; align-items: center; justify-content: flex-end; gap: var(--sp-2); }
+.track { width: 4rem; height: 0.7rem; overflow: hidden; background: var(--envoy-track); border: 2px solid var(--outline); border-radius: 9px; }
+.fill { display: block; height: 100%; background: var(--accent); }
+.player-row.top .fill { background: var(--envoy-white); }
+.pct { min-width: 2.6rem; }
+.fill.w0 { width: 0; } .fill.w1 { width: 10%; } .fill.w2 { width: 20%; } .fill.w3 { width: 30%; }
+.fill.w4 { width: 40%; } .fill.w5 { width: 50%; } .fill.w6 { width: 60%; } .fill.w7 { width: 70%; }
+.fill.w8 { width: 80%; } .fill.w9 { width: 90%; } .fill.w10 { width: 100%; }
 .filter {
   display: block;
-  width: min(24rem, 100%);
-  margin: 0 0 var(--sp-4);
-  padding: 0.35rem 0.75rem;
+  width: min(20rem, 100%);
+  min-height: 2.75rem;
+  margin: 0;
+  padding: 0.35rem 0.85rem;
   font: inherit;
   color: var(--on-surface);
   background: var(--surface);
@@ -617,80 +1023,125 @@ a.card:hover, a.card:focus-visible { background: var(--accent); rotate: 0deg; tr
 .filter::placeholder { color: var(--on-surface-quiet); }
 .filter:focus-visible { outline: 3px solid var(--focus); outline-offset: 3px; }
 
-/* ---- landing: live now across the top, next up and latest results side by side ---- */
-.home {
+/* ---- player: avatar and name, four number stickers, then the tables ---- */
+[data-page="player"] .top-text { display: grid; grid-template-columns: auto minmax(0, 1fr); column-gap: 1.5rem; align-items: center; }
+[data-page="player"] .top-text .disc { grid-row: span 2; }
+[data-page="player"] .meta { margin-top: var(--sp-2); font-size: 1rem; }
+.stats { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 1.5rem; margin: 0 0 var(--section); padding: 0; list-style: none; }
+.stat {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(min(24rem, 100%), 1fr));
-  gap: var(--sp-5);
-  align-items: start;
-  max-width: 90rem;
-  margin: 0 0 var(--sp-5);
-}
-.home > section { min-width: 0; max-width: 44rem; }
-#live { grid-column: 1 / -1; max-width: none; }
-/* Wide: the three sections side by side; two when nothing is live, so no column stays empty. */
-@media (min-width: 75rem) {
-  .home { grid-template-columns: repeat(3, minmax(0, 1fr)); }
-  .home:has(#live[hidden]) { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-  #live { grid-column: auto; }
-}
-.home h2 { white-space: normal; }
-h3 { margin: 0 0 var(--sp-1); font-family: var(--font-display); font-weight: 800; letter-spacing: -0.02em; font-size: 1.375rem; line-height: 1.15; }
-.home-card a:not(.pill) { color: inherit; }
-.home-card .quiet, .home-card .when .quiet { color: var(--on-surface-quiet); font-size: 0.875rem; }
-.home-card { margin: 0 0 var(--sp-5); }
-.home-card p { margin: 0 0 var(--sp-2); }
-.home .howto code { white-space: pre-wrap; }
-.home-card .podium { margin-top: var(--sp-3); }
-.actions { margin: 0; }
-.live-list {
-  display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(min(22rem, 100%), 1fr));
-  gap: var(--sp-4) var(--sp-5);
-  margin: 0 0 var(--sp-4);
-}
-/* A running event rests in the kit's hovered look, with its live flag. */
-.live-card {
-  position: relative;
-  padding: var(--sp-3) var(--sp-4);
-  background: var(--accent);
+  grid-template-columns: auto 1fr;
+  grid-template-areas: "num extra" "label label";
+  align-items: center;
+  justify-items: start;
+  gap: 0.35rem 0.6rem;
+  padding: 1rem 1.15rem;
+  background: var(--surface);
   color: var(--on-surface);
   border: var(--edge) solid var(--outline);
   border-radius: var(--radius);
-  box-shadow: var(--ring-hover), 4px 6px 0 3px var(--outline);
-}
-.live-card .flag { right: 1rem; }
-.live-sets { display: grid; gap: var(--sp-2); margin: var(--sp-2) 0 0; padding: 0; list-style: none; }
-.live-sets li {
-  padding: 0.15rem 0.75rem;
-  background: var(--surface);
-  border: var(--edge-pill) solid var(--outline);
-  border-radius: var(--radius-row);
   box-shadow: var(--shadow);
-  font-size: 0.9375rem;
 }
-.live-sets li a { color: inherit; }
-.live-sets li:nth-child(odd) { rotate: -0.5deg; }
-.live-sets li:nth-child(even) { rotate: 0.5deg; }
-/* A pill link, as the nav's. */
-.pill {
-  display: inline-block;
-  padding: 0.2rem 0.85rem;
-  color: var(--on-surface);
-  background: var(--surface);
-  border: var(--edge-pill) solid var(--outline);
-  border-radius: var(--radius-row);
-  box-shadow: var(--shadow);
-  font-size: 0.9375rem;
-  text-decoration: none;
-  transition: translate var(--m-hover) var(--ease), box-shadow var(--m-hover) var(--ease);
-}
-.pill:hover, .pill:focus-visible { background: var(--accent); translate: 0 -3px; box-shadow: var(--shadow-hover); outline: none; }
-.links { margin: 0 0 var(--sp-5); color: var(--on-bg-quiet); }
-.links a { color: var(--on-bg); }
-.enter .home-card { animation: sticker-in var(--m-enter) var(--ease) both; animation-delay: calc(var(--i, 0) * 3 * var(--frame)); }
+.stat:nth-child(1) { rotate: -3deg; } .stat:nth-child(2) { rotate: 2deg; }
+.stat:nth-child(3) { rotate: -1deg; } .stat:nth-child(4) { rotate: 3deg; }
+.stat-num { grid-area: num; font-family: var(--font-display); font-weight: 800; font-size: 2.75rem; line-height: 1; letter-spacing: -0.03em; font-variant-numeric: tabular-nums; }
+.stat-extra { grid-area: extra; padding: 0 0.45rem; background: var(--accent); border: 2px solid var(--outline); border-radius: 9px; font-size: 0.8125rem; line-height: 1.4rem; }
+.stat-label { grid-area: label; color: var(--on-surface-quiet); font-size: 0.875rem; }
 
-/* ---- motion: one entrance, on the first drawing of an event only ---- */
+/* ---- history: one row per event, the champion on a star ---- */
+.hist { display: grid; gap: 1.1rem; margin: 0; padding: 0; list-style: none; }
+.hist-row {
+  display: grid;
+  grid-template-columns: minmax(0, 2fr) minmax(0, 1.5fr) auto;
+  grid-template-areas: "main champ go" "podium champ go" "more more more";
+  align-items: center;
+  gap: var(--sp-3) var(--sp-5);
+  min-height: 4rem;
+  padding: 1rem 1.25rem;
+  background: var(--surface);
+  color: var(--on-surface);
+  border: var(--edge) solid var(--outline);
+  border-radius: var(--radius-row);
+  box-shadow: var(--shadow);
+}
+.hist-main { grid-area: main; min-width: 0; }
+.hist-main h3 { margin-bottom: var(--sp-2); }
+.hist-champ { grid-area: champ; display: flex; align-items: center; gap: var(--sp-3); min-width: 0; }
+.hist-star svg { display: block; width: 2.25rem; height: 2.25rem; fill: var(--accent); stroke: var(--outline); stroke-width: 2; stroke-linejoin: round; overflow: visible; rotate: -8deg; }
+.hist-who { display: grid; min-width: 0; }
+.hist-label { color: var(--on-surface-quiet); font-size: 0.8125rem; }
+.hist-champ-tag { font-family: var(--font-display); font-weight: 800; font-size: 1.375rem; line-height: 1.1; letter-spacing: -0.02em; }
+.hist-podium { grid-area: podium; align-self: start; }
+.hist-podium:empty { display: none; }
+.hist-go { grid-area: go; margin: 0; }
+.hist-more { grid-area: more; }
+.hist-more summary { cursor: pointer; width: fit-content; color: var(--on-surface-quiet); font-size: 0.875rem; padding-block: 0.4rem; }
+.hist-more .rows { margin: var(--sp-2) 0 var(--sp-1); }
+.hist-more .row-line { box-shadow: none; rotate: 0deg; min-height: 2.25rem; }
+.hist-more p { margin: var(--sp-2) 0 0; font-size: 0.875rem; }
+
+/* ---- schedule: grouped by day, how to enter beside it ---- */
+.schedule { display: grid; grid-template-columns: minmax(0, 1fr); gap: var(--section) 3rem; align-items: start; }
+@media (min-width: 60rem) {
+  .schedule { grid-template-columns: minmax(0, 1fr) 22rem; }
+  .sched-side { position: sticky; top: 6.5rem; }
+}
+.sched-list section + section { margin-top: var(--section); }
+.sched { display: grid; gap: 1rem; margin: 0; padding: 0; list-style: none; }
+h3.day { margin: var(--sp-5) 0 var(--sp-3); color: var(--on-bg-quiet); font-size: 1.125rem; }
+.sched-list section > div > h3.day:first-child { margin-top: 0; }
+.sched-row {
+  display: grid;
+  grid-template-columns: 8rem minmax(0, 1fr) auto;
+  align-items: center;
+  gap: var(--sp-3) var(--sp-5);
+  padding: 1rem 1.25rem;
+  background: var(--surface);
+  color: var(--on-surface);
+  border: var(--edge) solid var(--outline);
+  border-radius: var(--radius-row);
+  box-shadow: var(--shadow);
+}
+.sched-row.live { background: var(--accent); box-shadow: var(--ring-hover), 4px 6px 0 3px var(--outline); rotate: 0deg; }
+.sched-time { display: grid; justify-items: start; gap: 0.15rem; }
+.clock { font-family: var(--font-display); font-weight: 800; font-size: 1.75rem; line-height: 1; letter-spacing: -0.03em; font-variant-numeric: tabular-nums; }
+.rel { color: var(--on-surface-quiet); font-size: 0.8125rem; }
+.sched-row.live .rel { color: var(--on-surface); }
+.sched-body h3 { margin-bottom: var(--sp-2); }
+.sched-desc { margin: var(--sp-2) 0 0; color: var(--on-surface-quiet); font-size: 0.9375rem; }
+.sched-go { margin: 0; }
+
+/* ---- how to enter: the two client commands on a sticker ---- */
+.howto {
+  max-width: 100%;
+  margin: 0 0 var(--sp-5);
+  padding: var(--sp-4) 1.15rem;
+  background: var(--surface);
+  color: var(--on-surface);
+  border: var(--edge) solid var(--outline);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+}
+.howto h2 { white-space: normal; margin-bottom: var(--sp-2); font-size: var(--t-h3); }
+.howto p { margin: 0; }
+/* The client commands, folded away for testers. */
+.howto details { margin-top: var(--sp-3); }
+.howto summary { cursor: pointer; color: var(--on-surface-quiet); font-size: 0.875rem; padding-block: 0.3rem; }
+.howto details p { margin-top: var(--sp-2); font-size: 0.9375rem; }
+.howto code {
+  display: block;
+  margin: var(--sp-2) 0 0;
+  padding: 0.3rem 0.6rem;
+  background: var(--envoy-cream);
+  color: var(--envoy-ink);
+  border: 2px dashed var(--outline);
+  border-radius: 9px;
+  font: 0.875rem/1.4 ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  white-space: pre-wrap;
+  overflow-x: auto;
+}
+
+/* ---- motion: one entrance per page at most (a bracket's first drawing, the landing's hero) ---- */
 @keyframes sticker-in {
   0% { opacity: 0; scale: 0.85; }
   67% { opacity: 1; scale: 1.04; }
@@ -701,33 +1152,86 @@ h3 { margin: 0 0 var(--sp-1); font-family: var(--font-display); font-weight: 800
   57% { opacity: 1; scale: 1.2; }
   100% { opacity: 1; scale: 1; }
 }
+@keyframes blink {
+  0% { opacity: 1; scale: 1; }
+  40% { opacity: 0.3; scale: 1.8; }
+  100% { opacity: 1; scale: 1; }
+}
 .enter .strip, .enter .set, .enter .entrant {
   animation: sticker-in var(--m-enter) var(--ease) both;
   animation-delay: calc(var(--i, 0) * 3 * var(--frame));
 }
 .enter .entrant { animation-delay: calc(var(--i, 0) * var(--stagger) * var(--frame)); }
 .enter .champ { animation: burst-in var(--m-burst) var(--ease) both; animation-delay: calc(13 * 3 * var(--frame)); }
+.enter .hero { animation: sticker-in var(--m-enter) var(--ease) both; }
+.enter .home-champ { animation-delay: calc(6 * var(--frame)); }
+.fresh-dot.blink { animation: blink 400ms var(--ease) 1; }
 .c1 { --i: 1; } .c2 { --i: 2; } .c3 { --i: 3; } .c4 { --i: 4; } .c5 { --i: 5; } .c6 { --i: 6; }
 .c7 { --i: 7; } .c8 { --i: 8; } .c9 { --i: 9; } .c10 { --i: 10; } .c11 { --i: 11; } .c12 { --i: 12; }
+@media (prefers-reduced-motion: no-preference) {
+  .skeleton { animation: seat-pulse 1.6s ease-in-out infinite alternate; }
+  @keyframes seat-pulse { from { opacity: 0.55; } to { opacity: 1; } }
+}
 
 @media (max-width: 40rem) {
-  body { padding: var(--sp-4) var(--sp-4) 4.5rem; }
-  h1 { font-size: 1.75rem; }
-  footer { padding: var(--sp-2) var(--sp-4); }
+  :root { --gutter: var(--sp-4); --section: 2.5rem; }
+  header.site { position: static; }
+  .bar { flex-wrap: wrap; gap: var(--sp-2); padding-block: 0.6rem 0.5rem; }
+  .brand-mark { width: 2.4rem; height: 2.4rem; }
+  .word { font-size: 1.3rem; }
+  /* One row of pills, scrolling sideways when it must; no menu button for five links. */
+  .nav {
+    width: calc(100% + 2 * var(--gutter));
+    margin-inline: calc(-1 * var(--gutter));
+    padding: 2px var(--gutter) 6px;
+    gap: 4px;
+    overflow-x: auto;
+    scroll-snap-type: x mandatory;
+    scrollbar-width: none;
+  }
+  .nav::-webkit-scrollbar { display: none; }
+  .nav a { flex: none; min-height: 2.75rem; padding: 0 0.6rem; font-size: 0.875rem; scroll-snap-align: start; }
+  .page { padding-block: 1.75rem var(--section); }
+  header.top { margin-bottom: 1.5rem; }
   .strip { gap: var(--sp-2) 1.5rem; padding-inline: 0.8rem; }
   .stamp.big { top: auto; bottom: -1rem; right: 0.6rem; translate: none; font-size: 1.1875rem; }
   .scene::before { width: 150vw; height: 150vw; right: -70vw; top: 30vh; }
   .scene::after { width: 160vw; height: 100vw; left: -60vw; bottom: -80vw; }
+  .hero { padding: 2rem 1.1rem 1.4rem; rotate: -0.6deg; }
+  .hero-stamp { left: 1rem; font-size: 1rem; }
+  .board-face { grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr); row-gap: 0.2rem; padding-inline: 0.6rem; column-gap: var(--sp-2); }
+  .board-face .chip.round { grid-column: 1 / -1; justify-self: center; }
+  .board-tag { font-size: 0.9375rem; }
+  .board-side { gap: 0.35rem; }
+  .board-score { font-size: 1.375rem; }
+  .boards li .board-row:hover { translate: 0 0; }
+  .home-champ { width: 11rem; height: 11rem; }
   /* Wide rows: the name takes the first line, the numbers the second. */
-  .rows.cols-5 .row-line { grid-template-columns: repeat(5, auto); justify-content: space-between; padding-block: 0.3rem; }
+  .rows.cols-5 .row-line { grid-template-columns: repeat(5, auto); justify-content: space-between; padding-block: 0.4rem; }
   .rows.cols-5 .row-line > :first-child { grid-column: 1 / -1; }
+  .board-list .row-line { grid-template-columns: repeat(4, auto); row-gap: 0.2rem; }
+  .board-list .row-line.head > :first-child { grid-column: 1 / -1; }
+  .stats { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 1rem; }
+  .stat-num { font-size: 2rem; }
+  [data-page="player"] .top-text { column-gap: 1rem; }
+  .disc.big { width: 3.75rem; height: 3.75rem; font-size: 1.875rem; }
+  .hist-row { grid-template-columns: minmax(0, 1fr) auto; grid-template-areas: "main main" "champ go" "podium podium" "more more"; padding: 0.9rem 1rem; }
+  .sched-row { grid-template-columns: minmax(0, 1fr) auto; padding: 0.9rem 1rem; }
+  .sched-time { grid-column: 1 / -1; display: flex; align-items: baseline; gap: var(--sp-3); }
+  .clock { font-size: 1.5rem; }
+  .toolbar { width: 100%; }
+  .foot { padding-block: 1.75rem; }
 }
 
-/* Last and global: reduced motion removes every animation and transition on every page. */
+/* Last and global: reduced motion removes every animation and transition on every page; hover
+   and press keep their colour and shadow but nothing moves. */
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation: none !important; transition: none !important; }
   .set:hover, .nav a:hover, .nav a:focus-visible, a.card:hover, a.card:focus-visible { translate: none; }
   .layout button:hover, .jump:hover, .layout button:focus-visible, .jump:focus-visible { translate: none; }
   option:hover, option:focus-visible { translate: none; }
   .pill:hover, .pill:focus-visible { translate: none; }
+  .board-row:hover, .board-row:focus-visible, .player-row:hover, .player-row:focus-visible { translate: none; }
+  .nav a:active, .pill:active, .layout button:active, .jump:active, .board-row:active, .player-row:active { translate: none; }
+  .brand:hover .brand-mark { rotate: 8deg; }
 }
