@@ -5,7 +5,7 @@ from fontTools.ttLib import TTFont
 src, dst, family, style = sys.argv[1:5]
 f = TTFont(src)
 ps = family.replace(" ", "") + "-" + style.replace(" ", "")
-new = {1: family, 2: "Regular", 3: ps, 4: family + " " + style, 6: ps, 16: family, 17: style}
+new = {1: family, 2: style, 3: ps, 4: family + " " + style, 6: ps, 16: family, 17: style}
 name = f["name"]
 for rec in list(name.names):
     if rec.nameID in new:
