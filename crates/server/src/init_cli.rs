@@ -486,7 +486,8 @@ Before you go further
   (verdict PeerOnly) until you configure an engine and a disc image (README, \"Verifier modes\").
 - Back up your organiser key somewhere private (README, \"Backups\"):
     {key}
-  Whoever holds it runs your events, and a lost key cannot be recovered.
+  Whoever holds it can run your events. If it is lost or leaks, make a new one with
+  `autobracket keygen` and replace the old public key in to_keys.
 ",
         dir = dir.display(),
         config = q(config_file),
