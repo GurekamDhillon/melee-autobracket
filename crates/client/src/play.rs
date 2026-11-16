@@ -1160,7 +1160,7 @@ pub async fn report_current_no_show(
 ) -> anyhow::Result<String> {
     let set_id = match api.next(event).await? {
         Next::Play { set_id, .. } => set_id,
-        Next::Review { set_id } => {
+        Next::Review { set_id, .. } => {
             return Ok(format!("Set {set_id} is already with the organiser"));
         }
         other => bail!(
@@ -1182,7 +1182,7 @@ pub fn describe(next: &Next) -> String {
     match next {
         Next::NotEntered => "Not entered in this event".into(),
         Next::Waiting => "Waiting for your next set".into(),
-        Next::Review { set_id } => format!("Set {set_id} is being reviewed by the organiser"),
+        Next::Review { set_id, .. } => format!("Set {set_id} is being reviewed by the organiser"),
         Next::Eliminated => "Eliminated".into(),
         Next::Champion => "Champion".into(),
         Next::Play {

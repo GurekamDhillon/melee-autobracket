@@ -333,7 +333,13 @@ async fn review_does_not_stop_a_running_game_and_its_replay_is_uploaded() {
     let stub = Stub::start(move |req| match (req.method.as_str(), req.path.as_str()) {
         ("GET", p) if p.starts_with("/v1/me/next") => {
             if flag.load(Ordering::SeqCst) {
-                (200, json(&Next::Review { set_id: 0 }))
+                (
+                    200,
+                    json(&Next::Review {
+                        event_id: 1,
+                        set_id: 0,
+                    }),
+                )
             } else {
                 (200, json(&host_play()))
             }

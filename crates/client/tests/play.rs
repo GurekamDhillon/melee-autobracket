@@ -878,7 +878,10 @@ async fn the_no_show_command_reports_the_current_set() {
     assert!(stdout.contains("Reported a no-show for set 0"), "{stdout}");
     assert!(matches!(
         api(&app, &host).next(event).await.unwrap(),
-        Next::Review { set_id: 0 }
+        Next::Review {
+            event_id: 1,
+            set_id: 0,
+        }
     ));
     let text = queue(&app).await;
     assert!(text.contains("not here after 10 min"), "{text}");

@@ -588,6 +588,8 @@ fn round_names_match_the_doc() {
     let doc = std::fs::read_to_string(root.join("../../docs/api.md")).unwrap();
     let page = std::fs::read_to_string(root.join("assets/site.js")).unwrap();
     let section = doc.split_once("## 7. Round names").unwrap().1;
+    // Up to the next section.
+    let section = section.split_once("\n## ").map_or(section, |(s, _)| s);
     let rows: Vec<[&str; 3]> = section
         .lines()
         .filter_map(|line| {
@@ -631,21 +633,35 @@ fn round_names_match_the_doc() {
     }
 }
 
-/// Every route in the table of `docs/api.md` exists with its method.
+/// Every route in every route table of `docs/api.md` (section 4 and the section 8.x tables
+/// that continue it: every row whose first cell is an HTTP method) exists with its method.
 #[tokio::test]
 async fn documented_routes_exist() {
     let doc =
         std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("../../docs/api.md"))
             .unwrap();
+    let tables = doc
+        .lines()
+        .filter(|l| l.starts_with("| Method | Path | Who |"))
+        .count();
+    assert_eq!(
+        tables, 8,
+        "section 4 and sections 8.1 to 8.7 each have a route table"
+    );
     let app = TestApp::spawn(|_| {}).await;
     let client = reqwest::Client::new();
-    let mut seen = 0;
+    // Rows of section 4's table, counted exactly; the section 8.x tables grow with their tasks.
+    let mut section_4 = 0;
+    let mut in_section_4 = false;
     for line in doc.lines() {
+        if line.starts_with("## ") {
+            in_section_4 = line.starts_with("## 4. ");
+        }
         let cells: Vec<&str> = line.split('|').map(str::trim).collect();
         let [_, method, path, ..] = cells[..] else {
             continue;
         };
-        if !["GET", "POST", "DELETE"].contains(&method) {
+        if !["GET", "POST", "DELETE", "PUT", "PATCH"].contains(&method) {
             continue;
         }
         // `{name}` placeholders become 1.
@@ -674,10 +690,12 @@ async fn documented_routes_exist() {
             !body.contains("no such route"),
             "{method} {concrete}: {body}"
         );
-        seen += 1;
+        if in_section_4 {
+            section_4 += 1;
+        }
     }
-    // Exact: a route added to the router must be added to the table too.
-    assert_eq!(seen, 33, "routes in the table");
+    // Exact: a route added to the section 4 router must be added to its table too.
+    assert_eq!(section_4, 33, "routes in the section 4 table");
 }
 
 /// The final-review fixes that live in page scripts, pinned as text.

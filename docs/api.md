@@ -4,7 +4,8 @@ This is the complete contract between an autobracket server and the programs tha
 the reference client (`autobracket-client`), the admin CLI (`autobracket admin`), the external
 verifier (`autobracket verify-worker`), and any client written elsewhere. Everything a request
 or response carries is listed here. The JSON shapes are those of the `proto` crate
-(`crates/proto/src/types.rs`, `crates/proto/src/ruleset.rs`); every JSON example below marked
+(`crates/proto/src/types.rs`, `crates/proto/src/ruleset.rs`,
+`crates/proto/src/ingame.rs`); every JSON example below marked
 `checked` is decoded into that type and re-encoded by a test (`crates/proto/tests/api_doc.rs`),
 so the examples cannot drift from the code. The worked signing example is checked by the same
 test.
@@ -17,6 +18,7 @@ Contents:
 5. [Types](#5-types)
 6. [What a player's client does](#6-what-a-players-client-does)
 7. [Round names](#7-round-names)
+8. [Accounts and in-game client](#8-accounts-and-in-game-client)
 
 ## 1. Conventions
 
@@ -289,7 +291,7 @@ Notes on individual routes:
 ## 5. Types
 
 Enums are encoded the serde way: a variant without data is a JSON string (`"Waiting"`); a
-variant with data is an object with one key, the variant name (`{"Review":{"set_id":3}}`,
+variant with data is an object with one key, the variant name (`{"Review":{"event_id":1,"set_id":3}}`,
 `{"Illegal":"banned stage"}`). Struct fields are always present in responses; `null` means
 absent. In requests, a field marked optional may be left out.
 
@@ -389,8 +391,16 @@ request: an omitted or null field clears it, as does an empty or all-whitespace 
 | `legal_stages` | [integer] | stage ids as Game Start records them |
 | `banned_characters` | [integer] | external character ids |
 | `allowed_gecko` | [string] | permitted Gecko code lists, lowercase hex SHA-256 |
+| `starter_stages` | [integer], optional | the stages game 1's strikes are over, each one of `legal_stages`; absent or `[]` (the default) means all of `legal_stages` |
+| `stage_bans` | integer, optional | stages the winner of a game bans before the loser picks the next game's stage; absent means 2; a value given must be fewer than `legal_stages` has (unless there is only one); either way at most one fewer than `legal_stages` has are banned, so a stage is left to pick |
 
 In a request every field is optional (missing ones take the defaults shown here).
+
+`starter_stages` and `stage_bans` are the exception to "struct fields are always present": a
+response leaves them out while they are at their defaults (empty, absent), so a ruleset
+without stage selection reads exactly as it did before they existed, including to older
+clients, which refuse unknown `Ruleset` fields. An event that sets either needs a client from
+phase 2b or later to read its rules.
 
 <!-- checked: Ruleset -->
 ```json
@@ -402,6 +412,23 @@ In a request every field is optional (missing ones take the defaults shown here)
   "legal_stages": [2, 3, 8, 28, 31, 32],
   "banned_characters": [],
   "allowed_gecko": []
+}
+```
+
+With stage selection set:
+
+<!-- checked: Ruleset -->
+```json
+{
+  "stocks": 4,
+  "timer_secs": 480,
+  "best_of": 3,
+  "best_of_finals": 5,
+  "legal_stages": [2, 3, 8, 28, 31, 32],
+  "banned_characters": [],
+  "allowed_gecko": [],
+  "starter_stages": [3, 8, 28, 31, 32],
+  "stage_bans": 1
 }
 ```
 
@@ -503,20 +530,25 @@ What the signing player should do next in the event (`GET /v1/me/next`):
 |---|---|
 | `"NotEntered"` | the player is not an entrant |
 | `"Waiting"` | sign-up is still open, or the player's next set waits for another set to finish |
-| `{"Review": {"set_id": N}}` | the player's set is with the organiser; wait (see [section 6](#6-what-a-players-client-does)) |
+| `{"Review": {"event_id": N, "set_id": N}}` | the player's set is with the organiser; wait (see [section 6](#6-what-a-players-client-does)) |
 | `"Eliminated"` | out of the event |
 | `"Champion"` | won the event |
 | `{"Play": {...}}` | play game `game_no` of set `set_id` |
 
-`Play` fields: `set_id`; `opponent_tag`; `role` (`"Host"` for slot 0, `"Guest"` for slot 1);
+`Play` fields: `event_id` (the event asked about); `set_id`; `opponent_tag`; `role` (`"Host"`
+for slot 0, `"Guest"` for slot 1);
 `relay` (the netplay relay address, `host:port`); `room_code` (null until the host posts one
 for this game); `game_no` (1-based); `wins` (**`[me, opponent]`**); `best_of`; `stocks`;
 `timer_secs`; `awaiting_verdict` (my replay of `game_no` is in and not yet judged).
+`event_id` in `Play` and `Review` is new in phase 2b: servers before then leave it out, and a
+client decoding into `proto` reads a missing one as 0, which means unknown (event ids start
+at 1).
 
 <!-- checked: Next -->
 ```json
 {
   "Play": {
+    "event_id": 1,
     "set_id": 0,
     "opponent_tag": "Armada",
     "role": "Host",
@@ -534,7 +566,7 @@ for this game); `game_no` (1-based); `wins` (**`[me, opponent]`**); `best_of`; `
 
 <!-- checked: Next -->
 ```json
-{"Review": {"set_id": 3}}
+{"Review": {"event_id": 1, "set_id": 3}}
 ```
 
 <!-- checked: Next -->
@@ -841,8 +873,9 @@ the event is complete; `seed` is the entrant's index in the event's `tags` (0 = 
 ## 7. Round names
 
 What a round is called on the bracket page and in the in-game bracket menu. The names are
-presentation only: the API carries no round names, and each one is derived from a set's `side`
-and `round` and from the highest `round` of that side in the bracket.
+presentation only: the API carries a round name only in `HomeAction`'s `SetUp` and `Upcoming`
+(`round_name`), and follows this table there; each one is derived from a set's `side` and
+`round` and from the highest `round` of that side in the bracket.
 
 On the winners and losers sides the last rounds are named counting back from the side's last
 round; every earlier round is numbered by its `round`, which starts at 1.
@@ -868,3 +901,482 @@ final reset is shown only when it is played, that is when its set is not `Skippe
 sets all hold a `Bye` or are `Skipped` is not shown, and the numbering of the other rounds does
 not change: in a bracket whose losers round 1 is all byes, the first losers round shown is
 "Losers round 2".
+
+## 8. Accounts and in-game client
+
+Accounts (Discord sign-in through the operator's identity provider), the organiser's web pages,
+the in-game client's home, badge, set flow and server-held stage selection, the live relay, and
+the site pages. Signed routes are signed as in [section 2](#2-signing-a-request); "player"
+includes keys linked to the player's account.
+
+**Perspective.** Every type the in-game client reads is from the signer's side: pairs are
+**`[me, opponent]`** (as `wins` in `Next`), and `who` is `"me"` or `"opponent"`. The exception
+is the public `LiveGame`, whose `tags` are `[slot 0, slot 1]`.
+
+**Stages** are identified by their stable Melee stage id, the id a replay's Game Start records
+and `Ruleset.legal_stages` lists, never by a position in a list. Responses carry a `Stage`
+(`id` and a display `name`); requests name a stage by id alone.
+
+### Types
+
+#### Stage
+
+A stage as responses carry it. Compare stages by `id`; `name` is for display.
+
+<!-- checked: Stage -->
+```json
+{"id": 31, "name": "Battlefield"}
+```
+
+#### Side
+
+A bracket side, the same strings as `side` in the bracket JSON: `"Winners"`, `"Losers"` or
+`"GrandFinal"`.
+
+<!-- checked: Side -->
+```json
+"Losers"
+```
+
+#### SiteInfo
+
+What the site offers (public). `identity` is whether accounts are enabled; `operator` and
+`contact` are as configured, or null.
+
+<!-- checked: SiteInfo -->
+```json
+{"identity": true, "operator": "Example Melee Club", "contact": "admins@example.org"}
+```
+
+#### MeStatus
+
+The signer's player: `tag`, `linked` (the player belongs to an account) and the account's
+`display_name` (null when not linked).
+
+<!-- checked: MeStatus -->
+```json
+{"tag": "Mango", "linked": true, "display_name": "Joseph"}
+```
+
+#### LinkReq and LinkResult
+
+`LinkReq` carries the one-use code from the account page; `LinkResult` the tag the signing key
+now plays as.
+
+<!-- checked: LinkReq -->
+```json
+{"code": "ABCD2345"}
+```
+
+<!-- checked: LinkResult -->
+```json
+{"tag": "Mango"}
+```
+
+#### Home, MyEvent and HomeAction
+
+The in-game client's home screen. `events` lists every event in sign-up or running that the
+player entered, oldest first, each with the player's `Next` in it (`MyEvent`). `action` is the
+one thing to put first; `badge` is true when `action` is `SetUp` and the signer has not said
+ready.
+
+| `HomeAction` variant | Meaning |
+|---|---|
+| `"None"` | nothing to do or wait for |
+| `{"SetUp": {...}}` | a set is called: `event_id`, `set_id`, `side`, `round`, `round_name` (as [section 7](#7-round-names) names it), `opponent_tag`, `best_of`, `game_no`, `ready` (**`[me, opponent]`**) |
+| `{"Review": {"event_id": N, "set_id": N}}` | the player's set is with the organiser |
+| `{"Upcoming": {...}}` | the player's next set waits on a feeder set: `event_id`, `set_id`, `side`, `round`, `round_name`, `opponent_tag` (null while unknown), `eta_secs` (null when it cannot be estimated) |
+
+`MyEvent.next` is each event's status line (describe it as the reference client does: "Waiting
+for your next set", "Set 4 is being reviewed by the organiser", ...). A round name is carried
+only by `SetUp` and `Upcoming`; elsewhere a client that wants one derives it as
+[section 7](#7-round-names) does.
+
+<!-- checked: Home -->
+```json
+{
+  "badge": true,
+  "action": {
+    "SetUp": {
+      "event_id": 1,
+      "set_id": 0,
+      "side": "Winners",
+      "round": 1,
+      "round_name": "Final",
+      "opponent_tag": "Armada",
+      "best_of": 3,
+      "game_no": 1,
+      "ready": [false, true]
+    }
+  },
+  "events": [
+    {
+      "event": {
+        "id": 1,
+        "name": "Weekly #12",
+        "state": "running",
+        "entrants": 2,
+        "starts_at": 1795000000,
+        "description": "Bo3, Friday 8pm",
+        "created_at": 1763200000
+      },
+      "next": {
+        "Play": {
+          "event_id": 1,
+          "set_id": 0,
+          "opponent_tag": "Armada",
+          "role": "Host",
+          "relay": "relay.example.org:51600",
+          "room_code": null,
+          "game_no": 1,
+          "wins": [0, 0],
+          "best_of": 3,
+          "stocks": 4,
+          "timer_secs": 480,
+          "awaiting_verdict": false
+        }
+      }
+    }
+  ]
+}
+```
+
+<!-- checked: MyEvent -->
+```json
+{
+  "event": {
+    "id": 2,
+    "name": "Weekly #13",
+    "state": "signup",
+    "entrants": 5,
+    "starts_at": null,
+    "description": null,
+    "created_at": 1763300000
+  },
+  "next": "Waiting"
+}
+```
+
+<!-- checked: HomeAction -->
+```json
+"None"
+```
+
+<!-- checked: HomeAction -->
+```json
+{"Review": {"event_id": 1, "set_id": 3}}
+```
+
+<!-- checked: HomeAction -->
+```json
+{
+  "Upcoming": {
+    "event_id": 1,
+    "set_id": 5,
+    "side": "Losers",
+    "round": 2,
+    "round_name": "Losers round 2",
+    "opponent_tag": null,
+    "eta_secs": 1200
+  }
+}
+```
+
+#### Badge
+
+The main-menu star: `set_up` is true when a set is called and the signer has not said ready;
+`event_id` and `set_id` name that set, or are null.
+
+<!-- checked: Badge -->
+```json
+{"set_up": true, "event_id": 1, "set_id": 0}
+```
+
+#### ReadyReq
+
+The engine build the player will play the set on (the same rule as `SignupReq`).
+
+<!-- checked: ReadyReq -->
+```json
+{"engine_build": "melee (rust) 0.1.0 development build+339fd9aabad8"}
+```
+
+#### Stage selection: StageKind, Who, StageMoveReq, StageMode, StageState, StageMove, StageTurn
+
+`StageKind` is `"strike"`, `"ban"` or `"pick"`; `Who` is `"me"` or `"opponent"`. Game 1 is in
+mode `"strike"` over the ruleset's starters (`starter_stages`, or every legal stage when that is
+empty); later games are in mode `"counterpick"`: the winner of the previous game bans
+`stage_bans` stages, then the loser picks one of the remaining legal stages.
+
+`StageMoveReq` is one move: its `kind` and the stage's id.
+
+<!-- checked: StageMoveReq -->
+```json
+{"kind": "strike", "stage": 31}
+```
+
+<!-- checked: StageKind -->
+```json
+"ban"
+```
+
+<!-- checked: Who -->
+```json
+"opponent"
+```
+
+<!-- checked: StageMode -->
+```json
+"counterpick"
+```
+
+`StageState`: `mode`; `pool` (the stages selection is over: the starters for game 1, otherwise
+every legal stage); `moves` (the moves so far, in order: `who`, `kind`, `stage`); `turn` (whose
+move it is, its `kind`, and `count`, the moves left in this turn; null once chosen); `chosen`
+(the stage, or null).
+
+<!-- checked: StageState -->
+```json
+{
+  "mode": "strike",
+  "pool": [
+    {"id": 2, "name": "Fountain of Dreams"},
+    {"id": 3, "name": "Pokémon Stadium"},
+    {"id": 8, "name": "Yoshi's Story"},
+    {"id": 28, "name": "Dream Land N64"},
+    {"id": 31, "name": "Battlefield"}
+  ],
+  "moves": [
+    {"who": "me", "kind": "strike", "stage": {"id": 31, "name": "Battlefield"}}
+  ],
+  "turn": {"who": "opponent", "kind": "strike", "count": 2},
+  "chosen": null
+}
+```
+
+<!-- checked: StageMove -->
+```json
+{"who": "opponent", "kind": "ban", "stage": {"id": 2, "name": "Fountain of Dreams"}}
+```
+
+<!-- checked: StageTurn -->
+```json
+{"who": "me", "kind": "pick", "count": 1}
+```
+
+#### SetFlow, SetPhase, GameResult and SetOutcome
+
+A set from the signer's side. `SetPhase` is `"ready_check"`, `"stage_select"`, `"playing"`,
+`"judging"`, `"review"` or `"done"`.
+
+| Field | Type | |
+|---|---|---|
+| `event_id`, `set_id` | integer | |
+| `side`, `round` | `Side`, integer | |
+| `opponent_tag` | string | |
+| `role` | `"Host"` or `"Guest"` | who hosts the netplay room: the host is slot 0 |
+| `relay` | string | the netplay relay, `host:port`, as in `Next` |
+| `room_code` | string or null | the code the host posted for the current game, as in `Next`; null until posted |
+| `best_of` | integer | |
+| `wins` | **[me, opponent]** | |
+| `game_no` | integer | the current game, 1-based |
+| `ready` | **[me, opponent]** | |
+| `phase` | `SetPhase` | |
+| `stage` | `StageState` or null | the current game's selection as it stands: present in `stage_select`, `playing` and `judging` (in the last two `chosen` is null if the game was started without completing selection, as an older client does); null in `ready_check`, `review` and `done` |
+| `games` | [`GameResult`] | the games played: `game_no`, `stage` (from the replays, or null), `winner` (`Who` or null), `winner_stocks` and `winner_percent` (the winner's at the end, or null), `counted`, `verdict` (or null) |
+| `verified` | boolean | every counted game's verdict is `Verified` |
+| `outcome` | `SetOutcome` or null | once done, how the set ended for the player; else null |
+
+`SetOutcome`, for the screen after the set:
+
+| Variant | Meaning |
+|---|---|
+| `{"Advanced": {"next": Next}}` | won the set and still in the event; `next` is the player's `Next` in it |
+| `{"DroppedToLosers": {"next": Next}}` | lost the set and still in the event (a winners-side set in double elimination, or a grand final whose reset follows); `next` as above |
+| `"Eliminated"` | lost the set and out of the event |
+| `"Champion"` | won the event |
+
+What the next set is (its round, opponent and estimated wait) is not in `SetOutcome`: `next` is
+a `Next`, whose `Play` names the set and opponent but not the round, and whose `Waiting`
+carries nothing. After a set the client reads `GET /v1/me/home`: its `action` is then `SetUp`
+(round name, opponent) or `Upcoming` (round name, opponent if known, `eta_secs`) for the next
+set. An estimate inside `Waiting` itself is deferred: `"Waiting"` is a bare string on the wire,
+and giving it fields would break every existing client.
+
+<!-- checked: SetPhase -->
+```json
+"stage_select"
+```
+
+<!-- checked: GameResult -->
+```json
+{
+  "game_no": 1,
+  "stage": {"id": 31, "name": "Battlefield"},
+  "winner": "me",
+  "winner_stocks": 2,
+  "winner_percent": 87.5,
+  "counted": true,
+  "verdict": "Verified"
+}
+```
+
+<!-- checked: SetFlow -->
+```json
+{
+  "event_id": 1,
+  "set_id": 0,
+  "side": "Winners",
+  "round": 1,
+  "opponent_tag": "Armada",
+  "role": "Host",
+  "relay": "relay.example.org:51600",
+  "room_code": null,
+  "best_of": 3,
+  "wins": [1, 0],
+  "game_no": 2,
+  "ready": [true, true],
+  "phase": "stage_select",
+  "stage": {
+    "mode": "counterpick",
+    "pool": [
+      {"id": 2, "name": "Fountain of Dreams"},
+      {"id": 3, "name": "Pokémon Stadium"},
+      {"id": 8, "name": "Yoshi's Story"},
+      {"id": 28, "name": "Dream Land N64"},
+      {"id": 31, "name": "Battlefield"},
+      {"id": 32, "name": "Final Destination"}
+    ],
+    "moves": [],
+    "turn": {"who": "me", "kind": "ban", "count": 2},
+    "chosen": null
+  },
+  "games": [
+    {
+      "game_no": 1,
+      "stage": {"id": 31, "name": "Battlefield"},
+      "winner": "me",
+      "winner_stocks": 2,
+      "winner_percent": 87.5,
+      "counted": true,
+      "verdict": "Verified"
+    }
+  ],
+  "verified": true,
+  "outcome": null
+}
+```
+
+<!-- checked: SetOutcome -->
+```json
+{"DroppedToLosers": {"next": "Waiting"}}
+```
+
+<!-- checked: SetOutcome -->
+```json
+{
+  "Advanced": {
+    "next": {
+      "Play": {
+        "event_id": 1,
+        "set_id": 4,
+        "opponent_tag": "Zain",
+        "role": "Guest",
+        "relay": "relay.example.org:51600",
+        "room_code": null,
+        "game_no": 1,
+        "wins": [0, 0],
+        "best_of": 3,
+        "stocks": 4,
+        "timer_secs": 480,
+        "awaiting_verdict": false
+      }
+    }
+  }
+}
+```
+
+<!-- checked: SetOutcome -->
+```json
+"Eliminated"
+```
+
+#### LiveGame and LivePort
+
+A game being relayed live (public). `tags` are `[slot 0, slot 1]`; `stage` is null until the
+game's start has arrived; `ports` hold each player's `port`, `character` (external id),
+`stocks` and `percent`; `frame` is the latest frame received; `gaps` counts ranges of the
+stream that never arrived; `updated_at` is when the last message came.
+
+<!-- checked: LiveGame -->
+```json
+{
+  "event_id": 1,
+  "set_id": 0,
+  "game_no": 2,
+  "tags": ["Mango", "Armada"],
+  "stage": {"id": 31, "name": "Battlefield"},
+  "ports": [
+    {"port": 1, "character": 2, "stocks": 3, "percent": 42.0},
+    {"port": 2, "character": 9, "stocks": 2, "percent": 87.5}
+  ],
+  "frame": 5400,
+  "ended": false,
+  "gaps": 0,
+  "updated_at": 1763200400
+}
+```
+
+<!-- checked: LivePort -->
+```json
+{"port": 1, "character": 2, "stocks": 3, "percent": 42.0}
+```
+
+### 8.1 Zitadel hooks
+
+This continues the route table of [section 4](#4-routes).
+
+| Method | Path | Who | Request body | Success | Other statuses |
+|---|---|---|---|---|---|
+
+### 8.2 Account
+
+This continues the route table of [section 4](#4-routes).
+
+| Method | Path | Who | Request body | Success | Other statuses |
+|---|---|---|---|---|---|
+
+### 8.3 Admin web
+
+This continues the route table of [section 4](#4-routes).
+
+| Method | Path | Who | Request body | Success | Other statuses |
+|---|---|---|---|---|---|
+
+### 8.4 Home and badge
+
+This continues the route table of [section 4](#4-routes).
+
+| Method | Path | Who | Request body | Success | Other statuses |
+|---|---|---|---|---|---|
+
+### 8.5 Set flow
+
+This continues the route table of [section 4](#4-routes).
+
+| Method | Path | Who | Request body | Success | Other statuses |
+|---|---|---|---|---|---|
+
+### 8.6 Live relay
+
+This continues the route table of [section 4](#4-routes).
+
+| Method | Path | Who | Request body | Success | Other statuses |
+|---|---|---|---|---|---|
+
+### 8.7 Site
+
+This continues the route table of [section 4](#4-routes).
+
+| Method | Path | Who | Request body | Success | Other statuses |
+|---|---|---|---|---|---|

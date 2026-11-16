@@ -262,8 +262,20 @@ async fn strict_resim_sends_inexact_to_queue() {
     assert_eq!(verdict, Some(Verdict::Inexact));
     assert_eq!(slot, None);
     assert_eq!(set_row(&app, event, 0).await, ("review".into(), 0, 0));
-    assert_eq!(next(&host, event).await, Next::Review { set_id: 0 });
-    assert_eq!(next(&guest, event).await, Next::Review { set_id: 0 });
+    assert_eq!(
+        next(&host, event).await,
+        Next::Review {
+            event_id: event,
+            set_id: 0,
+        }
+    );
+    assert_eq!(
+        next(&guest, event).await,
+        Next::Review {
+            event_id: event,
+            set_id: 0,
+        }
+    );
     assert_eq!(queue_reasons(&app, event).await, vec!["Inexact"]);
     assert_eq!(quarantine_kinds(&app).await, vec!["Inexact"]);
 }

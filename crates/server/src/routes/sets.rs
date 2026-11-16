@@ -19,6 +19,7 @@ use sqlx::SqliteConnection;
 
 use super::{check_text, parse_body, ApiError, MAX_BUILD_CHARS};
 use crate::auth::{Player, PlayerUpload};
+use crate::config::Config;
 use crate::db::{begin_write, now_unix};
 use crate::lifecycle::{load_bracket_on, LifecycleError};
 use crate::logging::{label, sha_prefix, Journal};
@@ -39,26 +40,39 @@ pub async fn next(
     let Query(NextQuery { event }) = query.map_err(bad_request)?;
     // Read-only, so a deferred transaction: one consistent snapshot.
     let mut tx = state.db.begin().await?;
+    Ok(Json(
+        next_for(&mut tx, &state.cfg, event, &player.key).await?,
+    ))
+}
+
+/// What the player with key `player_key` should do next in `event` (the answer of `GET
+/// /v1/me/next`), read on `conn`; run it in one transaction for a consistent snapshot.
+pub(crate) async fn next_for(
+    conn: &mut SqliteConnection,
+    cfg: &Config,
+    event: i64,
+    player_key: &str,
+) -> Result<Next, ApiError> {
     let row: Option<(String, String)> =
         sqlx::query_as("SELECT state, ruleset_json FROM events WHERE id = ?")
             .bind(event)
-            .fetch_optional(&mut *tx)
+            .fetch_optional(&mut *conn)
             .await?;
     let (event_state, ruleset_json) = row.ok_or(LifecycleError::NoSuchEvent)?;
-    let Some(me) = entrant_id(&mut tx, event, &player.key).await? else {
-        return Ok(Json(Next::NotEntered));
+    let Some(me) = entrant_id(&mut *conn, event, player_key).await? else {
+        return Ok(Next::NotEntered);
     };
     if event_state == "signup" {
-        return Ok(Json(Next::Waiting));
+        return Ok(Next::Waiting);
     }
-    let bracket = load_bracket_on(&mut tx, event).await?;
+    let bracket = load_bracket_on(&mut *conn, event).await?;
 
     let open: Vec<(i64, String, Option<String>, i64, i64)> = sqlx::query_as(
         "SELECT set_id, state, room_code, wins0, wins1 FROM sets
          WHERE event_id = ? AND state IN ('ready', 'review') ORDER BY set_id",
     )
     .bind(event)
-    .fetch_all(&mut *tx)
+    .fetch_all(&mut *conn)
     .await?;
     for (set_id, set_state, room_code, wins0, wins1) in open {
         let set = bracket_set(&bracket, set_id)?;
@@ -66,7 +80,10 @@ pub async fn next(
             continue;
         };
         if set_state == "review" {
-            return Ok(Json(Next::Review { set_id: set.id }));
+            return Ok(Next::Review {
+                event_id: event,
+                set_id: set.id,
+            });
         }
         let Slot::Entrant(opponent) = set.slots[1 - usize::from(slot)] else {
             return Err(corrupt(format_args!(
@@ -79,11 +96,11 @@ pub async fn next(
         )
         .bind(event)
         .bind(opponent)
-        .fetch_one(&mut *tx)
+        .fetch_one(&mut *conn)
         .await?;
         let ruleset: Ruleset = serde_json::from_str(&ruleset_json)
             .map_err(|e| corrupt(format_args!("event {event} ruleset_json: {e}")))?;
-        let game = current_game(&mut tx, event, set_id).await?;
+        let game = current_game(&mut *conn, event, set_id).await?;
         let awaiting: bool = sqlx::query_scalar(
             "SELECT EXISTS (SELECT 1 FROM uploads u JOIN games g ON g.id = u.game_id
              WHERE g.event_id = ? AND g.set_id = ? AND g.game_no = ?
@@ -93,18 +110,19 @@ pub async fn next(
         .bind(set_id)
         .bind(game.game_no)
         .bind(slot)
-        .fetch_one(&mut *tx)
+        .fetch_one(&mut *conn)
         .await?;
         let (mine, theirs) = if slot == 0 {
             (wins0, wins1)
         } else {
             (wins1, wins0)
         };
-        return Ok(Json(Next::Play {
+        return Ok(Next::Play {
+            event_id: event,
             set_id: set.id,
             opponent_tag,
             role: if slot == 0 { Role::Host } else { Role::Guest },
-            relay: state.cfg.relay.clone(),
+            relay: cfg.relay.clone(),
             room_code,
             game_no: narrow(game.game_no)?,
             wins: [narrow(mine)?, narrow(theirs)?],
@@ -116,21 +134,21 @@ pub async fn next(
             stocks: ruleset.stocks,
             timer_secs: ruleset.timer_secs,
             awaiting_verdict: awaiting,
-        }));
+        });
     }
 
     if bracket.champion() == Some(me) {
-        return Ok(Json(Next::Champion));
+        return Ok(Next::Champion);
     }
     // Still alive while placed in an unfinished set, waiting on the set that feeds it.
     let alive = bracket.sets.iter().any(|s| {
         matches!(s.state, SetState::Waiting | SetState::Ready) && slot_of(s, me).is_some()
     });
-    Ok(Json(if alive {
+    Ok(if alive {
         Next::Waiting
     } else {
         Next::Eliminated
-    }))
+    })
 }
 
 /// `POST /v1/sets/{event}/{set}/room` (`RoomReq`): the host posts the room code for the
@@ -575,13 +593,13 @@ async fn seat(
 }
 
 /// The game a set is on: one more than its counted games.
-struct CurrentGame {
-    game_no: i64,
+pub(crate) struct CurrentGame {
+    pub(crate) game_no: i64,
     /// Its row, once something was uploaded for it: `(id, state)`.
-    open: Option<(i64, String)>,
+    pub(crate) open: Option<(i64, String)>,
 }
 
-async fn current_game(
+pub(crate) async fn current_game(
     conn: &mut SqliteConnection,
     event: i64,
     set: i64,
@@ -608,7 +626,7 @@ async fn current_game(
 }
 
 /// The caller's entrant id (seed) in `event`, if entered.
-async fn entrant_id(
+pub(crate) async fn entrant_id(
     conn: &mut SqliteConnection,
     event: i64,
     key: &str,
@@ -623,7 +641,7 @@ async fn entrant_id(
 }
 
 /// The bracket set a `sets` row refers to.
-fn bracket_set(bracket: &Bracket, set_id: i64) -> Result<&bracket::Set, ApiError> {
+pub(crate) fn bracket_set(bracket: &Bracket, set_id: i64) -> Result<&bracket::Set, ApiError> {
     usize::try_from(set_id)
         .ok()
         .and_then(|i| bracket.sets.get(i))
@@ -631,7 +649,7 @@ fn bracket_set(bracket: &Bracket, set_id: i64) -> Result<&bracket::Set, ApiError
         .ok_or_else(|| corrupt(format_args!("sets row {set_id} is not in the bracket")))
 }
 
-fn slot_of(set: &bracket::Set, me: EntrantId) -> Option<u8> {
+pub(crate) fn slot_of(set: &bracket::Set, me: EntrantId) -> Option<u8> {
     set.slots
         .iter()
         .position(|s| *s == Slot::Entrant(me))

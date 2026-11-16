@@ -166,3 +166,29 @@ fn plain_http_to_another_machine_is_warned_about() {
         assert_eq!(insecure_server_warning(fine), None, "{fine}");
     }
 }
+
+/// `Next` gained `event_id` in phase 2b: an answer of the old shape still parses (the id is
+/// 0), and one of the new shape carries it.
+#[tokio::test]
+async fn next_parses_with_and_without_event_id() {
+    let old = r#"{"Play":{"set_id":0,"opponent_tag":"Armada","role":"Host",
+        "relay":"relay.example.org:51600","room_code":null,"game_no":1,"wins":[0,0],
+        "best_of":3,"stocks":4,"timer_secs":480,"awaiting_verdict":false}}"#;
+    let new = r#"{"Play":{"event_id":7,"set_id":0,"opponent_tag":"Armada","role":"Host",
+        "relay":"relay.example.org:51600","room_code":null,"game_no":1,"wins":[0,0],
+        "best_of":3,"stocks":4,"timer_secs":480,"awaiting_verdict":false}}"#;
+    for (body, want) in [
+        (old, 0),
+        (new, 7),
+        (r#"{"Review":{"set_id":3}}"#, 0),
+        (r#"{"Review":{"event_id":7,"set_id":3}}"#, 7),
+    ] {
+        let stub = Stub::start(move |_| (200, body.to_owned())).await;
+        let next = Api::new(&stub.url, key(), "b1").next(7).await.unwrap();
+        let event_id = match next {
+            proto::Next::Play { event_id, .. } | proto::Next::Review { event_id, .. } => event_id,
+            other => panic!("{other:?}"),
+        };
+        assert_eq!(event_id, want, "{body}");
+    }
+}

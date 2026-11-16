@@ -397,7 +397,13 @@ async fn replay_voids_game_and_reopens_set() {
         .started_event(Format::SingleElim, &[&ps[0], &ps[1]])
         .await;
     conflict(&app, event, 0, 1, &ps[0], &ps[1]).await;
-    assert_eq!(next(&ps[0], event).await, Next::Review { set_id: 0 });
+    assert_eq!(
+        next(&ps[0], event).await,
+        Next::Review {
+            event_id: event,
+            set_id: 0,
+        }
+    );
     let item = queue(&app).await[0].id;
     // A second open item on the same set is closed by the same replay.
     sqlx::query(

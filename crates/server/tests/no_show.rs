@@ -176,8 +176,20 @@ async fn no_show_sends_set_to_review() {
     assert!(detail.contains(&"x".repeat(200)), "{detail}");
 
     assert_eq!(set_row(&app, event, 0).await, ("review".into(), None));
-    assert_eq!(next(&host, event).await, Next::Review { set_id: 0 });
-    assert_eq!(next(&guest, event).await, Next::Review { set_id: 0 });
+    assert_eq!(
+        next(&host, event).await,
+        Next::Review {
+            event_id: event,
+            set_id: 0,
+        }
+    );
+    assert_eq!(
+        next(&guest, event).await,
+        Next::Review {
+            event_id: event,
+            set_id: 0,
+        }
+    );
 
     // A second report, from either player, is refused.
     assert_eq!(no_show(&guest, event, 0, None).await, StatusCode::CONFLICT);
@@ -296,8 +308,20 @@ async fn stalled_set_is_flagged_and_fresh_one_is_not() {
             Slot::Entrant(e) => e as usize,
             other => panic!("{other:?}"),
         });
-    assert_eq!(next(&ps[s0], event).await, Next::Review { set_id: old });
-    assert_eq!(next(&ps[s1], event).await, Next::Review { set_id: old });
+    assert_eq!(
+        next(&ps[s0], event).await,
+        Next::Review {
+            event_id: event,
+            set_id: old,
+        }
+    );
+    assert_eq!(
+        next(&ps[s1], event).await,
+        Next::Review {
+            event_id: event,
+            set_id: old,
+        }
+    );
 
     // Flagged once only.
     assert_eq!(flag_stalled_sets(&long_running(&app)).await.unwrap(), 0);
@@ -375,8 +399,20 @@ async fn restart_counts_inactivity_from_start_up() {
     // Up for longer than the limit with the set idle all along.
     st.started_at = now_unix() - 1801;
     assert_eq!(flag_stalled_sets(&st).await.unwrap(), 1);
-    assert_eq!(next(&host, event).await, Next::Review { set_id: 0 });
-    assert_eq!(next(&guest, event).await, Next::Review { set_id: 0 });
+    assert_eq!(
+        next(&host, event).await,
+        Next::Review {
+            event_id: event,
+            set_id: 0,
+        }
+    );
+    assert_eq!(
+        next(&guest, event).await,
+        Next::Review {
+            event_id: event,
+            set_id: 0,
+        }
+    );
 }
 
 /// A tag looked up only for the log cannot fail an award: with the winner's player row gone,

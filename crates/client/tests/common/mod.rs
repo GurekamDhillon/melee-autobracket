@@ -157,6 +157,7 @@ async fn serve(mut conn: TcpStream, handler: Handler, log: Arc<Mutex<Vec<Req>>>)
 /// `Next::Play` for set 0, game 1, this player hosting.
 pub fn host_play() -> Next {
     Next::Play {
+        event_id: 1,
         set_id: 0,
         opponent_tag: "Bob".into(),
         role: Role::Host,
