@@ -1,7 +1,7 @@
 use std::fs::OpenOptions;
 use std::io::Write;
 use std::os::unix::fs::OpenOptionsExt;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -17,6 +17,7 @@ use proto::SigningKey;
 use tracing_subscriber::EnvFilter;
 
 mod admin_cli;
+mod init_cli;
 
 #[derive(Parser)]
 #[command(
@@ -60,6 +61,9 @@ enum Cmd {
         #[arg(long, default_value_t = 120)]
         timeout_secs: u64,
     },
+    /// Set up a server directory: a new organiser key, a configuration naming it (verifier
+    /// off), and an empty replay directory; then print the next steps.
+    Init(init_cli::InitArgs),
 }
 
 /// Environment variable holding the log filter (`tracing` directives, e.g. `debug` or
@@ -96,6 +100,7 @@ async fn main() -> anyhow::Result<()> {
                 .context("the verifier cannot start")?;
             verify_worker::run(server, key, engine).await
         }
+        Cmd::Init(args) => init_cli::run(args),
     }
 }
 
@@ -151,8 +156,16 @@ async fn serve(cfg: Config) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn keygen(out: &PathBuf) -> anyhow::Result<()> {
+fn keygen(out: &Path) -> anyhow::Result<()> {
     let sk = SigningKey::generate(&mut rand::rngs::OsRng);
+    write_key_file(out, &sk)?;
+    println!("{}", hex::encode(sk.verifying_key().to_bytes()));
+    Ok(())
+}
+
+/// Writes `sk`'s secret key hex to the new file `out` (mode 0600), the form `--key-file`
+/// reads. Refuses an existing file.
+fn write_key_file(out: &Path, sk: &SigningKey) -> anyhow::Result<()> {
     let mut file = OpenOptions::new()
         .write(true)
         .create_new(true)
@@ -160,6 +173,5 @@ fn keygen(out: &PathBuf) -> anyhow::Result<()> {
         .open(out)
         .with_context(|| format!("creating {}", out.display()))?;
     writeln!(file, "{}", hex::encode(sk.to_bytes()))?;
-    println!("{}", hex::encode(sk.verifying_key().to_bytes()));
     Ok(())
 }

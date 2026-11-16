@@ -1,0 +1,50 @@
+# nginx as the TLS reverse proxy in front of autobracket. Put this in
+# /etc/nginx/sites-available/ (or conf.d/), replace bracket.example.org with your own name, and
+# get a certificate for it, e.g. with certbot (`certbot certonly --webroot -w /var/www/html
+# -d bracket.example.org`). Players and the admin CLI then use https://bracket.example.org.
+#
+# autobracket rate-limits per client address, and behind a proxy every request comes from the
+# proxy. The X-Forwarded-For line below passes the client's address on; list the address nginx
+# connects from in the server's trusted_proxies so it is believed (README, "TLS and reverse
+# proxies"):
+#   nginx and the server on the same host, the server not in Docker (e.g. systemd):
+#     trusted_proxies = ["127.0.0.1/32"]   (`init --proxy-cidr 127.0.0.1/32`)
+#   The server under deploy/docker-compose.yml, nginx on the host proxying to its loopback
+#   port: requests arrive from the pinned network's gateway:
+#     trusted_proxies = ["10.203.47.1/32"]   (`init --proxy-cidr 10.203.47.1/32`)
+# Never put a range in trusted_proxies that contains ANY client's address (a LAN, a VPN, a
+# whole Docker subnet): a client whose own address is trusted can choose the address the
+# server sees. Trust only the proxy's own address(es), as narrowly as possible (a /32).
+
+server {
+    listen 80;
+    listen [::]:80;
+    server_name bracket.example.org;
+    location /.well-known/acme-challenge/ { root /var/www/html; }
+    location / { return 301 https://$host$request_uri; }
+}
+
+server {
+    listen 443 ssl;
+    listen [::]:443 ssl;
+    server_name bracket.example.org;
+    ssl_certificate     /etc/letsencrypt/live/bracket.example.org/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/bracket.example.org/privkey.pem;
+
+    # Replay uploads are up to 16 MiB (the server's max_replay_bytes) and may take up to the
+    # server's 120 s body timeout on a slow line.
+    client_max_body_size 17m;
+    client_body_timeout 130s;
+
+    location / {
+        # Plain HTTP to the server; no WebSockets.
+        proxy_pass http://127.0.0.1:8080;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_connect_timeout 10s;
+        proxy_send_timeout 130s;
+        proxy_read_timeout 130s;
+    }
+}

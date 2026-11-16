@@ -162,6 +162,12 @@ async fn server(no_show: &[u16]) -> Stub {
                     409,
                     r#"{"error":"a room code was posted less than 1 seconds ago"}"#.into(),
                 ),
+                // A grace period too large to add to a clock.
+                4409 => (
+                    409,
+                    r#"{"error":"a room code was posted less than 18446744073709551615 seconds ago"}"#
+                        .into(),
+                ),
                 // A grace refusal whose period cannot be read.
                 3409 => (
                     409,
@@ -519,6 +525,26 @@ async fn a_grace_period_that_cannot_be_read_falls_back_to_the_fixed_retries() {
     // (A tenth may follow the next host run before the test looks.)
     let reports = stub.requests("POST", "/no-show").len();
     assert!((9..=10).contains(&reports), "{reports} reports");
+}
+
+#[tokio::test]
+async fn an_absurd_grace_period_is_capped_and_play_hosts_again() {
+    let stub = server(&[4409]).await;
+    let mut engine = Scripted::new(&[NO_OPPONENT]);
+    let hosts = engine.hosts.clone();
+    let opts = PlayOptions {
+        no_show_retry: Duration::from_millis(5),
+        max_grace_wait: Duration::from_millis(300),
+        ..opts()
+    };
+
+    let started = std::time::Instant::now();
+    play_until_with(&stub, &mut engine, &opts, |_| {
+        hosts.load(Ordering::SeqCst) >= 3
+    })
+    .await;
+    // It waited for the capped grace period, not just the fixed retries.
+    assert!(started.elapsed() >= Duration::from_millis(300));
 }
 
 /// This player is the guest of set 0 game 1; `code` gives the room code per poll.

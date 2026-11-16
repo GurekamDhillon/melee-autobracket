@@ -58,6 +58,9 @@ pub struct PlayOptions {
     /// Wait before hosting a game again after the server refused its room code because a
     /// game of the set is in progress (unless the server offers a different game first).
     pub in_progress_wait: Duration,
+    /// Longest a refused no-show report is retried for the grace period the server names;
+    /// after it (and the fixed retries), `play` hosts again.
+    pub max_grace_wait: Duration,
 }
 
 impl PlayOptions {
@@ -72,6 +75,7 @@ impl PlayOptions {
             no_show_retry: Duration::from_secs(15),
             allow_direct_connect: false,
             in_progress_wait: Duration::from_secs(30),
+            max_grace_wait: Duration::from_secs(15 * 60),
         }
     }
 }
@@ -825,7 +829,11 @@ async fn finish_run(
                         detail,
                         at,
                         tries: 1,
-                        until: grace.map(|g| Instant::now() + g + GRACE_MARGIN),
+                        // Capped, so an absurd period cannot overflow the clock or wait forever.
+                        until: grace.and_then(|g| {
+                            let wait = g.saturating_add(GRACE_MARGIN).min(opts.max_grace_wait);
+                            Instant::now().checked_add(wait)
+                        }),
                     });
                 }
                 Reported::NotTaken => {}

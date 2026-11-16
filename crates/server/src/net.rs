@@ -239,6 +239,29 @@ mod tests {
         assert_eq!(client_ip(outsider, &xff(&["203.0.113.7"]), &[]), outsider);
     }
 
+    /// Why the docs say to trust only the proxy's own address: a trusted range that also
+    /// holds a client's real address lets that client pick its address with a forged
+    /// left-most `X-Forwarded-For` entry.
+    #[test]
+    fn a_trusted_range_holding_clients_lets_them_choose_their_address() {
+        let gateway = ip("10.203.47.1");
+        let lan_client = ip("192.168.1.50");
+        // nginx appends the address it received the request from to what the client sent.
+        let headers = xff(&["6.6.6.6, 192.168.1.50"]);
+
+        let broad = [
+            Cidr::parse("172.16.0.0/12").unwrap(),
+            Cidr::parse("192.168.0.0/16").unwrap(),
+            Cidr::parse("10.203.47.1/32").unwrap(),
+        ];
+        assert_eq!(client_ip(gateway, &headers, &broad), ip("6.6.6.6"));
+
+        let narrow = [Cidr::parse("10.203.47.1/32").unwrap()];
+        assert_eq!(client_ip(gateway, &headers, &narrow), lan_client);
+        // And a LAN peer connecting directly is not taken for the proxy.
+        assert_eq!(client_ip(lan_client, &headers, &narrow), lan_client);
+    }
+
     #[test]
     fn ipv6_clients_share_a_slash_64() {
         assert_eq!(rate_key(ip("2001:db8:1:2:aaaa::1")), ip("2001:db8:1:2::"));

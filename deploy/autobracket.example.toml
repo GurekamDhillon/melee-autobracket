@@ -1,4 +1,5 @@
 # autobracket server configuration. Copy to /etc/autobracket/autobracket.toml.
+# Easier: `autobracket init --dir DIR` writes a config with a new organiser key already in it.
 # Every value below is the default except to_keys, allow_no_organiser, db_path and replay_dir.
 
 # Address and port the HTTP server listens on.
@@ -15,8 +16,10 @@ require_invite = false
 # Tournament organiser public keys, lowercase hex (printed by `autobracket keygen`), e.g.
 # to_keys = ["<64 hex characters>"]. The server refuses to start with none...
 to_keys = []
-# ...unless this is true. It is set here only so this file runs as-is for a first look; with no
-# organiser key nobody can create or run events. Delete this line once to_keys holds your key.
+# ...unless this is true.
+# !!! REMOVE THE NEXT LINE when you add your key to to_keys. It is here ONLY so this example
+# !!! parses as-is; it switches off the check that refuses a server nobody can administer.
+# !!! `autobracket init` writes a config with a real key and without this line.
 allow_no_organiser = true
 # Public keys of external verifier workers, lowercase hex (for verifier mode "external").
 verifier_keys = []
@@ -44,7 +47,8 @@ rate_per_sec = 20
 rate_burst = 40
 # Most connections served at once; more wait to be accepted (every connection is closed after 30 s idle).
 max_connections = 512
-# Reverse proxies whose X-Forwarded-For names the client, as CIDRs (nginx in Docker: ["172.16.0.0/12"]).
+# Reverse proxies whose X-Forwarded-For names the client, as CIDRs: only the proxy's own
+# address, e.g. ["127.0.0.1/32"], never a range holding any client's address (README).
 trusted_proxies = []
 # Seconds after a room code is posted during which a "no-show" report is refused (the guest may still be joining).
 no_show_grace_secs = 90

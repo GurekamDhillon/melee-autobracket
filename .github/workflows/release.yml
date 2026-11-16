@@ -1,0 +1,37 @@
+name: Release
+
+# Pushing a tag vX.Y.Z (matching the workspace version) builds, tests and publishes the Linux
+# x86_64 archive and its SHA256SUMS as a GitHub release.
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+jobs:
+  release:
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write # create the release and upload its files
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      # The workspace's rust-version (Cargo.toml). No build cache: a release builds from clean.
+      - uses: dtolnay/rust-toolchain@1.94
+      - name: Tag matches the workspace version
+        run: |
+          version="$(cargo pkgid -p autobracket-server)"
+          test "${GITHUB_REF_NAME#v}" = "${version##*@}" || {
+            echo "::error::tag ${GITHUB_REF_NAME} does not match workspace version ${version##*@}"
+            exit 1
+          }
+      - run: cargo test --workspace --locked
+      - run: scripts/build-release.sh
+      - name: Publish the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" dist/autobracket-*.tar.gz dist/SHA256SUMS \
+            --title "$GITHUB_REF_NAME" --generate-notes --verify-tag
