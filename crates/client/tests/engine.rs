@@ -151,6 +151,12 @@ fn the_installed_engines_no_connection_line_is_a_no_opponent_exit() {
     assert_eq!(exit_of("np-timeout"), exit(1, true));
 }
 
+#[test]
+fn no_connection_after_the_relay_introduced_a_guest_is_not_a_no_opponent_exit() {
+    // engine 0cd085d, rdv.rs:274 via play_net.rs:1163-1166: the guest did arrive.
+    assert_eq!(exit_of("np-timeout-introduced"), exit(1, false));
+}
+
 /// How a guest run in `mode` ended.
 fn guest_exit_of(mode: &str) -> Option<RunExit> {
     let work = TempDir::new().unwrap();

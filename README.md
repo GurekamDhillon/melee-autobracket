@@ -25,7 +25,8 @@ signing, is documented in [docs/api.md](docs/api.md) for anyone writing another 
 - **Rust 1.94 or later** (sqlx 0.9 needs it; it is the workspace's `rust-version`).
 - **A C compiler** (`cc`, e.g. gcc or clang): `aws-lc-sys` (TLS) and the bundled SQLite are
   built from C source.
-- **Linux or another Unix** for the client: it uses process groups, Unix signals and `/proc`.
+- **Linux** for the client: it uses process groups, Unix signals and `/proc` (`play` refuses
+  to start on a system without `/proc`).
   It does not run on Windows. The server is tested on Linux (Debian 13) under systemd.
 - **The game engine** for players, and for an organiser who re-simulates: build it from
   `github.com/GurekamDhillon/melee`. The client's defaults were checked against branch
@@ -390,7 +391,7 @@ Phase 1 is a working tournament system with honest gaps:
   against `legal_stages` afterwards. With `--match` presets the host's stage is fixed for the
   whole event.
 - **The in-game menu is phase 2.** Players run `autobracket-client` beside the game.
-- **The client is Unix-only** and drives the Rust engine named above; there is no Windows or
+- **The client is Linux-only** and drives the Rust engine named above; there is no Windows or
   macOS client.
 - **Character select can crash both games** on engine builds without the `port/np-nameentry`
   fix; use `--match` there.

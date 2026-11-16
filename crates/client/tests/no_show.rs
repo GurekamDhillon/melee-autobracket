@@ -157,6 +157,16 @@ async fn server(no_show: &[u16]) -> Stub {
                     409,
                     r#"{"error":"a room code was posted less than 90 seconds ago"}"#.into(),
                 ),
+                // The same, with a 1 s grace period.
+                2409 => (
+                    409,
+                    r#"{"error":"a room code was posted less than 1 seconds ago"}"#.into(),
+                ),
+                // A grace refusal whose period cannot be read.
+                3409 => (
+                    409,
+                    r#"{"error":"a room code was posted less than a while ago"}"#.into(),
+                ),
                 s => (s, r#"{"error":"no"}"#.into()),
             }
         }
@@ -307,6 +317,16 @@ async fn a_conflicting_no_show_is_not_fatal() {
 }
 
 #[tokio::test]
+async fn a_forbidden_no_show_is_not_fatal() {
+    refused_report_is_not_fatal(403).await;
+}
+
+#[tokio::test]
+async fn a_bad_request_no_show_is_not_fatal() {
+    refused_report_is_not_fatal(400).await;
+}
+
+#[tokio::test]
 async fn a_retryable_no_show_failure_is_retried() {
     let stub = server(&[503, 204]).await;
     let mut engine = Scripted::new(&[NO_OPPONENT]);
@@ -420,6 +440,19 @@ async fn the_installed_engines_no_connection_line_reports_a_no_show() {
 }
 
 #[tokio::test]
+async fn no_connection_after_a_guest_arrived_counts_as_a_failed_run_not_a_no_show() {
+    let stub = server(&[204]).await;
+
+    let (err, work) = play_command_engine(&stub, "np-timeout-introduced").await;
+
+    assert!(format!("{err:#}").contains("without a replay"), "{err:#}");
+    assert_eq!(runs(&work), MAX_FAILED_RUNS as usize);
+    let reports = no_shows(&stub);
+    assert_eq!(reports.len(), 1, "{reports:?}");
+    assert_eq!(reports[0]["kind"], "client-failure");
+}
+
+#[tokio::test]
 async fn a_no_show_refused_for_a_fresh_room_code_is_tried_again_without_hosting() {
     let stub = server(&[1409, 1409, 204]).await;
     let mut engine = Scripted::new(&[NO_OPPONENT]);
@@ -440,6 +473,52 @@ async fn a_no_show_refused_for_a_fresh_room_code_is_tried_again_without_hosting(
         2,
         "hosted again while waiting"
     );
+}
+
+#[tokio::test]
+async fn a_no_show_is_retried_until_the_grace_period_named_has_passed() {
+    // More refusals than the fixed retry budget, all within the 1 s grace period named.
+    let mut answers = vec![2409; 12];
+    answers.push(204);
+    let stub = server(&answers).await;
+    let mut engine = Scripted::new(&[NO_OPPONENT]);
+    let hosts = engine.hosts.clone();
+    let opts = PlayOptions {
+        no_show_retry: Duration::from_millis(30),
+        ..opts()
+    };
+
+    play_until_with(&stub, &mut engine, &opts, |s| {
+        s.requests("POST", "/no-show").len() == 13 && s.polls_after("/no-show") > 5
+    })
+    .await;
+
+    assert_eq!(
+        hosts.load(Ordering::SeqCst),
+        2,
+        "hosted again while waiting"
+    );
+}
+
+#[tokio::test]
+async fn a_grace_period_that_cannot_be_read_falls_back_to_the_fixed_retries() {
+    let stub = server(&[3409]).await;
+    let mut engine = Scripted::new(&[NO_OPPONENT]);
+    let hosts = engine.hosts.clone();
+    let opts = PlayOptions {
+        no_show_retry: Duration::from_millis(5),
+        ..opts()
+    };
+
+    // After the first refusal and 8 more, it hosts again.
+    play_until_with(&stub, &mut engine, &opts, |_| {
+        hosts.load(Ordering::SeqCst) >= 3
+    })
+    .await;
+
+    // (A tenth may follow the next host run before the test looks.)
+    let reports = stub.requests("POST", "/no-show").len();
+    assert!((9..=10).contains(&reports), "{reports} reports");
 }
 
 /// This player is the guest of set 0 game 1; `code` gives the room code per poll.
