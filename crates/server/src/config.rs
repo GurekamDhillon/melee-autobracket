@@ -2,11 +2,12 @@
 
 use std::path::{Path, PathBuf};
 
-use anyhow::Context;
+use anyhow::{bail, Context};
 use proto::Ruleset;
 use serde::Deserialize;
 
 #[derive(Deserialize, Clone, Debug)]
+#[serde(deny_unknown_fields)]
 pub struct Config {
     #[serde(default = "default_bind")]
     pub bind: String,
@@ -48,7 +49,7 @@ pub struct Config {
 }
 
 #[derive(Deserialize, Clone, Debug)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct VerifierConfig {
     pub mode: VerifierMode,
     pub engine: PathBuf,
@@ -104,8 +105,56 @@ impl Config {
     pub fn load(path: &Path) -> anyhow::Result<Self> {
         let text =
             std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
-        toml::from_str(&text).with_context(|| format!("parsing {}", path.display()))
+        Self::parse(&text).with_context(|| format!("loading {}", path.display()))
     }
+
+    fn parse(text: &str) -> anyhow::Result<Self> {
+        let cfg: Config = toml::from_str(text)?;
+        cfg.validate()?;
+        Ok(cfg)
+    }
+
+    /// Rejects values the server cannot run with, naming the offending field.
+    pub fn validate(&self) -> anyhow::Result<()> {
+        let r = &self.ruleset;
+        for (field, n) in [
+            ("ruleset.best_of", r.best_of),
+            ("ruleset.best_of_finals", r.best_of_finals),
+        ] {
+            if n % 2 == 0 {
+                bail!("{field} must be an odd number of games, not {n}");
+            }
+        }
+        if r.stocks == 0 {
+            bail!("ruleset.stocks must be at least 1");
+        }
+        if r.legal_stages.is_empty() {
+            bail!("ruleset.legal_stages must list at least one stage");
+        }
+        for (field, keys) in [
+            ("to_keys", &self.to_keys),
+            ("verifier_keys", &self.verifier_keys),
+        ] {
+            if let Some(bad) = keys.iter().find(|k| !is_public_key_hex(k)) {
+                bail!("{field}: {bad:?} is not a public key (64 lowercase hex characters)");
+            }
+        }
+        if self.rate_per_sec == 0 {
+            bail!("rate_per_sec must be at least 1");
+        }
+        if self.rate_burst == 0 {
+            bail!("rate_burst must be at least 1");
+        }
+        Ok(())
+    }
+}
+
+/// 64 lowercase hex characters: the form keys are compared in.
+fn is_public_key_hex(key: &str) -> bool {
+    key.len() == 64
+        && key
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
 }
 
 fn default_bind() -> String {
@@ -167,6 +216,90 @@ mod tests {
     #[test]
     fn to_keys_is_required() {
         assert!(toml::from_str::<Config>("bind = \"127.0.0.1:1\"").is_err());
+    }
+
+    const KEY: &str = "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff";
+
+    /// The full error chain of parsing `to_keys = [KEY]` plus `extra`.
+    fn rejection(extra: &str) -> String {
+        let text = format!("to_keys = [\"{KEY}\"]\n{extra}");
+        format!("{:#}", Config::parse(&text).expect_err(extra))
+    }
+
+    #[test]
+    fn valid_config_parses() {
+        let cfg = Config::parse(&format!(
+            "to_keys = [\"{KEY}\"]\nverifier_keys = [\"{KEY}\"]\n"
+        ))
+        .unwrap();
+        assert_eq!(cfg.verifier_keys, vec![KEY.to_string()]);
+        Config::new(vec![KEY.into()]).validate().unwrap();
+    }
+
+    #[test]
+    fn rejects_bad_best_of() {
+        for (extra, field) in [
+            ("[ruleset]\nbest_of = 0", "ruleset.best_of"),
+            ("[ruleset]\nbest_of = 4", "ruleset.best_of"),
+            ("[ruleset]\nbest_of_finals = 0", "ruleset.best_of_finals"),
+            ("[ruleset]\nbest_of_finals = 6", "ruleset.best_of_finals"),
+        ] {
+            let err = rejection(extra);
+            assert!(err.contains(field), "{extra:?}: {err}");
+        }
+    }
+
+    #[test]
+    fn rejects_zero_stocks() {
+        let err = rejection("[ruleset]\nstocks = 0");
+        assert!(err.contains("ruleset.stocks"), "{err}");
+    }
+
+    #[test]
+    fn rejects_empty_legal_stages() {
+        let err = rejection("[ruleset]\nlegal_stages = []");
+        assert!(err.contains("ruleset.legal_stages"), "{err}");
+    }
+
+    #[test]
+    fn rejects_malformed_keys() {
+        let upper = KEY.to_uppercase();
+        let short = &KEY[..62];
+        let long = format!("{KEY}00");
+        let not_hex = format!("{}zz", &KEY[..62]);
+        for bad in [upper.as_str(), short, long.as_str(), not_hex.as_str(), ""] {
+            let text = format!("to_keys = [\"{bad}\"]\n");
+            let err = format!("{:#}", Config::parse(&text).expect_err(bad));
+            assert!(err.contains("to_keys"), "{bad:?}: {err}");
+
+            let err = rejection(&format!("verifier_keys = [\"{KEY}\", \"{bad}\"]"));
+            assert!(err.contains("verifier_keys"), "{bad:?}: {err}");
+        }
+    }
+
+    #[test]
+    fn rejects_zero_rates() {
+        let err = rejection("rate_per_sec = 0");
+        assert!(err.contains("rate_per_sec"), "{err}");
+        let err = rejection("rate_burst = 0");
+        assert!(err.contains("rate_burst"), "{err}");
+    }
+
+    #[test]
+    fn rejects_unknown_keys() {
+        let err = rejection("require_invites = true");
+        assert!(err.contains("require_invites"), "{err}");
+        let err = rejection("[verifier]\nmodee = \"off\"");
+        assert!(err.contains("modee"), "{err}");
+    }
+
+    #[test]
+    fn load_validates() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("autobracket.toml");
+        std::fs::write(&path, format!("to_keys = [\"{KEY}\"]\nrate_burst = 0\n")).unwrap();
+        let err = format!("{:#}", Config::load(&path).unwrap_err());
+        assert!(err.contains("rate_burst"), "{err}");
     }
 
     #[test]

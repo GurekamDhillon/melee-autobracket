@@ -29,10 +29,11 @@ pub use state::AppState;
 /// How often the rate limiter forgets peers whose quota has fully replenished.
 const RATE_LIMIT_TRIM_PERIOD: Duration = Duration::from_secs(60);
 
-/// Opens the store (running migrations), assembles the router, and spawns the background
+/// Validates `cfg`, opens the store (running migrations), assembles the router, and spawns the background
 /// tasks (the judging worker when `cfg.worker_enabled`, and rate-limiter trimming). Their
 /// abort handles are kept in `AppState::tasks`.
 pub async fn build_app(cfg: Config, resim: Arc<dyn Resim>) -> anyhow::Result<(Router, AppState)> {
+    cfg.validate().context("invalid configuration")?;
     std::fs::create_dir_all(&cfg.replay_dir)
         .with_context(|| format!("creating replay directory {}", cfg.replay_dir.display()))?;
     let db = db::open(&cfg.db_path)
@@ -43,9 +44,10 @@ pub async fn build_app(cfg: Config, resim: Arc<dyn Resim>) -> anyhow::Result<(Ro
         .await
         .context("attaching the verifier to the store")?;
 
-    // Replenish one request every 1/rate_per_sec seconds, per peer IP.
+    // Replenish one request every 1/rate_per_sec seconds, per peer IP (`validate` checked
+    // that both rates are positive).
     let governor = GovernorConfigBuilder::default()
-        .per_nanosecond(1_000_000_000 / cfg.rate_per_sec.max(1))
+        .per_nanosecond(1_000_000_000 / cfg.rate_per_sec)
         .burst_size(cfg.rate_burst)
         .finish()
         .context("invalid rate limit: rate_per_sec and rate_burst must be positive")?;

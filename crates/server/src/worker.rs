@@ -160,8 +160,8 @@ async fn judge_claimed(st: &AppState, game_id: i64, claim: Claim) -> anyhow::Res
     .await
     .context("pre-judging")?;
 
-    let (verdict, winner_slot, resim) = match pre {
-        Pre::Final(v) => (v, None, ResimOutcome::Skipped),
+    let (verdict, winner_slot, resim, verifier_build) = match pre {
+        Pre::Final(v) => (v, None, ResimOutcome::Skipped, st.resim.build()),
         Pre::NeedsResim {
             winner_port,
             last_frame,
@@ -169,16 +169,16 @@ async fn judge_claimed(st: &AppState, game_id: i64, claim: Claim) -> anyhow::Res
             let host = claim.paths[0]
                 .as_deref()
                 .context("agreeing pair without a host upload")?;
-            let outcome = st.resim.check(host, last_frame).await;
+            let (outcome, build) = st.resim.check_with_build(host, last_frame).await;
             if let ResimOutcome::Unavailable(detail) = &outcome {
                 eprintln!(
                     "worker: game {game_id}: verifier unavailable, judging peer-only: {detail}"
                 );
             }
             let v: Verdict = judge::finish(&outcome, st.cfg.strict_resim);
-            (v, Some(judge::winner_slot(winner_port)), outcome)
+            (v, Some(judge::winner_slot(winner_port)), outcome, build)
         }
     };
-    lifecycle::apply_verdict(st, game_id, &verdict, winner_slot, &resim).await?;
+    lifecycle::apply_verdict(st, game_id, &verdict, winner_slot, &resim, &verifier_build).await?;
     Ok(())
 }

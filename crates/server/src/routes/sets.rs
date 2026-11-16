@@ -397,19 +397,23 @@ fn slot_of(set: &bracket::Set, me: EntrantId) -> Option<u8> {
         .and_then(|i| u8::try_from(i).ok())
 }
 
-/// `^[A-Z0-9]{4}$` or `^[A-Za-z0-9.\-]+:[0-9]{1,5}$`.
+/// Longest host name in a `host:port` room code (the DNS limit).
+const MAX_ROOM_HOST_BYTES: usize = 253;
+
+/// `^[A-Z0-9]{4}$`, or `^[A-Za-z0-9.\-]{1,253}:[0-9]{1,5}$` with the port in 1..=65535.
 fn valid_room_code(code: &str) -> bool {
     let short = code.len() == 4
         && code
             .bytes()
             .all(|b| b.is_ascii_uppercase() || b.is_ascii_digit());
     let address = code.split_once(':').is_some_and(|(host, port)| {
-        !host.is_empty()
+        (1..=MAX_ROOM_HOST_BYTES).contains(&host.len())
             && host
                 .bytes()
                 .all(|b| b.is_ascii_alphanumeric() || b == b'.' || b == b'-')
             && (1..=5).contains(&port.len())
             && port.bytes().all(|b| b.is_ascii_digit())
+            && port.parse::<u16>().is_ok_and(|p| p != 0)
     });
     short || address
 }

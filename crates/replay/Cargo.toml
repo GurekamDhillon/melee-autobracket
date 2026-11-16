@@ -10,6 +10,7 @@ testkit = []
 [dependencies]
 thiserror.workspace = true
 
-[[test]]
-name = "parse"
-required-features = ["testkit"]
+[dev-dependencies]
+# The integration tests fabricate replays with `testkit`; enabling it here means a plain
+# `cargo test -p replay` builds and runs them.
+replay = { path = ".", features = ["testkit"] }

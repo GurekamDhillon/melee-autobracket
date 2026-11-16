@@ -3,13 +3,12 @@
 //! [`Slpcheck`] runs the engine's `slpcheck` command as a subprocess and reads its verdict from
 //! the CSV the engine writes; the CSV, not the exit code or the log lines, is the contract.
 
-use std::collections::HashMap;
 use std::io;
 use std::os::unix::fs::DirBuilderExt;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Mutex, OnceLock};
+use std::sync::OnceLock;
 use std::time::Duration;
 
 use anyhow::{bail, Context};
@@ -20,7 +19,6 @@ use sqlx::SqlitePool;
 use tokio::io::{AsyncRead, AsyncReadExt};
 use tokio::process::Command;
 use tokio::sync::Notify;
-use tokio::task::Id as TaskId;
 
 #[async_trait]
 pub trait Resim: Send + Sync {
@@ -28,6 +26,13 @@ pub trait Resim: Send + Sync {
     async fn check(&self, slp: &Path, replay_last_frame: i32) -> ResimOutcome;
     /// Identifies the engine build doing the checking.
     fn build(&self) -> String;
+
+    /// [`check`](Resim::check), together with the build that did that check. By default
+    /// that is [`build`](Resim::build); a verifier whose checks run elsewhere
+    /// ([`ExternalResim`]) reports the build that ran this one.
+    async fn check_with_build(&self, slp: &Path, replay_last_frame: i32) -> (ResimOutcome, String) {
+        (self.check(slp, replay_last_frame).await, self.build())
+    }
 
     /// Hands the verifier the opened store; `build_app` calls it once at start-up, before
     /// the judging worker starts. Only verifiers that keep state in the store
@@ -187,15 +192,12 @@ const EXTERNAL_RECHECK: Duration = Duration::from_secs(1);
 /// Re-simulates on another machine: `check` queues a `resim_jobs` row, a `verify-worker`
 /// claims it over the API and posts the result, and `check` returns that result.
 ///
-/// `build()` is `"external"`, except that right after a `check` that got a result it returns
-/// the build the verifier posted, once, to the same task. The judging path calls `check` and
-/// then `build` from one task, so concurrent judging in other tasks cannot mix the builds up.
+/// `build()` is `"external"`; `check_with_build` returns the build the verifier posted with
+/// the result (`"external"` when there was no result).
 pub struct ExternalResim {
     db: OnceLock<SqlitePool>,
     posted: Notify,
     timeout: Duration,
-    /// The build of the last result `check` returned, per calling task.
-    builds: Mutex<HashMap<TaskId, String>>,
 }
 
 impl ExternalResim {
@@ -206,12 +208,7 @@ impl ExternalResim {
             db: OnceLock::new(),
             posted: Notify::new(),
             timeout,
-            builds: Mutex::default(),
         }
-    }
-
-    fn builds(&self) -> std::sync::MutexGuard<'_, HashMap<TaskId, String>> {
-        self.builds.lock().unwrap_or_else(|e| e.into_inner())
     }
 
     /// Queues a job and waits for its result; `None` when the wait timed out.
@@ -293,29 +290,31 @@ where
 #[async_trait]
 impl Resim for ExternalResim {
     async fn check(&self, slp: &Path, replay_last_frame: i32) -> ResimOutcome {
-        let task = tokio::task::try_id();
-        if let Some(task) = task {
-            self.builds().remove(&task);
-        }
-        let Some(db) = self.db.get() else {
-            return ResimOutcome::Unavailable("external verifier not attached to a store".into());
-        };
-        match self.run_job(db, slp, replay_last_frame).await {
-            Ok(Some(VerifyResult { outcome, build })) => {
-                if let Some(task) = task {
-                    self.builds().insert(task, build);
-                }
-                outcome
-            }
-            Ok(None) => ResimOutcome::Unavailable("no verifier".into()),
-            Err(e) => ResimOutcome::Unavailable(format!("external verifier: {e:#}")),
-        }
+        self.check_with_build(slp, replay_last_frame).await.0
     }
 
     fn build(&self) -> String {
-        tokio::task::try_id()
-            .and_then(|task| self.builds().remove(&task))
-            .unwrap_or_else(|| "external".into())
+        "external".into()
+    }
+
+    async fn check_with_build(&self, slp: &Path, replay_last_frame: i32) -> (ResimOutcome, String) {
+        let Some(db) = self.db.get() else {
+            return (
+                ResimOutcome::Unavailable("external verifier not attached to a store".into()),
+                self.build(),
+            );
+        };
+        match self.run_job(db, slp, replay_last_frame).await {
+            Ok(Some(VerifyResult { outcome, build })) => (outcome, build),
+            Ok(None) => (
+                ResimOutcome::Unavailable("no verifier".into()),
+                self.build(),
+            ),
+            Err(e) => (
+                ResimOutcome::Unavailable(format!("external verifier: {e:#}")),
+                self.build(),
+            ),
+        }
     }
 
     /// Also retires every job a previous run left unfinished. Nothing waits for them any
