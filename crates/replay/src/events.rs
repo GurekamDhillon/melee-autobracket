@@ -10,6 +10,7 @@ use crate::{PlayerKind, PlayerStart, ReplayError};
 pub(crate) const MESSAGE_SPLITTER: u8 = 0x10;
 pub(crate) const EVENT_PAYLOADS: u8 = 0x35;
 pub(crate) const GAME_START: u8 = 0x36;
+pub(crate) const PRE_FRAME: u8 = 0x37;
 pub(crate) const POST_FRAME: u8 = 0x38;
 pub(crate) const GAME_END: u8 = 0x39;
 pub(crate) const GECKO_LIST: u8 = 0x3D;

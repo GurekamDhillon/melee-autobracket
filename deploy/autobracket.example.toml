@@ -3,7 +3,8 @@
 
 # Address and port the HTTP server listens on.
 bind = "0.0.0.0:8080"
-# SQLite database file; back up a tournament by copying it.
+# SQLite database file. Back it up with `sqlite3 DB ".backup FILE"`, or stop the service first
+# and then copy it; a plain copy of the running database can lose results (see the README).
 db_path = "/var/lib/autobracket/autobracket.sqlite"
 # Directory where uploaded .slp replays are stored.
 replay_dir = "/var/lib/autobracket/replays"
@@ -20,14 +21,16 @@ allow_no_organiser = true
 # Public keys of external verifier workers, lowercase hex (for verifier mode "external").
 verifier_keys = []
 # Engine builds clients may sign up with, and the verifier must run (it refuses to start, or
-# an external verifier's results are not used, otherwise). An entry matches a build string
-# exactly or its version part before the first "+". An empty list accepts any build.
+# an external verifier's results are not used, otherwise). At sign-up and for the verifier
+# alike, an entry matches a build string exactly or its version part before the first "+".
+# An empty list accepts any build.
 accepted_builds = []
 # Seconds to wait for the second player's replay before a game is judged on one upload (verdict Single).
 upload_timeout_secs = 120
 # Seconds a ready set may go without activity (a room code, an upload, a counted game) before
 # the server sends it to the TO queue as "stalled", so a no-show nobody reported still reaches
-# the organiser. 0 disables the check. Players can also report one at once (POST .../no-show).
+# the organiser. 0 disables the check. Players can also report one at once with the client's
+# `no-show` command.
 set_stall_secs = 1800
 # Send games whose re-simulation diverges to the TO queue (verdict Inexact) instead of counting
 # them, and games the verifier could not check (verdict VerifierUnavailable) instead of counting

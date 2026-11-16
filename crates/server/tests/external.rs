@@ -538,6 +538,50 @@ async fn claimed_job_is_waited_for() {
     assert_eq!(checked, (ResimOutcome::Match, "slow 1.0".into()));
 }
 
+/// A verifier busy with a long job (claimed, no result yet, claim not stale) is online: a
+/// second queued job is waited for past the short wait, though the verifier has not called
+/// the server within the presence window.
+#[tokio::test]
+async fn a_verifier_busy_with_a_claimed_job_is_online() {
+    let vk = SigningKey::generate(&mut OsRng);
+    let resim = Arc::new(
+        ExternalResim::new(Duration::from_secs(30))
+            .with_presence(Duration::from_millis(100), Duration::from_millis(200)),
+    );
+    let app = TestApp::spawn_with(external(&vk), resim.clone()).await;
+    let check = |path: &'static str| {
+        let resim = resim.clone();
+        tokio::spawn(async move { resim.check_with_build(Path::new(path), 100).await })
+    };
+    let verifier = Signer::new(vk, &app.url);
+    let _first = check("/first.slp");
+    let busy = claim_job(&verifier).await;
+    let second = check("/second.slp");
+    // Longer than both the short wait and the presence window; the verifier stays silent.
+    tokio::time::sleep(Duration::from_millis(600)).await;
+    assert!(
+        !second.is_finished(),
+        "gave up on the second job while the verifier was busy: {:?}",
+        second.await
+    );
+    let job = claim_job(&verifier).await;
+    assert_ne!(job.id, busy.id);
+    let result = VerifyResult {
+        outcome: ResimOutcome::Match,
+        build: "slow 1.0".into(),
+    };
+    assert_eq!(
+        verifier.post_result(job.id, &result).await,
+        StatusCode::NO_CONTENT
+    );
+    let checked = tokio::time::timeout(Duration::from_secs(10), second)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert_eq!(checked, (ResimOutcome::Match, "slow 1.0".into()));
+}
+
 /// An internal error (here: no store to queue the job in) is an error, not "unavailable", so
 /// the worker retries the game instead of counting it unchecked.
 #[tokio::test]

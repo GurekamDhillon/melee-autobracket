@@ -21,6 +21,8 @@
 #     game2         prints the MATCH CODE line, sleeps 2 s, writes one replay.
 #     np-timeout    prints the MATCH CODE line and the installed engine's host line for
 #                   nobody joining within --np-timeout, exits 1 without a replay.
+#     np-timeout-introduced  like np-timeout, but first prints the engine's line for the
+#                   relay introducing a guest (the guest arrived; the peers never connected).
 #     no-room       prints the guest's line for an unknown match code, exits 1.
 #     host-closed   prints the guest's line for a host that closed its room, exits 1.
 #     bad-match     prints the line for an unknown `--match` fighter, exits 1.
@@ -108,6 +110,12 @@ case "${1:-}" in
         ;;
     np-timeout)
         echo "$code_line" >&2
+        echo "play: netplay host: no connection after 60 s (Waiting for the guest...): nobody connected; check that the guest has your address and port, that UDP to it is allowed through the firewall / forwarded by the router, or use a match code (--np-server)" >&2
+        exit 1
+        ;;
+    np-timeout-introduced)
+        echo "$code_line" >&2
+        echo "play: netplay host: the server introduced 203.0.113.7:51234 (dialling 203.0.113.7:51234)" >&2
         echo "play: netplay host: no connection after 60 s (Waiting for the guest...): nobody connected; check that the guest has your address and port, that UDP to it is allowed through the firewall / forwarded by the router, or use a match code (--np-server)" >&2
         exit 1
         ;;

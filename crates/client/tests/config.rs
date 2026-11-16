@@ -240,11 +240,35 @@ fn init_makes_relative_paths_absolute() {
         .join("melee.iso");
     assert!(iso.is_relative());
 
-    let cfg = config::init(&path, &opts(&iso, Path::new("runs"))).unwrap();
+    let work = up.join(dir.path().strip_prefix("/").unwrap()).join("runs");
+
+    let cfg = config::init(&path, &opts(&iso, &work)).unwrap();
 
     assert_eq!(cfg.iso, cwd.join(&iso));
-    assert_eq!(cfg.work_dir, cwd.join("runs"));
+    assert_eq!(
+        cfg.work_dir,
+        dir.path().canonicalize().unwrap().join("runs")
+    );
     assert_eq!(ClientConfig::load(&path).unwrap(), cfg);
+}
+
+#[test]
+fn init_creates_the_work_dir_and_stores_its_resolved_path() {
+    let dir = TempDir::new().unwrap();
+    let iso = disc(dir.path());
+    let real = dir.path().join("real");
+    std::fs::create_dir(&real).unwrap();
+    std::os::unix::fs::symlink(&real, dir.path().join("link")).unwrap();
+    // Through a symlink and `..`, and not there yet.
+    let work = dir.path().join("link/../link/runs");
+
+    let path = dir.path().join("client.toml");
+    let cfg = config::init(&path, &opts(&iso, &work)).unwrap();
+
+    let resolved = dir.path().canonicalize().unwrap().join("real/runs");
+    assert!(resolved.is_dir(), "the work directory was not created");
+    assert_eq!(cfg.work_dir, resolved);
+    assert_eq!(ClientConfig::load(&path).unwrap().work_dir, resolved);
 }
 
 #[test]

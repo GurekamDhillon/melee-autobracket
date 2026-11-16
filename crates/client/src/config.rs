@@ -348,7 +348,8 @@ pub struct InitOptions<'a> {
 }
 
 /// Writes a new config at `path` with a fresh key and the default engine arguments (adjusted
-/// by `opts`). Relative paths are made absolute against the current directory. Checks first
+/// by `opts`). Relative paths are made absolute against the current directory; the work
+/// directory is created and stored resolved ([`resolve_work_dir`]). Checks first
 /// that the disc image looks like one ([`check_disc`]) and that `{melee} version` runs.
 /// Refuses to replace an existing config (and its key) unless `opts.force`.
 pub fn init(path: &Path, opts: &InitOptions) -> anyhow::Result<ClientConfig> {
@@ -370,7 +371,7 @@ pub fn init(path: &Path, opts: &InitOptions) -> anyhow::Result<ClientConfig> {
         hex::encode(key.to_bytes()),
         melee,
         absolute(opts.iso)?,
-        absolute(opts.work_dir)?,
+        resolve_work_dir(opts.work_dir)?,
     );
     if opts.headless {
         for args in [&mut cfg.host_args, &mut cfg.join_args] {
@@ -389,6 +390,14 @@ pub fn init(path: &Path, opts: &InitOptions) -> anyhow::Result<ClientConfig> {
 
 fn absolute(path: &Path) -> anyhow::Result<PathBuf> {
     std::path::absolute(path).with_context(|| format!("resolving {}", path.display()))
+}
+
+/// Creates the work directory `path` if needed and returns its canonical path (absolute,
+/// with no symlinks and no `.` or `..`), the form the kernel reports a game's working
+/// directory in.
+pub fn resolve_work_dir(path: &Path) -> anyhow::Result<PathBuf> {
+    std::fs::create_dir_all(path).with_context(|| format!("creating {}", path.display()))?;
+    std::fs::canonicalize(path).with_context(|| format!("resolving {}", path.display()))
 }
 
 /// Fails with a message naming `iso` unless it is a regular file (after symlinks) of at least

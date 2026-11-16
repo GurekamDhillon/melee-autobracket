@@ -141,6 +141,15 @@ impl Drop for GameGuard {
 
 const REPLAY: &str = "/v1/sets/1/0/games/1/replay";
 
+/// Whether `play` has recorded, in `work`'s session file, that the server took the room
+/// code (the stub sees the post a moment before `play` sees the answer).
+fn code_posted(work: &Path) -> bool {
+    matches!(
+        autobracket_client::session::SessionFile::new(work).load(),
+        autobracket_client::session::Loaded::Record(r) if r.code_posted
+    )
+}
+
 /// This player hosts set 0 game 1 until its replay is uploaded, and then waits for the
 /// verdict. `room` answers each room-code post in turn (the last repeats); `replay` each
 /// upload.
@@ -188,7 +197,7 @@ async fn restarting_play_mid_game_adopts_the_game_instead_of_starting_another() 
 
     // `play` is interrupted (Ctrl-C) once the code is sent; the game keeps running.
     play_then_stop(&stub, &mut engine(&cfg), |s| {
-        s.count("/v1/sets/1/0/room") == 1
+        s.count("/v1/sets/1/0/room") == 1 && code_posted(work.path())
     })
     .await;
     let game = pid_of(&work.path().join("run-1"));
@@ -207,6 +216,54 @@ async fn restarting_play_mid_game_adopts_the_game_instead_of_starting_another() 
         "a second room code was posted"
     );
     assert_eq!(stub.requests("POST", REPLAY)[0].body, b"fake replay");
+}
+
+/// As [`restarting_play_mid_game_adopts_the_game_instead_of_starting_another`], with the
+/// work directory given as `work_dir`, a path to the directory `real`.
+async fn a_restart_adopts_the_game_in(work_dir: &Path, real: &Path) {
+    let stub = host_server(&[204], 202).await;
+    let cfg = config(work_dir, "game2");
+
+    play_then_stop(&stub, &mut engine(&cfg), |s| {
+        s.count("/v1/sets/1/0/room") == 1 && code_posted(work_dir)
+    })
+    .await;
+    let game = pid_of(&real.join("run-1"));
+    let _guard = GameGuard(game);
+    assert!(alive(game), "the game must outlive the interrupted `play`");
+
+    play_until(&stub, &mut engine(&cfg), |s| {
+        s.count(REPLAY) == 1 && s.polls_after(REPLAY) > 3
+    })
+    .await;
+
+    assert_eq!(runs(real).len(), 1, "a second game was started");
+    assert_eq!(
+        stub.count("/v1/sets/1/0/room"),
+        1,
+        "a second room code was posted"
+    );
+    assert_eq!(stub.requests("POST", REPLAY)[0].body, b"fake replay");
+}
+
+#[tokio::test]
+async fn a_work_dir_reached_through_a_symlink_is_adopted_on_restart() {
+    let dir = TempDir::new().unwrap();
+    let real = dir.path().join("real");
+    std::fs::create_dir(&real).unwrap();
+    let link = dir.path().join("link");
+    std::os::unix::fs::symlink(&real, &link).unwrap();
+
+    a_restart_adopts_the_game_in(&link, &real).await;
+}
+
+#[tokio::test]
+async fn a_work_dir_given_with_dot_dot_is_adopted_on_restart() {
+    let dir = TempDir::new().unwrap();
+    std::fs::create_dir(dir.path().join("other")).unwrap();
+    let work = dir.path().join("other/../work");
+
+    a_restart_adopts_the_game_in(&work, &dir.path().join("work")).await;
 }
 
 #[tokio::test]
@@ -368,6 +425,46 @@ async fn a_refused_room_code_stops_that_run_and_play_carries_on() {
 }
 
 #[tokio::test]
+async fn a_room_refused_for_a_game_in_progress_is_not_hosted_again_until_next_changes() {
+    // The server's 409 while a game of the set is still uploading or being judged; then
+    // (`next_game`) it offers game 2.
+    let next_game = Arc::new(AtomicBool::new(false));
+    let flag = next_game.clone();
+    let stub = Stub::start(move |req| match (req.method.as_str(), req.path.as_str()) {
+        ("GET", p) if p.starts_with("/v1/me/next") => {
+            let mut next = host_play();
+            if let Next::Play { game_no, .. } = &mut next {
+                *game_no = if flag.load(Ordering::SeqCst) { 2 } else { 1 };
+            }
+            (200, json(&next))
+        }
+        ("POST", "/v1/sets/1/0/room") if !flag.load(Ordering::SeqCst) => (
+            409,
+            r#"{"error":"a game of this set is in progress or awaiting a verdict"}"#.into(),
+        ),
+        ("POST", "/v1/sets/1/0/room") => (204, String::new()),
+        _ => (404, r#"{"error":"not found"}"#.into()),
+    })
+    .await;
+    let work = TempDir::new().unwrap();
+
+    play_until(&stub, &mut engine(&config(work.path(), "game2")), |s| {
+        let rooms = s.count("/v1/sets/1/0/room");
+        if !next_game.load(Ordering::SeqCst) {
+            // Not hosted again within 50 polls (the launch backoff here is 5 ms).
+            assert!(rooms <= 1, "hosted again after the 409: {rooms} room posts");
+            if rooms == 1 && s.polls_after("/room") > 50 {
+                next_game.store(true, Ordering::SeqCst);
+            }
+        }
+        rooms == 2
+    })
+    .await;
+
+    assert_eq!(runs(work.path()).len(), 2, "game 2 was hosted once");
+}
+
+#[tokio::test]
 async fn a_refused_upload_keeps_the_file_and_play_carries_on() {
     let stub = host_server(&[204], 400).await;
     let work = TempDir::new().unwrap();
@@ -462,13 +559,16 @@ async fn a_recycled_pid_is_not_adopted_or_killed() {
 }
 
 #[tokio::test]
-async fn a_live_process_in_another_directory_is_not_adopted() {
+async fn a_live_recorded_process_in_another_directory_stops_play() {
     let stub = host_server(&[204], 202).await;
     let work = TempDir::new().unwrap();
     let run = finished_run(work.path(), 1);
-    // Right pid and start time, but not running in the recorded run directory.
+    // Right pid, start time and boot, but not running in the recorded run directory: it
+    // may be the game, so nothing is started over it and it is not treated as ended.
+    let elsewhere = TempDir::new().unwrap();
     let mut stranger = std::process::Command::new("sleep")
         .arg("30")
+        .current_dir(elsewhere.path())
         .spawn()
         .unwrap();
     let process = ProcId::of(stranger.id()).unwrap();
@@ -476,13 +576,35 @@ async fn a_live_process_in_another_directory_is_not_adopted() {
         .save(&record(&run, process))
         .unwrap();
 
-    play_until(&stub, &mut engine(&config(work.path(), "game2")), |s| {
-        s.count(REPLAY) == 1 && s.polls_after(REPLAY) > 3
-    })
-    .await;
+    let err = tokio::time::timeout(
+        Duration::from_secs(10),
+        play_event_with(
+            &api(&stub),
+            &mut engine(&config(work.path(), "game2")),
+            1,
+            &opts(),
+        ),
+    )
+    .await
+    .expect("play did not stop")
+    .expect_err("play must refuse to start a game");
 
-    assert_eq!(stub.requests("POST", REPLAY)[0].body, b"left over");
-    assert!(stranger.try_wait().unwrap().is_none());
+    let msg = format!("{err:#}");
+    assert!(msg.contains(&run.display().to_string()), "{msg}");
+    let cwd = elsewhere.path().canonicalize().unwrap();
+    assert!(msg.contains(&cwd.display().to_string()), "{msg}");
+    assert!(msg.contains("may still be running"), "{msg}");
+    assert_eq!(runs(work.path()).len(), 1, "a game was started");
+    assert_eq!(stub.count("/v1/sets/1/0/room"), 0);
+    assert!(stub.requests("POST", REPLAY).is_empty());
+    assert!(
+        work.path().join("session.json").exists(),
+        "the record of a game that may be running was dropped"
+    );
+    assert!(
+        stranger.try_wait().unwrap().is_none(),
+        "the process was killed"
+    );
     let _ = stranger.kill();
     let _ = stranger.wait();
 }
@@ -606,4 +728,15 @@ async fn a_game_that_ends_mid_poll_is_collected_not_followed_by_another() {
         engine.hosts, 1,
         "a second game started before the first was collected"
     );
+}
+
+#[test]
+fn play_needs_proc() {
+    autobracket_client::session::require_proc(Path::new("/proc/self/stat")).unwrap();
+    let dir = TempDir::new().unwrap();
+    let err = autobracket_client::session::require_proc(&dir.path().join("self/stat"))
+        .expect_err("no /proc must be refused");
+    let msg = format!("{err:#}");
+    assert!(msg.contains("Linux"), "{msg}");
+    assert!(msg.contains("/proc"), "{msg}");
 }
