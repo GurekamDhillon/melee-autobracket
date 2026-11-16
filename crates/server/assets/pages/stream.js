@@ -2,7 +2,7 @@
 // page's CSP; the URL arrives as JSON, never in the HTML), and what is being played right now.
 (function () {
   const POLL_MS = 10000;
-  const { el, getJson, setNotice, slotEntrant, sideRounds } = AB;
+  const { el, getJson, setNotice, liveSetLines } = AB;
   const $ = (id) => document.getElementById(id);
   const now = $("now");
   let drawnKey = "";
@@ -25,31 +25,7 @@
     setNotice("no-stream", "Couldn’t reach the server just now; reload to try again.");
   });
 
-  // ---- now playing: the ready sets of every running event -----------------------------------
-
-  const SIDES = ["Winners", "Losers", "GrandFinal"];
-
-  // "A vs B · Winners semis · 1–0" for every ready set of one event, in bracket order.
-  function liveSets(view) {
-    const b = view.bracket;
-    if (!b) return [];
-    const tags = view.tags || [];
-    const tagOf = (n) => (typeof tags[n] === "string" ? tags[n] : "Entrant " + (n + 1));
-    const scores = new Map((view.scores || []).map(([id, wins]) => [id, wins]));
-    const out = [];
-    for (const side of SIDES) {
-      for (const round of sideRounds(b, side)) {
-        for (const set of round.sets) {
-          if (set.state !== "Ready") continue;
-          const [a, c] = set.slots.map(slotEntrant);
-          if (a === null || c === null) continue;
-          const score = scores.get(set.id) || [0, 0];
-          out.push(tagOf(a) + " vs " + tagOf(c) + " · " + round.name + " · " + score[0] + "–" + score[1]);
-        }
-      }
-    }
-    return out;
-  }
+  // ---- now playing: the ready sets of every running event, as AB.liveSetLines words them ----
 
   function render(events) {
     const key = JSON.stringify(events);
@@ -85,7 +61,7 @@
       const list = await getJson("/v1/events");
       const running = (Array.isArray(list) ? list : []).filter((ev) => ev.state === "running");
       const views = await Promise.all(running.map((ev) => getJson("/v1/events/" + encodeURIComponent(ev.id))));
-      render(running.map((ev, i) => ({ id: ev.id, name: ev.name, sets: liveSets(views[i]) })));
+      render(running.map((ev, i) => ({ id: ev.id, name: ev.name, sets: liveSetLines(views[i]) })));
     } catch (err) {
       if (!drawnKey) now.replaceChildren(el("p", "notice", "Couldn’t reach the server just now; trying again in a few seconds."));
     }

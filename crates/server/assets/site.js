@@ -107,6 +107,30 @@ const AB = (function () {
     return out;
   }
 
+  const SIDES = ["Winners", "Losers", "GrandFinal"];
+
+  // "Mango vs Zain · Winners semis · 1–0" for every ready set of an event's view, in bracket
+  // order; none when the event has no bracket yet.
+  function liveSetLines(view) {
+    if (!view.bracket) return [];
+    const tags = view.tags || [];
+    const tagOf = (n) => (typeof tags[n] === "string" ? tags[n] : "Entrant " + (n + 1));
+    const scores = new Map((view.scores || []).map(([id, wins]) => [id, wins]));
+    const lines = [];
+    for (const side of SIDES) {
+      for (const round of sideRounds(view.bracket, side)) {
+        for (const set of round.sets) {
+          if (set.state !== "Ready") continue;
+          const [a, b] = set.slots.map(slotEntrant);
+          if (a === null || b === null) continue;
+          const score = scores.get(set.id) || [0, 0];
+          lines.push(tagOf(a) + " vs " + tagOf(b) + " · " + round.name + " · " + score[0] + "–" + score[1]);
+        }
+      }
+    }
+    return lines;
+  }
+
   // ---- time, in the viewer's zone ---------------------------------------------------------
 
   const MINUTE = 60, HOUR = 3600, DAY = 86400;
@@ -145,6 +169,19 @@ const AB = (function () {
 
   function fmtDate(unix) {
     return new Date(unix * 1000).toLocaleDateString(undefined, { dateStyle: "medium" });
+  }
+
+  // A unix time the server knows: `starts_at` and `created_at` arrive as null or 0 when nobody
+  // set them, and 0 is 1970, never a real time.
+  function knownTime(t) {
+    return typeof t === "number" && t > 0;
+  }
+
+  // The event's date: when it starts, else when it was created; null when neither is known.
+  function eventDate(sum) {
+    if (knownTime(sum.starts_at)) return fmtDate(sum.starts_at);
+    if (knownTime(sum.created_at)) return fmtDate(sum.created_at);
+    return null;
   }
 
   // ---- links ------------------------------------------------------------------------------
@@ -198,20 +235,25 @@ const AB = (function () {
     }
   }
 
-  // The two client commands that enter `eventId` on this server, on a sticker.
+  // How to enter `eventId`, on a sticker: plain words for players, and the two client commands
+  // for testers in a collapsed block.
   function howToEnter(eventId) {
     const box = el("div", "howto");
     box.append(el("h2", null, "How to enter"));
-    box.append(el("code", null, "autobracket-client register --server " + location.origin + " --tag YOURTAG"));
-    box.append(el("code", null, "autobracket-client signup " + eventId));
+    box.append(el("p", null, "Sign-ups are open. Joining from inside the game is coming soon."));
+    const testers = el("details");
+    testers.append(el("summary", null, "For testers: join from the command line"));
+    testers.append(el("code", null, "autobracket-client register --server " + location.origin + " --tag YOURTAG"));
+    testers.append(el("code", null, "autobracket-client signup " + eventId));
+    box.append(testers);
     return box;
   }
 
   return {
     el, icon, getJson, setNotice,
     STATE_LABEL, FORMAT_LABEL, ROUND_NAMES, roundName, ordinal,
-    slotEntrant, doneWinner, isHidden, sideRounds,
-    fmtWhen, fmtDate, eventHref, playerHref,
+    slotEntrant, doneWinner, isHidden, sideRounds, liveSetLines,
+    fmtWhen, fmtDate, knownTime, eventDate, eventHref, playerHref,
     poll, markNav, howToEnter,
   };
 })();

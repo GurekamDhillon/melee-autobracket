@@ -334,13 +334,15 @@
     if (FORMAT_LABEL[format]) bits.push(FORMAT_LABEL[format]);
     bits.push(sum.entrants + (sum.entrants === 1 ? " entrant" : " entrants"));
     bits.push(...rulesBits(view.ruleset, format));
-    if (typeof sum.starts_at === "number") bits.push(AB.fmtWhen(sum.starts_at).abs);
+    if (AB.knownTime(sum.starts_at)) bits.push(AB.fmtWhen(sum.starts_at).abs);
+    let text = bits.join(", ");
+    if (sum.description) text += ". " + sum.description;
     const meta = $("meta");
-    meta.replaceChildren(bits.join(", "));
-    if (sum.description) meta.append(". " + sum.description);
+    meta.replaceChildren(text);
     const champ = view.bracket ? champion(view.bracket) : null;
     if (champ !== null) {
-      meta.append(". Champion: ");
+      // A description that already ends a sentence is not given a second full stop.
+      meta.append((/[.!?]$/.test(text) ? " " : ". ") + "Champion: ");
       meta.append(el("span", "champion", tagOf(champ)));
     }
 

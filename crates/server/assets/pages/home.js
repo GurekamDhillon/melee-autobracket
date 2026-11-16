@@ -1,11 +1,14 @@
 // The landing page: what is live, what is next and how to enter, and the latest results.
-// Old bookmarks of the form /#N land on that event's page before anything is drawn.
-const m = /^#(\d+)$/.exec(location.hash); if (m) { location.replace("/events/" + m[1]); }
 (function () {
+  // Old bookmarks of the form /#N land on that event's page before anything is drawn or fetched.
+  const m = /^#(\d+)$/.exec(location.hash);
+  if (m) {
+    location.replace("/events/" + m[1]);
+    return;
+  }
   const POLL_MS = 10000;
-  const { el, getJson, setNotice, STATE_LABEL, slotEntrant, sideRounds, fmtWhen, fmtDate, ordinal, eventHref, playerHref } = AB;
+  const { el, getJson, setNotice, STATE_LABEL, liveSetLines, fmtWhen, knownTime, eventDate, ordinal, eventHref, playerHref } = AB;
   const $ = (id) => document.getElementById(id);
-  const SIDES = ["Winners", "Losers", "GrandFinal"];
   let drawnKey = "";
   let drawnOnce = false;
 
@@ -36,35 +39,7 @@ const m = /^#(\d+)$/.exec(location.hash); if (m) { location.replace("/events/" +
     return n + (n === 1 ? " entrant" : " entrants");
   }
 
-  // The event's date for a result: when it was due, else when it was created (0 = unknown).
-  function eventDate(sum) {
-    if (typeof sum.starts_at === "number") return fmtDate(sum.starts_at);
-    if (typeof sum.created_at === "number" && sum.created_at > 0) return fmtDate(sum.created_at);
-    return null;
-  }
-
   // ---- live now: every running event with its sets in play ------------------
-
-  // "Mango vs Zain · Winners semis · 1–0" for each Ready set of the view, in bracket order.
-  function liveSetLines(view) {
-    const tags = view.tags || [];
-    const tagOf = (n) => (typeof tags[n] === "string" ? tags[n] : "Entrant " + (n + 1));
-    const scores = new Map((view.scores || []).map(([id, wins]) => [id, wins]));
-    const lines = [];
-    if (!view.bracket) return lines;
-    for (const side of SIDES) {
-      for (const round of sideRounds(view.bracket, side)) {
-        for (const s of round.sets) {
-          if (s.state !== "Ready") continue;
-          const a = slotEntrant(s.slots[0]), b = slotEntrant(s.slots[1]);
-          if (a === null || b === null) continue;
-          const score = scores.get(s.id) || [0, 0];
-          lines.push(tagOf(a) + " vs " + tagOf(b) + " · " + round.name + " · " + score[0] + "–" + score[1]);
-        }
-      }
-    }
-    return lines;
-  }
 
   function liveCard(ev, lines, i) {
     const card = el("article", "home-card live-card c" + Math.min(i, 12));
@@ -108,7 +83,7 @@ const m = /^#(\d+)$/.exec(location.hash); if (m) { location.replace("/events/" +
     const card = el("article", "home-card card c1");
     card.append(nameLink(ev));
     const when = el("p", "when");
-    if (typeof ev.starts_at === "number") {
+    if (knownTime(ev.starts_at)) {
       const w = fmtWhen(ev.starts_at);
       const t = el("time", null, w.abs);
       t.dateTime = w.iso;
@@ -158,8 +133,8 @@ const m = /^#(\d+)$/.exec(location.hash); if (m) { location.replace("/events/" +
   function nextUp(events) {
     const open = events.filter((e) => e.state === "signup");
     open.sort((a, b) => {
-      const ta = typeof a.starts_at === "number" ? a.starts_at : Infinity;
-      const tb = typeof b.starts_at === "number" ? b.starts_at : Infinity;
+      const ta = knownTime(a.starts_at) ? a.starts_at : Infinity;
+      const tb = knownTime(b.starts_at) ? b.starts_at : Infinity;
       return ta - tb || a.id - b.id;
     });
     return open[0] || null;

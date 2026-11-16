@@ -1,22 +1,23 @@
 // The schedule: running events, then those in sign-up by start time, and how to enter. Loads once.
 (function () {
-  const { el, getJson, setNotice, STATE_LABEL } = AB;
+  const { el, getJson, setNotice, STATE_LABEL, knownTime } = AB;
   const $ = (id) => document.getElementById(id);
 
   function entrants(n) {
     return n + (n === 1 ? " entrant" : " entrants");
   }
 
-  // Null start times last, then by start, then by id.
+  // Unknown start times last, then by start, then by id.
   function byStart(a, b) {
-    const ta = a.starts_at ?? Infinity, tb = b.starts_at ?? Infinity;
+    const ta = knownTime(a.starts_at) ? a.starts_at : Infinity;
+    const tb = knownTime(b.starts_at) ? b.starts_at : Infinity;
     return ta === tb ? a.id - b.id : ta - tb;
   }
 
   // The start time line: the local time (as <time>) and a quiet relative phrase.
   function when(ev) {
     const p = el("p", "when");
-    if (ev.starts_at === null || ev.starts_at === undefined) {
+    if (!knownTime(ev.starts_at)) {
       p.append(el("span", "quiet", "time to be announced"));
       return p;
     }
