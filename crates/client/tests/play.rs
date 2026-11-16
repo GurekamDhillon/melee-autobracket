@@ -9,13 +9,15 @@ use std::time::{Duration, Instant};
 use autobracket_client::api::Api;
 use autobracket_client::config::{self, ClientConfig};
 use autobracket_client::engine::{CommandEngine, Engine, GameParams};
-use autobracket_client::play::play_event;
+use autobracket_client::play::{play_event, play_event_with, PlayOptions, MAX_FAILED_RUNS};
 use autobracket_server::testkit::{TestApp, TestPlayer};
 use autobracket_server::worker::judge_due;
 use bracket::Format;
-use proto::{Next, Role};
+use proto::{Next, Role, RoomReq, SigningKey};
 use replay::testkit::simple_game;
 use tempfile::TempDir;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::{TcpListener, TcpStream};
 
 const POLL: Duration = Duration::from_millis(10);
 const START_A: &str = "2026-11-15T20:00:00Z";
@@ -118,7 +120,11 @@ impl Engine for ScriptedEngine {
 }
 
 fn api(app: &TestApp, p: &TestPlayer) -> Api {
-    Api::new(&app.url, p.sk.clone(), "b1")
+    api_at(&app.url, p)
+}
+
+fn api_at(url: &str, p: &TestPlayer) -> Api {
+    Api::new(url, p.sk.clone(), "b1")
 }
 
 /// A started two-player single-elimination event: `(app, host, guest, event)`.
@@ -161,11 +167,12 @@ async fn judge_forever(app: &TestApp) {
 /// Runs both clients to their terminal states while a judge loop runs.
 async fn play_out(
     app: &TestApp,
+    url: &str,
     event: i64,
     (host, guest): (&TestPlayer, &TestPlayer),
     (he, ge): (&mut ScriptedEngine, &mut ScriptedEngine),
 ) -> (Next, Next) {
-    let (ha, ga) = (api(app, host), api(app, guest));
+    let (ha, ga) = (api_at(url, host), api_at(url, guest));
     let both = async {
         tokio::join!(
             play_event(&ha, he, event, POLL),
@@ -215,7 +222,7 @@ async fn two_clients_play_a_bo3_to_champion() {
     let (app, host, guest, event) = setup().await;
     let (mut he, mut ge) = engines(1);
 
-    let (h, g) = play_out(&app, event, (&host, &guest), (&mut he, &mut ge)).await;
+    let (h, g) = play_out(&app, &app.url, event, (&host, &guest), (&mut he, &mut ge)).await;
 
     assert_eq!(h, Next::Champion);
     assert_eq!(g, Next::Eliminated);
@@ -259,7 +266,7 @@ async fn upload_conflict_is_not_fatal() {
     // A second, different replay of the same game: the server refuses it with 409.
     he.replays.push(simple_game(2, START_A));
 
-    let (h, g) = play_out(&app, event, (&host, &guest), (&mut he, &mut ge)).await;
+    let (h, g) = play_out(&app, &app.url, event, (&host, &guest), (&mut he, &mut ge)).await;
 
     assert_eq!(h, Next::Champion);
     assert_eq!(g, Next::Eliminated);
@@ -381,4 +388,228 @@ fn init_writes_0600_config() {
     assert_ne!(forced.secret_key_hex, cfg.secret_key_hex);
     let mode = std::fs::metadata(&path).unwrap().permissions().mode();
     assert_eq!(mode & 0o777, 0o600);
+}
+
+/// How the [`Proxy`] fails a request.
+#[derive(Clone, Copy, Debug)]
+enum FaultKind {
+    /// Answers `503 Service Unavailable` without forwarding.
+    Unavailable,
+    /// Closes the connection without answering.
+    Reset,
+}
+
+struct Fault {
+    /// Matched against the bytes that carry the request line.
+    pattern: &'static str,
+    kind: FaultKind,
+    left: usize,
+}
+
+/// A TCP proxy in front of the server that fails the next `left` requests matching each
+/// fault's pattern, and forwards everything else unchanged.
+struct Proxy {
+    url: String,
+    faults: Arc<Mutex<Vec<Fault>>>,
+}
+
+impl Proxy {
+    async fn start(upstream: &str, faults: Vec<Fault>) -> Proxy {
+        let upstream = upstream.trim_start_matches("http://").to_string();
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let faults = Arc::new(Mutex::new(faults));
+        let shared = faults.clone();
+        tokio::spawn(async move {
+            while let Ok((client, _)) = listener.accept().await {
+                tokio::spawn(proxy_conn(client, upstream.clone(), shared.clone()));
+            }
+        });
+        Proxy { url, faults }
+    }
+
+    /// Faults not yet used up.
+    fn unused(&self) -> Vec<(&'static str, usize)> {
+        let faults = self.faults.lock().unwrap();
+        faults
+            .iter()
+            .filter(|f| f.left > 0)
+            .map(|f| (f.pattern, f.left))
+            .collect()
+    }
+}
+
+fn take_fault(faults: &Mutex<Vec<Fault>>, chunk: &[u8]) -> Option<FaultKind> {
+    let mut faults = faults.lock().unwrap();
+    let f = faults.iter_mut().find(|f| {
+        f.left > 0
+            && chunk
+                .windows(f.pattern.len())
+                .any(|w| w == f.pattern.as_bytes())
+    })?;
+    f.left -= 1;
+    Some(f.kind)
+}
+
+async fn proxy_conn(mut client: TcpStream, upstream: String, faults: Arc<Mutex<Vec<Fault>>>) {
+    let Ok(mut server) = TcpStream::connect(&upstream).await else {
+        return;
+    };
+    let (mut cbuf, mut sbuf) = (vec![0u8; 1 << 16], vec![0u8; 1 << 16]);
+    loop {
+        tokio::select! {
+            r = client.read(&mut cbuf) => {
+                let Ok(n @ 1..) = r else { return };
+                match take_fault(&faults, &cbuf[..n]) {
+                    Some(FaultKind::Reset) => return,
+                    Some(FaultKind::Unavailable) => {
+                        let body = r#"{"error":"down for maintenance"}"#;
+                        let res = format!(
+                            "HTTP/1.1 503 Service Unavailable\r\ncontent-type: application/json\r\n\
+                             content-length: {}\r\nconnection: close\r\n\r\n{body}",
+                            body.len()
+                        );
+                        let _ = client.write_all(res.as_bytes()).await;
+                        return;
+                    }
+                    None => {
+                        if server.write_all(&cbuf[..n]).await.is_err() {
+                            return;
+                        }
+                    }
+                }
+            }
+            r = server.read(&mut sbuf) => {
+                let Ok(n @ 1..) = r else { return };
+                if client.write_all(&sbuf[..n]).await.is_err() {
+                    return;
+                }
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn server_errors_are_retried() {
+    let (app, host, guest, event) = setup().await;
+    let proxy = Proxy::start(
+        &app.url,
+        vec![
+            Fault {
+                pattern: "GET /v1/me/next",
+                kind: FaultKind::Unavailable,
+                left: 3,
+            },
+            Fault {
+                pattern: "/room HTTP/1.1",
+                kind: FaultKind::Unavailable,
+                left: 2,
+            },
+        ],
+    )
+    .await;
+    let (mut he, mut ge) = engines(1);
+
+    let (h, g) = play_out(&app, &proxy.url, event, (&host, &guest), (&mut he, &mut ge)).await;
+
+    assert_eq!(h, Next::Champion);
+    assert_eq!(g, Next::Eliminated);
+    assert_eq!(proxy.unused(), vec![], "every fault was hit");
+}
+
+#[tokio::test]
+async fn upload_transport_error_is_retried() {
+    let (app, host, guest, event) = setup().await;
+    let proxy = Proxy::start(
+        &app.url,
+        vec![Fault {
+            pattern: "/replay HTTP/1.1",
+            kind: FaultKind::Reset,
+            left: 2,
+        }],
+    )
+    .await;
+    let (mut he, mut ge) = engines(1);
+
+    // The set can only be decided if every reset upload was retried and landed.
+    let (h, g) = play_out(&app, &proxy.url, event, (&host, &guest), (&mut he, &mut ge)).await;
+
+    assert_eq!(h, Next::Champion);
+    assert_eq!(g, Next::Eliminated);
+    assert_eq!(proxy.unused(), vec![], "every fault was hit");
+    assert_eq!(he.hosts(), 2, "no game was replayed");
+}
+
+#[tokio::test]
+async fn forbidden_ends_play_with_the_servers_message() {
+    let (app, _host, _guest, event) = setup().await;
+    let stranger = Api::new(&app.url, SigningKey::from_bytes(&[7; 32]), "b1");
+    let mut engine = ScriptedEngine::new("", vec![]);
+
+    let err = play_event(&stranger, &mut engine, event, POLL)
+        .await
+        .expect_err("an unregistered key cannot play");
+
+    let msg = format!("{err:#}");
+    assert!(msg.contains("key is not registered"), "{msg}");
+    assert!(msg.contains("403"), "{msg}");
+}
+
+fn fast_backoff() -> PlayOptions {
+    PlayOptions {
+        launch_backoff: Duration::from_millis(5),
+        ..PlayOptions::new(POLL)
+    }
+}
+
+#[tokio::test]
+async fn host_gives_up_after_runs_without_replays() {
+    let (app, host, _guest, event) = setup().await;
+    let mut engine = ScriptedEngine::new("K7QX", vec![]);
+
+    let err = tokio::time::timeout(
+        Duration::from_secs(10),
+        play_event_with(&api(&app, &host), &mut engine, event, &fast_backoff()),
+    )
+    .await
+    .expect("play never gave up")
+    .expect_err("play must fail");
+
+    assert!(format!("{err:#}").contains("without a replay"), "{err:#}");
+    assert_eq!(engine.hosts(), MAX_FAILED_RUNS as usize);
+}
+
+#[tokio::test]
+async fn guest_gives_up_after_runs_without_replays() {
+    let (app, host, guest, event) = setup().await;
+    let res = host
+        .post_json(
+            &format!("/v1/sets/{event}/0/room"),
+            &RoomReq {
+                code: "AB12".into(),
+            },
+        )
+        .await;
+    assert_eq!(res.status(), reqwest::StatusCode::NO_CONTENT);
+    let mut engine = ScriptedEngine::new("", vec![]);
+
+    let err = tokio::time::timeout(
+        Duration::from_secs(10),
+        play_event_with(&api(&app, &guest), &mut engine, event, &fast_backoff()),
+    )
+    .await
+    .expect("play never gave up")
+    .expect_err("play must fail");
+
+    assert!(format!("{err:#}").contains("without a replay"), "{err:#}");
+    assert_eq!(
+        engine.joins(),
+        vec!["AB12".to_string(); MAX_FAILED_RUNS as usize]
+    );
+}
+
+#[test]
+fn config_debug_redacts_the_key() {
+    let cfg = fake_config(Path::new("/tmp"));
+    assert!(!format!("{cfg:?}").contains(&cfg.secret_key_hex));
 }

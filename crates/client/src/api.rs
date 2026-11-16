@@ -11,20 +11,52 @@ use reqwest::{Method, StatusCode};
 use serde::de::DeserializeOwned;
 use serde::Serialize;
 
-/// A non-success response, carrying the server's `{"error": "..."}` message.
+/// A failed call: a non-success response carrying the server's `{"error": "..."}` message,
+/// or (`status: None`) a transport failure such as a refused or reset connection.
 #[derive(Debug)]
 pub struct ApiError {
-    pub status: StatusCode,
+    pub status: Option<StatusCode>,
     pub message: String,
+}
+
+impl ApiError {
+    /// Worth trying again: transport failures, 5xx, and 429 (rate limited). Any other
+    /// 4xx is the server refusing the request and will not change by retrying.
+    pub fn retryable(&self) -> bool {
+        self.status
+            .is_none_or(|s| s.is_server_error() || s == StatusCode::TOO_MANY_REQUESTS)
+    }
 }
 
 impl fmt::Display for ApiError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{} (HTTP {})", self.message, self.status.as_u16())
+        match self.status {
+            Some(s) => write!(f, "{} (HTTP {})", self.message, s.as_u16()),
+            None => write!(f, "cannot reach the server: {}", self.message),
+        }
     }
 }
 
 impl std::error::Error for ApiError {}
+
+/// Whether `e` is an [`ApiError`] worth retrying.
+pub fn is_retryable(e: &anyhow::Error) -> bool {
+    e.downcast_ref::<ApiError>()
+        .is_some_and(ApiError::retryable)
+}
+
+fn transport(what: &str, e: &reqwest::Error) -> ApiError {
+    let mut message = format!("{what}: {e}");
+    let mut source = std::error::Error::source(e);
+    while let Some(s) = source {
+        message.push_str(&format!(": {s}"));
+        source = s.source();
+    }
+    ApiError {
+        status: None,
+        message,
+    }
+}
 
 pub struct Api {
     base: String,
@@ -111,9 +143,12 @@ impl Api {
         let res = self
             .send(Method::GET, path_and_query, Vec::new(), &[])
             .await?;
-        res.json()
+        let body = res
+            .bytes()
             .await
-            .with_context(|| format!("reading the response to GET {path_and_query}"))
+            .map_err(|e| transport(&format!("reading GET {path_and_query}"), &e))?;
+        serde_json::from_slice(&body)
+            .with_context(|| format!("unexpected response to GET {path_and_query}"))
     }
 
     async fn post_json<T: Serialize>(
@@ -155,7 +190,7 @@ impl Api {
             .body(body)
             .send()
             .await
-            .with_context(|| format!("{method} {url}"))?;
+            .map_err(|e| transport(&format!("{method} {url}"), &e))?;
         let status = res.status();
         if status.is_success() {
             return Ok(res);
@@ -172,7 +207,11 @@ impl Api {
                     text.to_string()
                 }
             });
-        Err(ApiError { status, message }.into())
+        Err(ApiError {
+            status: Some(status),
+            message,
+        }
+        .into())
     }
 }
 

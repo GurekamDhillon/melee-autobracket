@@ -32,6 +32,10 @@ pub trait Engine {
     fn take_replays(&mut self) -> anyhow::Result<Vec<PathBuf>>;
     /// Abandons the run: kills the process, which then writes no replay.
     fn stop(&mut self);
+    /// Where the current run's replays are written, if known.
+    fn run_dir(&self) -> Option<PathBuf> {
+        None
+    }
 }
 
 /// Runs `{melee}` with `host_args` or `join_args`. Each argument has `{iso}`, `{relay}`,
@@ -226,6 +230,25 @@ impl Engine for CommandEngine {
             if let Some(child) = run.child.as_mut() {
                 let _ = child.kill();
                 let _ = child.wait();
+            }
+        }
+    }
+
+    fn run_dir(&self) -> Option<PathBuf> {
+        self.run.as_ref().map(|r| r.dir.clone())
+    }
+}
+
+impl Drop for CommandEngine {
+    /// Never kills a running game: a match being played must not be lost because the
+    /// client exits. The game finishes on its own and writes its replay as usual.
+    fn drop(&mut self) {
+        if self.running() {
+            if let Some(run) = &self.run {
+                eprintln!(
+                    "Leaving the game running; its replay will be written to {}",
+                    run.dir.display()
+                );
             }
         }
     }

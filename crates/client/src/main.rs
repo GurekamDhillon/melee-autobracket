@@ -1,7 +1,7 @@
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use anyhow::bail;
+use anyhow::{bail, Context};
 use autobracket_client::api::Api;
 use autobracket_client::config::{self, ClientConfig};
 use autobracket_client::engine::CommandEngine;
@@ -58,6 +58,13 @@ enum Cmd {
         /// Seconds between checks with the server.
         #[arg(long, default_value_t = 2)]
         poll_secs: u64,
+    },
+    /// Upload one replay file by hand, e.g. one `play` could not upload.
+    Upload {
+        event: i64,
+        set: u32,
+        game: u8,
+        file: PathBuf,
     },
 }
 
@@ -130,6 +137,23 @@ async fn main() -> anyhow::Result<()> {
             let api = api(&cfg)?;
             let mut engine = CommandEngine::new(&cfg)?;
             play_event(&api, &mut engine, event, Duration::from_secs(poll_secs)).await?;
+        }
+        Cmd::Upload {
+            event,
+            set,
+            game,
+            file,
+        } => {
+            let slp =
+                std::fs::read(&file).with_context(|| format!("reading {}", file.display()))?;
+            let status = api(&load(&path)?)?
+                .upload_replay(event, set, game, slp)
+                .await?;
+            if status == reqwest::StatusCode::OK {
+                println!("Game {game} of set {set}: this replay was already uploaded");
+            } else {
+                println!("Uploaded game {game} of set {set}");
+            }
         }
     }
     Ok(())

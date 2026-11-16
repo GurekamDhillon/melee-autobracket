@@ -1,6 +1,7 @@
 //! The client config file, `~/.config/autobracket/client.toml` unless `--config` names
 //! another. It holds the player's secret key, so it is only ever written with mode 0600.
 
+use std::fmt;
 use std::fs::OpenOptions;
 use std::io::Write;
 use std::os::unix::fs::OpenOptionsExt;
@@ -16,7 +17,7 @@ use serde::{Deserialize, Serialize};
 /// `play: netplay host: MATCH CODE K7QX (give it to the other player)`.
 pub const DEFAULT_CODE_REGEX: &str = "MATCH CODE ([A-Z0-9]+)";
 
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[derive(Serialize, Deserialize, Clone, PartialEq)]
 pub struct ClientConfig {
     /// Base URL of the bracket server; empty until `register --server`.
     pub server: String,
@@ -32,6 +33,23 @@ pub struct ClientConfig {
     pub host_args: Vec<String>,
     pub join_args: Vec<String>,
     pub code_regex: String,
+}
+
+impl fmt::Debug for ClientConfig {
+    /// Like a derived `Debug`, with the secret key redacted.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ClientConfig")
+            .field("server", &self.server)
+            .field("secret_key_hex", &"<redacted>")
+            .field("engine_build", &self.engine_build)
+            .field("melee", &self.melee)
+            .field("iso", &self.iso)
+            .field("work_dir", &self.work_dir)
+            .field("host_args", &self.host_args)
+            .field("join_args", &self.join_args)
+            .field("code_regex", &self.code_regex)
+            .finish()
+    }
 }
 
 /// `play --iso {iso} --netplay host --np-server {relay} --record {mrpl} --slp auto --np-css

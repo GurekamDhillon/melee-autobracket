@@ -28,3 +28,5 @@ autobracket-server = { path = "../server", features = ["testkit"] }
 replay = { workspace = true, features = ["testkit"] }
 bracket.workspace = true
 tempfile.workspace = true
+reqwest.workspace = true
+tokio = { workspace = true, features = ["io-util"] }
