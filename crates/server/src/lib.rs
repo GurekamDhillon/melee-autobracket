@@ -14,7 +14,9 @@ pub mod config;
 pub mod db;
 pub mod judge;
 pub mod lifecycle;
+pub mod logging;
 pub mod resim;
+pub mod review;
 pub mod routes;
 pub mod state;
 #[cfg(feature = "testkit")]
@@ -58,13 +60,18 @@ pub async fn build_app(cfg: Config, resim: Arc<dyn Resim>) -> anyhow::Result<(Ro
         resim,
         wake: Arc::new(Notify::new()),
         tasks: Arc::default(),
+        rejections: Arc::default(),
+        started_at: db::now_unix(),
     };
 
     if state.cfg.worker_enabled {
         let st = state.clone();
         let worker = tokio::spawn(async move {
             if let Err(e) = worker::recover(&st).await {
-                eprintln!("worker: recovering interrupted judging failed: {e:#}");
+                tracing::error!(
+                    error = %logging::detail(format_args!("{e:#}")),
+                    "recovering interrupted judging failed"
+                );
             }
             worker::run(st).await;
         });

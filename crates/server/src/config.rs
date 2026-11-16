@@ -28,6 +28,10 @@ pub struct Config {
     pub accepted_builds: Vec<String>,
     #[serde(default = "default_upload_timeout_secs")]
     pub upload_timeout_secs: u64,
+    /// Seconds a `ready` set may go without activity (a room code, an upload, a counted game)
+    /// before the judging worker sends it to the organiser queue as `stalled`. 0 disables.
+    #[serde(default = "default_set_stall_secs")]
+    pub set_stall_secs: u64,
     #[serde(default)]
     pub strict_resim: bool,
     /// Largest accepted request body, in bytes.
@@ -67,6 +71,17 @@ pub enum VerifierMode {
     Off,
 }
 
+impl VerifierMode {
+    /// The mode as written in the configuration file.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            VerifierMode::InProcess => "in_process",
+            VerifierMode::External => "external",
+            VerifierMode::Off => "off",
+        }
+    }
+}
+
 impl Default for VerifierConfig {
     fn default() -> Self {
         VerifierConfig {
@@ -92,6 +107,7 @@ impl Config {
             verifier_keys: Vec::new(),
             accepted_builds: Vec::new(),
             upload_timeout_secs: default_upload_timeout_secs(),
+            set_stall_secs: default_set_stall_secs(),
             strict_resim: false,
             max_replay_bytes: default_max_replay_bytes(),
             rate_per_sec: default_rate_per_sec(),
@@ -177,6 +193,10 @@ fn default_upload_timeout_secs() -> u64 {
     120
 }
 
+fn default_set_stall_secs() -> u64 {
+    1800
+}
+
 fn default_max_replay_bytes() -> usize {
     16 * 1024 * 1024
 }
@@ -204,6 +224,7 @@ mod tests {
         assert_eq!(cfg.bind, "0.0.0.0:8080");
         assert_eq!(cfg.relay, "netplay.gsd.sh:51600");
         assert_eq!(cfg.upload_timeout_secs, 120);
+        assert_eq!(cfg.set_stall_secs, 1800);
         assert_eq!(cfg.max_replay_bytes, 16 * 1024 * 1024);
         assert_eq!((cfg.rate_per_sec, cfg.rate_burst), (20, 40));
         assert_eq!(cfg.verifier.mode, VerifierMode::Off);

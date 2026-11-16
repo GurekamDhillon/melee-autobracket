@@ -223,6 +223,18 @@ async fn four_player_double_elim_runs_to_champion() {
 }
 
 #[tokio::test]
+async fn matched_game_records_the_verifier_build() {
+    let (app, host, guest, event) =
+        two_player(TestApp::spawn_with(|_| {}, fake(vec![])).await).await;
+    play_game(&app, event, 0, 1, &host, &guest, 1).await;
+    let (state, verdict, _, resim, build) = game(&app, event, 0, 1).await;
+    assert_eq!(state, "counted");
+    assert_eq!(verdict, Some(Verdict::Verified));
+    assert_eq!(resim, Some(ResimOutcome::Match));
+    assert_eq!(build.as_deref(), Some("fake"));
+}
+
+#[tokio::test]
 async fn inexact_counts_and_is_quarantined() {
     let (app, host, guest, event) =
         two_player(TestApp::spawn_with(|_| {}, fake(vec![diverged()])).await).await;
@@ -269,7 +281,8 @@ async fn conflicting_uploads_go_to_queue() {
     );
     assert_eq!(judge_due(&app.state).await.unwrap(), 1);
 
-    let (state, verdict, slot, _, _) = game(&app, event, 0, 1).await;
+    let (state, verdict, slot, _, build) = game(&app, event, 0, 1).await;
+    assert_eq!(build, None, "never re-simulated");
     assert_eq!(state, "review");
     assert_eq!(verdict, Some(Verdict::Conflicted));
     assert_eq!(slot, None);
@@ -288,7 +301,8 @@ async fn single_upload_times_out_to_queue() {
     );
     assert_eq!(judge_due(&app.state).await.unwrap(), 1);
 
-    let (state, verdict, slot, _, _) = game(&app, event, 0, 1).await;
+    let (state, verdict, slot, _, build) = game(&app, event, 0, 1).await;
+    assert_eq!(build, None, "never re-simulated");
     assert_eq!(state, "review");
     assert_eq!(verdict, Some(Verdict::Single));
     assert_eq!(slot, None);
@@ -339,7 +353,8 @@ async fn illegal_stage_goes_to_queue() {
     );
     assert_eq!(judge_due(&app.state).await.unwrap(), 1);
 
-    let (state, verdict, slot, _, _) = game(&app, event, 0, 1).await;
+    let (state, verdict, slot, _, build) = game(&app, event, 0, 1).await;
+    assert_eq!(build, None, "never re-simulated");
     assert_eq!(state, "review");
     assert_eq!(verdict, Some(Verdict::Illegal("stage".into())));
     assert_eq!(slot, None);
@@ -358,8 +373,17 @@ async fn verifier_off_is_peer_only() {
     assert_eq!(verdict, Some(Verdict::PeerOnly));
     assert_eq!(slot, Some(1));
     assert_eq!(resim, Some(ResimOutcome::Skipped));
-    assert_eq!(build.as_deref(), Some("none"));
+    // The verifier is off: nothing was re-simulated, so no build is recorded.
+    assert_eq!(build, None);
     assert_eq!(set_row(&app, event, 0).await, ("ready".into(), 0, 1));
+    let (first_upload, judged): (i64, Option<i64>) =
+        sqlx::query_as("SELECT first_upload_at, judged_at FROM games WHERE event_id = ?")
+            .bind(event)
+            .fetch_one(&app.state.db)
+            .await
+            .unwrap();
+    let judged = judged.expect("judged_at");
+    assert!(judged >= first_upload && judged <= now_unix(), "{judged}");
     assert!(queue_reasons(&app, event).await.is_empty());
     assert!(quarantine_kinds(&app).await.is_empty());
 }
@@ -373,10 +397,12 @@ async fn unavailable_verifier_is_peer_only() {
     .await;
     let (app, host, guest, event) = two_player(app).await;
     play_game(&app, event, 0, 1, &host, &guest, 1).await;
-    let (state, verdict, _, resim, _) = game(&app, event, 0, 1).await;
+    let (state, verdict, _, resim, build) = game(&app, event, 0, 1).await;
     assert_eq!(state, "counted");
     assert_eq!(verdict, Some(Verdict::PeerOnly));
     assert_eq!(resim, Some(ResimOutcome::Unavailable("no disc".into())));
+    // The engine never ran, so no build is recorded.
+    assert_eq!(build, None);
 }
 
 #[tokio::test]
@@ -407,7 +433,7 @@ async fn game_never_counted_twice() {
         &Verdict::PeerOnly,
         Some(0),
         &ResimOutcome::Skipped,
-        "none",
+        Some("none"),
     )
     .await
     .unwrap();

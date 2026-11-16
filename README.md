@@ -9,8 +9,8 @@ What sets it apart is that results are proven, not reported. Both players upload
 of every game; the server compares the two, checks them against the event's ruleset, derives
 the winner from the replay itself, and re-simulates it with
 `GurekamDhillon/melee`, a native Rust port of
-Melee that replays a `.slp` deterministically and headless, with no GPU, at roughly 40x
-realtime. A bracket that cannot be lied to is also the honest argument for self-hosting: an
+Melee that replays a `.slp` deterministically and headless, with no GPU. On a small VPS it
+re-simulates at about 19-22x realtime, roughly 6 seconds for a typical full game. A bracket that cannot be lied to is also the honest argument for self-hosting: an
 organiser running their own instance gets result integrity, not just control. Replays that
 fail to re-simulate exactly are kept, with their divergence point and engine build, as a
 corpus for fixing the port.
@@ -68,9 +68,33 @@ autobracket-client play 1
 passed to the opponent through the server), uploads the replay after every game, and keeps
 going until you are eliminated or win the event.
 
+The engine command lines are templates in the client's config (`host_args`, `join_args`).
+Two changes are needed today:
+
+- **Pick fighters and stage with `--match`.** An engine bug in the netplay character select
+  (its name-entry screen indexes past the end of a name and panics) crashes both peers at
+  once, because the menus run in lockstep. Until the fix lands upstream, bracket games start
+  with `--match` instead of `--np-css --quit-after-matches 1`: the host's template gets
+  `"--match", "<fighter>,<stage>"` (e.g. `"--match", "falcon,32"`) and the guest's
+  `"--match", "<fighter>"`.
+- **No display, no window.** On a machine without a display (a server, a container, a
+  remote shell) the engine exits at once unless both templates also get
+  `"--headless", "--no-audio"`. Players at a desktop do not need them.
+
+If your opponent never shows up, report it so the organiser sees it straight away:
+`POST /v1/sets/{event}/{set}/no-show` with an optional `{"detail": "..."}` note (at most 200
+characters, no control characters). The set
+goes to the organiser queue (reason `no-show`) and both players are told to wait.
+
 ### When a set needs a human
 
-Games that cannot be counted automatically land in the organiser's queue:
+Games that cannot be counted automatically land in the organiser's queue, and so do sets
+that are not being played: a player can report a no-show (reason `no-show`, with the
+reporting slot and their note in `detail`), and a `ready` set with no activity (no room code,
+upload or counted game) for `set_stall_secs` (default 1800; 0 turns the check off) is sent
+there as `stalled`, checked about every 30 seconds. Inactivity counts from the server's own
+start at the earliest, so a restart after downtime does not flag every set at once. Both players then see the set as waiting
+for the organiser.
 
 ```sh
 autobracket admin --server URL --key-file to.key queue list
@@ -80,7 +104,10 @@ autobracket admin --server URL --key-file to.key queue resolve 7 dq --slot 1
 ```
 
 `award` gives the set to a slot (slot 0 is the set's host), `replay` voids the game so it is
-played again, and `dq` disqualifies the player in that slot from the event.
+played again (or, for a no-show, gives the players another try), and `dq` disqualifies the
+player in that slot from the event. A set decided by `award` or a DQ is listed in the event's
+`decided_by` and tagged "awarded" or "DQ" on the bracket page, next to the games played
+before the decision (or in place of a 0-0 score).
 
 ## Verdicts
 
@@ -97,9 +124,17 @@ Every game gets one verdict. The server never takes a player's word for the winn
 | Undecided | The replay has no clear winner. | No: TO queue |
 | Inexact | Only with `strict_resim = true`: a VerifiedInexact game is sent to a human instead of counting. | No: TO queue, quarantined |
 
-Uploads "agree" when the `raw` element of the two `.slp` files is identical; the whole files
-differ because each peer stamps its own start time. Port 1 is always the set's host and port
-2 the guest, because a netplay replay carries no identity.
+Uploads "agree" when the `raw` element of the two `.slp` files is identical. In every real run
+so far the two peers' files were byte-identical as a whole, but only the `raw` element (the
+game's event stream) is compared: the metadata around it, such as the start time, is written
+by each peer's exporter and may differ between versions or clocks without the game being
+any different. Port 1 is always the set's host and port 2 the guest, because a netplay replay
+carries no identity.
+
+A game records a verifier build only when the engine actually re-simulated it (outcome
+Match, Diverged, EarlyEnd or Crashed). Games decided before re-simulation (Single, Conflicted,
+Illegal, Undecided) and games whose re-simulation was skipped (verifier off) or unavailable
+record none. Every verdict records the time it was applied (`judged_at`).
 
 Two players colluding can still produce any result they like, exactly as they could by
 throwing the match.
@@ -111,7 +146,8 @@ Set in the `[verifier]` table of the config:
 - `off` (default): no re-simulation. Games count on peer agreement and the ruleset alone
   (verdict PeerOnly).
 - `in_process`: the server runs `melee slpcheck` itself, `jobs` at a time, each limited to
-  `timeout_secs`. Needs `engine` and `iso`.
+  `timeout_secs`. Needs `engine` and `iso`: the server refuses to start in this mode unless
+  the engine runs (`melee version`) and the disc image is a readable file of at least 1 GiB.
 - `external`: the server queues re-simulations and an `autobracket verify-worker` running
   elsewhere does them:
 
@@ -141,6 +177,21 @@ sudo install -m 644 deploy/autobracket.service /etc/systemd/system/
 sudo systemctl daemon-reload
 sudo systemctl enable --now autobracket
 ```
+
+### Logs
+
+The server logs to stderr (the journal, under systemd), one plain-text line per event with
+`key=value` fields: start-up settings, registrations, events created, started and completed,
+sign-ups, room codes posted (never the code itself), uploads (size, SHA-256 prefix, client
+build), verdicts (with judging and re-simulation times in ms), sets decided and how, queue
+items opened and resolved, no-shows, stalled sets and verifier jobs. Keys appear only as their
+first 8 characters; secret keys, room codes and request bodies are never logged. Text that
+comes from outside (build strings, event names, engine and error messages) is escaped
+(`\n`, `\u{1b}`, ...) so it cannot start a line of its own, and the server refuses control
+characters in engine builds, the `x-ab-build` header, event names and no-show notes. Requests
+refused for a bad signature are counted and summarised at most once a minute. Set the level
+with `AUTOBRACKET_LOG` (default `info`; e.g. `AUTOBRACKET_LOG=debug`, or any `tracing`
+filter such as `autobracket_server=debug,info`).
 
 Back up a tournament by copying `/var/lib/autobracket`. Because the unit uses `DynamicUser`
 and `ProtectHome`, an `in_process` verifier's `engine` and `iso` must live somewhere outside

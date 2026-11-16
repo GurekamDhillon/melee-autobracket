@@ -20,6 +20,7 @@ type Row = (
     Option<String>,
     Option<String>,
     Option<String>,
+    Option<i64>,
 );
 
 /// `GET /v1/quarantine`: every quarantined game, oldest first.
@@ -29,13 +30,13 @@ pub async fn list(
 ) -> Result<Json<Vec<QuarantineItem>>, ApiError> {
     let rows: Vec<Row> = sqlx::query_as(
         "SELECT q.id, q.game_id, q.kind, q.created_at, g.verdict_json, g.resim_json,
-                g.verifier_build
+                g.verifier_build, g.judged_at
          FROM quarantine q LEFT JOIN games g ON g.id = q.game_id ORDER BY q.id",
     )
     .fetch_all(&state.db)
     .await?;
     let mut items = Vec::with_capacity(rows.len());
-    for (id, game_id, kind, created_at, verdict, resim, verifier_build) in rows {
+    for (id, game_id, kind, created_at, verdict, resim, verifier_build, judged_at) in rows {
         let client_builds: Vec<String> =
             sqlx::query_scalar("SELECT client_build FROM uploads WHERE game_id = ? ORDER BY slot")
                 .bind(game_id)
@@ -50,6 +51,7 @@ pub async fn list(
             verifier_build,
             client_builds,
             created_at,
+            judged_at,
         });
     }
     Ok(Json(items))
@@ -76,7 +78,7 @@ pub async fn replay(
     let bytes = match tokio::fs::read(&stored).await {
         Ok(bytes) => bytes,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            eprintln!("quarantine {id}: replay {stored} is missing");
+            tracing::warn!(quarantine = id, path = %crate::logging::detail(&stored), "quarantined replay is missing");
             return Err(ApiError::new(
                 StatusCode::NOT_FOUND,
                 "replay file is missing",

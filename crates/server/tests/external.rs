@@ -203,9 +203,9 @@ async fn job_round_trip() {
     );
 }
 
-/// Each game is labelled with the build that judged it: the build a verifier posted for
-/// its own job, or `"external"` when it was judged without a re-simulation, never a build
-/// left over from an earlier game judged by the same task.
+/// Each game is labelled with the build that re-simulated it: the build a verifier posted
+/// for its own job, or none when it was judged without a re-simulation, never a build left
+/// over from an earlier game judged by the same task.
 #[tokio::test]
 async fn verifier_build_belongs_to_its_game() {
     let vk = SigningKey::generate(&mut OsRng);
@@ -281,11 +281,7 @@ async fn verifier_build_belongs_to_its_game() {
     assert_eq!(game(&app, moot).await, ("void".into(), None, None));
     assert_eq!(
         game(&app, single).await,
-        (
-            "review".into(),
-            Some(Verdict::Single),
-            Some("external".into())
-        )
+        ("review".into(), Some(Verdict::Single), None)
     );
     assert_eq!(
         game(&app, ordinary).await,

@@ -7,10 +7,11 @@ use proto::{EventSummary, EventView, Ruleset, SignupReq};
 use serde_json::json;
 use sqlx::SqlitePool;
 
-use super::{parse_body, ApiError};
+use super::{check_text, parse_body, ApiError, MAX_BUILD_CHARS};
 use crate::auth::Player;
 use crate::db::begin_write;
 use crate::lifecycle::{load_bracket, LifecycleError, MAX_ENTRANTS};
+use crate::logging::label;
 use crate::state::AppState;
 
 /// `GET /v1/events`: every event, oldest first.
@@ -43,6 +44,7 @@ pub async fn signup(
     player: Player,
 ) -> Result<StatusCode, ApiError> {
     let body: SignupReq = parse_body(&player.body)?;
+    check_text("engine_build", &body.engine_build, MAX_BUILD_CHARS)?;
 
     let mut tx = begin_write(&state.db).await?;
     let event_state: Option<String> = sqlx::query_scalar("SELECT state FROM events WHERE id = ?")
@@ -96,6 +98,13 @@ pub async fn signup(
     .execute(&mut *tx)
     .await?;
     tx.commit().await?;
+    tracing::info!(
+        event = id,
+        tag = %label(&player.tag),
+        seed = count,
+        engine_build = %label(&body.engine_build),
+        "signed up"
+    );
     Ok(StatusCode::CREATED)
 }
 
@@ -134,6 +143,18 @@ pub(super) async fn event_view(db: &SqlitePool, id: i64) -> Result<EventView, Ap
         .map(|(set_id, w0, w1)| Ok((to_int(set_id)?, [to_int(w0)?, to_int(w1)?])))
         .collect::<Result<_, ApiError>>()?;
 
+    let decided: Vec<(i64, String)> = sqlx::query_as(
+        "SELECT set_id, decided_by FROM sets
+         WHERE event_id = ? AND decided_by IS NOT NULL ORDER BY set_id",
+    )
+    .bind(id)
+    .fetch_all(db)
+    .await?;
+    let decided_by = decided
+        .into_iter()
+        .map(|(set_id, how)| Ok((to_int(set_id)?, how)))
+        .collect::<Result<_, ApiError>>()?;
+
     let entrants = i64::try_from(tags.len()).unwrap_or(i64::MAX);
     Ok(EventView {
         summary: summary(id, name, state, entrants)?,
@@ -141,6 +162,7 @@ pub(super) async fn event_view(db: &SqlitePool, id: i64) -> Result<EventView, Ap
         tags,
         bracket,
         scores,
+        decided_by,
     })
 }
 

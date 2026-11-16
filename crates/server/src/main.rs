@@ -8,12 +8,14 @@ use std::time::Duration;
 
 use anyhow::Context;
 use autobracket_server::config::VerifierMode;
+use autobracket_server::logging::{clean, detail, label};
 use autobracket_server::resim::EXTERNAL_RESULT_TIMEOUT;
 use autobracket_server::{
     build_app, verify_worker, Config, ExternalResim, NoResim, Resim, Slpcheck,
 };
 use clap::{Parser, Subcommand};
 use proto::SigningKey;
+use tracing_subscriber::EnvFilter;
 
 mod admin_cli;
 
@@ -61,8 +63,23 @@ enum Cmd {
     },
 }
 
+/// Environment variable holding the log filter (`tracing` directives, e.g. `debug` or
+/// `autobracket_server=debug,info`); `info` when unset or invalid.
+const LOG_ENV: &str = "AUTOBRACKET_LOG";
+
+/// Logs to stderr, one plain-text line per event.
+fn init_logging() {
+    let filter = EnvFilter::try_from_env(LOG_ENV).unwrap_or_else(|_| EnvFilter::new("info"));
+    tracing_subscriber::fmt()
+        .with_env_filter(filter)
+        .with_writer(std::io::stderr)
+        .with_ansi(false)
+        .init();
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    init_logging();
     match Cli::parse().cmd {
         Cmd::Serve { config } => serve(Config::load(&config)?).await,
         Cmd::Keygen { out } => keygen(&out),
@@ -110,11 +127,27 @@ async fn resim_for(cfg: &Config) -> anyhow::Result<Arc<dyn Resim>> {
 async fn serve(cfg: Config) -> anyhow::Result<()> {
     let bind = cfg.bind.clone();
     let resim = resim_for(&cfg).await?;
-    let (app, _state) = build_app(cfg, resim).await?;
+    let (app, state) = build_app(cfg, resim).await?;
     let listener = tokio::net::TcpListener::bind(&bind)
         .await
         .with_context(|| format!("binding {bind}"))?;
-    println!("listening on {}", listener.local_addr()?);
+    let addr = listener.local_addr()?;
+    let cfg = &state.cfg;
+    let ruleset = serde_json::to_string(&cfg.ruleset).context("encoding the ruleset")?;
+    tracing::info!(
+        bind = %addr,
+        verifier = %cfg.verifier.mode.as_str(),
+        verifier_build = %label(&state.resim.build()),
+        db = %detail(cfg.db_path.display()),
+        relay = %label(&cfg.relay),
+        to_keys = cfg.to_keys.len(),
+        verifier_keys = cfg.verifier_keys.len(),
+        set_stall_secs = cfg.set_stall_secs,
+        ruleset = %clean(&ruleset, 2000),
+        "server started"
+    );
+    // Kept on stdout as the readiness line scripts wait for.
+    println!("listening on {addr}");
     axum::serve(
         listener,
         app.into_make_service_with_connect_info::<SocketAddr>(),

@@ -19,6 +19,10 @@ verifier_keys = []
 accepted_builds = []
 # Seconds to wait for the second player's replay before a game is judged on one upload (verdict Single).
 upload_timeout_secs = 120
+# Seconds a ready set may go without activity (a room code, an upload, a counted game) before
+# the server sends it to the TO queue as "stalled", so a no-show nobody reported still reaches
+# the organiser. 0 disables the check. Players can also report one at once (POST .../no-show).
+set_stall_secs = 1800
 # Send games whose re-simulation diverges to the TO queue (verdict Inexact) instead of counting them.
 strict_resim = false
 # Largest accepted request body (a replay upload), in bytes.

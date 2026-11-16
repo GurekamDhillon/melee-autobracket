@@ -6,8 +6,8 @@ use autobracket_server::testkit::{play_game, TestApp, TestPlayer};
 use autobracket_server::worker::judge_due;
 use bracket::{Format, SetState, Slot};
 use proto::{
-    EventSummary, Next, QuarantineItem, QueueItem, RekeyReq, ResimOutcome, Resolve, SigningKey,
-    Verdict,
+    EventSummary, EventView, Next, QuarantineItem, QueueItem, RekeyReq, ResimOutcome, Resolve,
+    SigningKey, Verdict,
 };
 use rand::rngs::OsRng;
 use replay::testkit::simple_game;
@@ -138,6 +138,13 @@ async fn set_with(app: &TestApp, event: i64, seed: u32) -> u32 {
         .unwrap_or_else(|| panic!("no ready set holds seed {seed}"))
 }
 
+/// `EventView::decided_by` of `event`.
+async fn decided_by(app: &TestApp, event: i64) -> Vec<(u32, String)> {
+    let res = app.as_to().get(&format!("/v1/events/{event}")).await;
+    assert_eq!(res.status(), StatusCode::OK);
+    res.json::<EventView>().await.unwrap().decided_by
+}
+
 async fn players(app: &TestApp, n: usize) -> Vec<TestPlayer> {
     let mut out = Vec::new();
     for i in 0..n {
@@ -196,6 +203,11 @@ async fn award_advances_bracket() {
     );
     assert_eq!(winner(&app, event, semi_b).await, 1);
     assert_eq!(set_row(&app, event, semi_b).await.0, "done");
+    // The played semi is not listed; the awarded one is.
+    assert_eq!(
+        decided_by(&app, event).await,
+        vec![(semi_b, "award".into())]
+    );
     assert_eq!(game_states(&app, event, semi_b).await, vec!["void"]);
     assert!(queue(&app).await.is_empty());
     let json: String = sqlx::query_scalar("SELECT resolution_json FROM queue WHERE id = ?")
@@ -216,6 +228,10 @@ async fn award_advances_bracket() {
     assert_eq!(seats(&app, event, final_set).await, [0, s1]);
     win_set(&app, event, final_set, &refs, s1).await;
     assert_eq!(next(&ps[s1 as usize], event).await, Next::Champion);
+    assert_eq!(
+        decided_by(&app, event).await,
+        vec![(semi_b, "award".into())]
+    );
 }
 
 #[tokio::test]
@@ -303,6 +319,9 @@ async fn dq_awards_current_and_future_sets() {
     };
     assert_eq!(losers.slots[winner as usize], Slot::Entrant(3));
     assert_eq!(set_row(&app, event, losers.id).await, ("done".into(), 0, 0));
+    let mut expected = vec![(with_1, "dq".to_string()), (losers.id, "dq".to_string())];
+    expected.sort();
+    assert_eq!(decided_by(&app, event).await, expected);
     assert_eq!(next(&ps[1], event).await, Next::Eliminated);
     assert!(queue(&app).await.is_empty());
 }
@@ -369,6 +388,10 @@ async fn double_dq_set_is_decided_and_queued() {
     let final_set = bracket.sets.iter().find(|s| s.winner_to.is_none()).unwrap();
     assert_eq!(final_set.state, SetState::Done { winner: 0 });
     assert!(bracket.is_complete());
+    assert_eq!(
+        decided_by(&app, event).await,
+        vec![(final_set.id, "double-dq".into())]
+    );
     let items = queue(&app).await;
     assert_eq!(items.len(), 1);
     assert_eq!(items[0].reason, "double-dq");
@@ -570,9 +593,15 @@ async fn quarantine_serves_replay_bytes() {
     assert_eq!(q.kind, "Conflicted");
     assert_eq!(q.verdict, Some(Verdict::Conflicted));
     assert_eq!(q.resim, Some(ResimOutcome::Skipped));
-    assert_eq!(q.verifier_build.as_deref(), Some("none"));
+    // Never re-simulated, so no verifier build is recorded.
+    assert_eq!(q.verifier_build, None);
     assert_eq!(q.client_builds, vec!["b1", "b1"]);
     assert!(q.created_at > 0);
+    let judged = q.judged_at.expect("judged_at");
+    assert!(
+        judged >= q.created_at - 5 && judged <= q.created_at + 5,
+        "{judged}"
+    );
 
     for (slot, file) in [(0, &host_file), (1, &guest_file)] {
         let res = app
@@ -611,6 +640,9 @@ async fn quarantine_single_upload_has_no_guest_replay() {
         .unwrap();
     assert_eq!(items[0].kind, "Single");
     assert_eq!(items[0].client_builds, vec!["b1"]);
+    // The worker does not run the engine on a lone upload.
+    assert_eq!(items[0].verifier_build, None);
+    assert!(items[0].judged_at.is_some());
     let to = app.as_to();
     for (slot, status) in [(0, StatusCode::OK), (1, StatusCode::NOT_FOUND)] {
         let path = format!("/v1/quarantine/{}/replay/{slot}", items[0].id);
@@ -651,17 +683,20 @@ async fn late_counting_verdict_for_decided_set_is_void() {
         &Verdict::PeerOnly,
         Some(0),
         &ResimOutcome::Skipped,
-        "none",
+        Some("none"),
     )
     .await
     .unwrap();
-    let (state, verdict, build): (String, Option<String>, Option<String>) =
-        sqlx::query_as("SELECT state, verdict_json, verifier_build FROM games WHERE id = ?")
-            .bind(game_id)
-            .fetch_one(&app.state.db)
-            .await
-            .unwrap();
+    let (state, verdict, build, judged_at): (String, Option<String>, Option<String>, Option<i64>) =
+        sqlx::query_as(
+            "SELECT state, verdict_json, verifier_build, judged_at FROM games WHERE id = ?",
+        )
+        .bind(game_id)
+        .fetch_one(&app.state.db)
+        .await
+        .unwrap();
     assert_eq!(state, "void");
+    assert!(judged_at.is_some(), "a late verdict is still timestamped");
     assert_eq!(
         serde_json::from_str::<Verdict>(&verdict.unwrap()).unwrap(),
         Verdict::PeerOnly
@@ -688,7 +723,7 @@ async fn late_noncounting_verdict_does_not_reopen_set() {
         &Verdict::Conflicted,
         None,
         &ResimOutcome::Skipped,
-        "none",
+        None,
     )
     .await
     .unwrap();
