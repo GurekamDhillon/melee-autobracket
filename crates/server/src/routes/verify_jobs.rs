@@ -22,6 +22,8 @@ const CLAIM_TTL_SECS: i64 = 300;
 /// `POST /v1/verify/claim`: takes the oldest job that is queued, or whose claim has gone
 /// stale. `200 VerifyJob`, or `204` when there is none.
 pub async fn claim(State(state): State<AppState>, v: Verifier) -> Result<Response, ApiError> {
+    // A verifier asking for work is online, whether or not there is a job for it.
+    state.resim.verifier_seen();
     let now = now_unix();
     let mut tx = begin_write(&state.db).await?;
     let job: Option<(i64, i32)> = sqlx::query_as(

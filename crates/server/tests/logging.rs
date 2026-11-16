@@ -346,3 +346,48 @@ async fn stored_text_cannot_forge_log_lines() {
         "a forged set decided line: {lines:?}"
     );
 }
+
+/// A configured verifier that cannot check games (not strict): every such game gets its own
+/// warning, and the first one after start-up an error-level line too.
+#[tokio::test]
+async fn unavailable_verifier_is_an_error_once() {
+    use autobracket_server::testkit::FakeResim;
+    use proto::ResimOutcome;
+    use std::collections::VecDeque;
+
+    let capture = Capture::default();
+    let subscriber = tracing_subscriber::fmt()
+        .with_writer(capture.clone())
+        .with_ansi(false)
+        .with_max_level(tracing::Level::INFO)
+        .finish();
+    let _guard = tracing::subscriber::set_default(subscriber);
+
+    let unavailable = || ResimOutcome::Unavailable("no disc".into());
+    let resim = Arc::new(FakeResim(Mutex::new(VecDeque::from([
+        unavailable(),
+        unavailable(),
+    ]))));
+    let app = TestApp::spawn_with(
+        |c| c.verifier.mode = autobracket_server::config::VerifierMode::InProcess,
+        resim,
+    )
+    .await;
+    let host = app.player("Alice").await;
+    let guest = app.player("Bob").await;
+    let event = app
+        .started_event(Format::SingleElim, &[&host, &guest])
+        .await;
+    play_game(&app, event, 0, 1, &host, &guest, 1).await;
+    play_game(&app, event, 0, 2, &host, &guest, 1).await;
+
+    let lines = capture.lines();
+    let warnings = lines
+        .iter()
+        .filter(|l| l.contains(" WARN ") && l.contains("verifier unavailable"))
+        .count();
+    assert_eq!(warnings, 2, "{lines:#?}");
+    let errors: Vec<&String> = lines.iter().filter(|l| l.contains(" ERROR ")).collect();
+    assert_eq!(errors.len(), 1, "{lines:#?}");
+    assert!(errors[0].contains("peer-only"), "{}", errors[0]);
+}

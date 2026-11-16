@@ -211,12 +211,13 @@ pub async fn no_show(
     }
     let detail = review::no_show_detail(seat.slot, &player.tag, req.detail.as_deref());
     let mut journal = Journal::default();
-    review::send_to_review(
+    review::send_to_review_reported(
         &mut tx,
         event,
         narrow(set)?,
         NO_SHOW,
         Some(&detail),
+        Some(seat.slot),
         &mut journal,
     )
     .await?;

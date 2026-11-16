@@ -1,5 +1,5 @@
 # autobracket server configuration. Copy to /etc/autobracket/autobracket.toml.
-# Every value below is the default except to_keys, db_path and replay_dir.
+# Every value below is the default except to_keys, allow_no_organiser, db_path and replay_dir.
 
 # Address and port the HTTP server listens on.
 bind = "0.0.0.0:8080"
@@ -11,11 +11,17 @@ replay_dir = "/var/lib/autobracket/replays"
 relay = "netplay.gsd.sh:51600"
 # Require an invite code (from `autobracket admin invite new`) to register a player key.
 require_invite = false
-# Tournament organiser public keys, lowercase hex (printed by `autobracket keygen`). Required.
+# Tournament organiser public keys, lowercase hex (printed by `autobracket keygen`), e.g.
+# to_keys = ["<64 hex characters>"]. The server refuses to start with none...
 to_keys = []
+# ...unless this is true. It is set here only so this file runs as-is for a first look; with no
+# organiser key nobody can create or run events. Delete this line once to_keys holds your key.
+allow_no_organiser = true
 # Public keys of external verifier workers, lowercase hex (for verifier mode "external").
 verifier_keys = []
-# Engine builds clients may sign up with; an empty list accepts any build.
+# Engine builds clients may sign up with, and the verifier must run (it refuses to start, or
+# an external verifier's results are not used, otherwise). An entry matches a build string
+# exactly or its version part before the first "+". An empty list accepts any build.
 accepted_builds = []
 # Seconds to wait for the second player's replay before a game is judged on one upload (verdict Single).
 upload_timeout_secs = 120
@@ -23,7 +29,9 @@ upload_timeout_secs = 120
 # the server sends it to the TO queue as "stalled", so a no-show nobody reported still reaches
 # the organiser. 0 disables the check. Players can also report one at once (POST .../no-show).
 set_stall_secs = 1800
-# Send games whose re-simulation diverges to the TO queue (verdict Inexact) instead of counting them.
+# Send games whose re-simulation diverges to the TO queue (verdict Inexact) instead of counting
+# them, and games the verifier could not check (verdict VerifierUnavailable) instead of counting
+# them on the two players' agreement alone (PeerOnly).
 strict_resim = false
 # Largest accepted request body (a replay upload), in bytes.
 max_replay_bytes = 16777216
@@ -33,15 +41,19 @@ rate_per_sec = 20
 rate_burst = 40
 
 [verifier]
-# "in_process" runs the engine here, "external" waits for `autobracket verify-worker`, "off" skips re-simulation.
+# "in_process" runs the engine here, "external" waits for `autobracket verify-worker`, "off" skips
+# re-simulation (games count on the two players' agreement alone).
 mode = "off"
-# Path to the melee engine binary (in_process mode).
+# Path to the melee engine binary. Only with mode = "in_process": set with any other mode, the
+# server refuses to start, so a filled-in path never runs silently unused.
 engine = ""
-# Path to your own NTSC 1.02 disc image (in_process mode); never distributed with this project.
+# Path to your own NTSC 1.02 disc image (only with mode = "in_process"); never distributed with
+# this project.
 iso = ""
 # Seconds one re-simulation may run before it is stopped and recorded as crashed.
 timeout_secs = 120
-# Re-simulations run at the same time.
+# Games judged at the same time; each may run (or, in external mode, wait for) one
+# re-simulation. At least 1.
 jobs = 2
 
 [ruleset]

@@ -70,3 +70,78 @@ async fn migration_0002_applies_to_a_populated_0001_database() {
     pool.close().await;
     db::open(&path).await.unwrap();
 }
+
+/// A database at the 0002 schema with a game, a queue item and a verifier job, then opened by
+/// the current server: 0003 adds the judging attempt count, the evidence and the no-show
+/// reporter, and the indexes.
+#[tokio::test]
+async fn migration_0003_applies_to_a_populated_0002_database() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("old.sqlite");
+
+    let mut old = sqlx::migrate!("./migrations");
+    assert!(old.migrations.len() >= 3, "expected 0001 to 0003");
+    old.migrations = Cow::Owned(old.migrations[..2].to_vec());
+    assert_eq!(old.migrations[1].version, 2);
+    let opts = SqliteConnectOptions::new()
+        .filename(&path)
+        .create_if_missing(true);
+    let pool = SqlitePoolOptions::new().connect_with(opts).await.unwrap();
+    old.run(&pool).await.unwrap();
+    for sql in [
+        "INSERT INTO events (id, name, format, ruleset_json, state, bracket_json, created_at)
+         VALUES (1, 'Old', 'single_elim', '{}', 'running', NULL, 1)",
+        "INSERT INTO sets (event_id, set_id, state, room_code, wins0, wins1, updated_at)
+         VALUES (1, 0, 'review', NULL, 0, 0, 5)",
+        "INSERT INTO games (id, event_id, set_id, game_no, state, verdict_json, first_upload_at,
+                            judged_at)
+         VALUES (1, 1, 0, 1, 'review', '\"Single\"', 1, 2)",
+        "INSERT INTO queue (id, event_id, set_id, game_id, reason, state, created_at, detail)
+         VALUES (1, 1, 0, 1, 'Single', 'open', 2, NULL),
+                (2, 1, 0, NULL, 'no-show', 'open', 3, 'reported by slot 0 (A)')",
+        "INSERT INTO resim_jobs (id, game_id, path, replay_last_frame, state)
+         VALUES (1, 1, '/r.slp', 10, 'done')",
+    ] {
+        sqlx::query(sql).execute(&pool).await.unwrap();
+    }
+    pool.close().await;
+
+    let pool = db::open(&path).await.unwrap();
+    let (attempts, evidence, judged_at): (i64, Option<String>, Option<i64>) =
+        sqlx::query_as("SELECT judge_attempts, evidence_json, judged_at FROM games")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!((attempts, evidence, judged_at), (0, None, Some(2)));
+    let reporters: Vec<(i64, Option<i64>, Option<String>)> =
+        sqlx::query_as("SELECT id, reporter_slot, detail FROM queue ORDER BY id")
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+    assert_eq!(
+        reporters,
+        vec![
+            (1, None, None),
+            (2, None, Some("reported by slot 0 (A)".into()))
+        ]
+    );
+    let indexes: Vec<String> = sqlx::query_scalar(
+        "SELECT name FROM sqlite_master WHERE type = 'index' AND name LIKE 'core_%' ORDER BY name",
+    )
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        indexes,
+        vec![
+            "core_games_set",
+            "core_games_state",
+            "core_queue_state",
+            "core_resim_jobs_state"
+        ]
+    );
+
+    // Opening again is a no-op.
+    pool.close().await;
+    db::open(&path).await.unwrap();
+}

@@ -12,8 +12,8 @@ use std::os::unix::fs::DirBuilderExt;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::OnceLock;
-use std::time::Duration;
+use std::sync::{Mutex, OnceLock};
+use std::time::{Duration, Instant};
 
 use anyhow::{bail, Context};
 use async_trait::async_trait;
@@ -26,16 +26,26 @@ use tokio::sync::Notify;
 
 #[async_trait]
 pub trait Resim: Send + Sync {
-    /// Re-simulates the replay at `slp` and compares it with the recording.
+    /// Re-simulates the replay at `slp` and compares it with the recording. A failure of the
+    /// checking machinery itself is reported as `Unavailable`.
     async fn check(&self, slp: &Path, replay_last_frame: i32) -> ResimOutcome;
     /// Identifies the engine build doing the checking.
     fn build(&self) -> String;
 
-    /// [`check`](Resim::check), together with the build that did that check. By default
-    /// that is [`build`](Resim::build); a verifier whose checks run elsewhere
-    /// ([`ExternalResim`]) reports the build that ran this one.
-    async fn check_with_build(&self, slp: &Path, replay_last_frame: i32) -> (ResimOutcome, String) {
-        (self.check(slp, replay_last_frame).await, self.build())
+    /// What the judging worker calls: [`check`](Resim::check), together with the build that
+    /// did that check. By default that is [`build`](Resim::build); a verifier whose checks run
+    /// elsewhere ([`ExternalResim`]) reports the build that ran this one.
+    ///
+    /// `Err` is an internal error of this server (a database error, no scratch directory, an
+    /// engine that cannot be started any more): the game was not checked and should be judged
+    /// again later. It is never a verdict on the replay, and never "no verifier" either
+    /// (`Unavailable`, which may count the game unchecked).
+    async fn check_with_build(
+        &self,
+        slp: &Path,
+        replay_last_frame: i32,
+    ) -> anyhow::Result<(ResimOutcome, String)> {
+        Ok((self.check(slp, replay_last_frame).await, self.build()))
     }
 
     /// Hands the verifier the opened store; `build_app` calls it once at start-up, before
@@ -47,6 +57,10 @@ pub trait Resim: Send + Sync {
 
     /// Tells the verifier an external result was just recorded (by the result route).
     fn result_posted(&self) {}
+
+    /// Tells the verifier an external verifier just called the server (the claim route,
+    /// whether or not there was a job): it is online.
+    fn verifier_seen(&self) {}
 }
 
 /// A verifier that checks nothing.
@@ -176,14 +190,12 @@ async fn vanilla_spawn(slp: &Path) -> bool {
         .unwrap_or(false)
 }
 
-#[async_trait]
-impl Resim for Slpcheck {
-    async fn check(&self, slp: &Path, replay_last_frame: i32) -> ResimOutcome {
+impl Slpcheck {
+    /// Runs the engine on the replay at `slp`. `Err` when the run could not be set up here
+    /// (no scratch directory, the engine cannot be started): see [`Resim::check_with_build`].
+    pub async fn run(&self, slp: &Path, replay_last_frame: i32) -> anyhow::Result<ResimOutcome> {
         // `--csv` appends and only writes a header to an empty file: every run gets a fresh one.
-        let dir = match ScratchDir::create() {
-            Ok(dir) => dir,
-            Err(e) => return ResimOutcome::Unavailable(format!("cannot create temp dir: {e}")),
-        };
+        let dir = ScratchDir::create().context("creating a scratch directory for the engine")?;
         let csv_path = dir.path().join("slpcheck.csv");
 
         let mut command = Command::new(&self.engine);
@@ -209,7 +221,7 @@ impl Resim for Slpcheck {
             .spawn()
         {
             Ok(child) => child,
-            Err(e) => return ResimOutcome::Unavailable(format!("cannot start engine: {e}")),
+            Err(e) => bail!("cannot start the engine {}: {e}", self.engine.display()),
         };
 
         let stderr = child.stderr.take();
@@ -221,40 +233,68 @@ impl Resim for Slpcheck {
             Ok((Ok(status), tail)) => (status, tail),
             Ok((Err(e), _)) => {
                 let _ = child.kill().await;
-                return ResimOutcome::Crashed(format!("waiting for engine: {e}"));
+                return Ok(ResimOutcome::Crashed(format!("waiting for engine: {e}")));
             }
             Err(_) => {
                 let _ = child.kill().await;
-                return ResimOutcome::Crashed("timeout".into());
+                return Ok(ResimOutcome::Crashed("timeout".into()));
             }
         };
 
         // Exit 2 is a usage error or an unreadable `.slp`: the engine never looked at the game.
         if status.code() == Some(2) {
-            return ResimOutcome::Unavailable(stderr_tail);
+            return Ok(ResimOutcome::Unavailable(stderr_tail));
         }
         let csv = match tokio::fs::read(&csv_path).await {
             Ok(bytes) => String::from_utf8_lossy(&bytes).into_owned(),
             Err(_) => String::new(),
         };
         if last_row(&csv).is_none() {
-            return ResimOutcome::Crashed(format!("{status}; no result row"));
+            return Ok(ResimOutcome::Crashed(format!("{status}; no result row")));
         }
-        outcome_from_csv(&csv, replay_last_frame)
+        Ok(outcome_from_csv(&csv, replay_last_frame))
+    }
+}
+
+#[async_trait]
+impl Resim for Slpcheck {
+    /// [`Slpcheck::run`], with a run that could not be set up reported as `Unavailable`.
+    async fn check(&self, slp: &Path, replay_last_frame: i32) -> ResimOutcome {
+        self.run(slp, replay_last_frame)
+            .await
+            .unwrap_or_else(|e| ResimOutcome::Unavailable(format!("verifier error: {e:#}")))
     }
 
     fn build(&self) -> String {
         self.build.clone()
     }
+
+    async fn check_with_build(
+        &self,
+        slp: &Path,
+        replay_last_frame: i32,
+    ) -> anyhow::Result<(ResimOutcome, String)> {
+        let outcome = self.run(slp, replay_last_frame).await?;
+        Ok((outcome, self.build()))
+    }
 }
 
 /// How long [`ExternalResim::check`] waits for a verifier by default.
 pub const EXTERNAL_RESULT_TIMEOUT: Duration = Duration::from_secs(600);
+/// A verifier that claimed a job or posted a result this recently counts as online.
+pub const VERIFIER_ONLINE_WINDOW: Duration = Duration::from_secs(60);
+/// How long a check waits for an unclaimed job when no verifier is online before giving up
+/// (instead of the full timeout).
+pub const VERIFIER_OFFLINE_WAIT: Duration = Duration::from_secs(15);
 /// How often a waiting check re-reads its job, in case a wake-up was missed.
 const EXTERNAL_RECHECK: Duration = Duration::from_secs(1);
 
 /// Re-simulates on another machine: `check` queues a `resim_jobs` row, a `verify-worker`
 /// claims it over the API and posts the result, and `check` returns that result.
+///
+/// A check waits up to its timeout for the result. When no verifier has called the server
+/// within the online window and nobody claimed the job, it gives up after the shorter
+/// offline wait (`Unavailable("no verifier online")`) instead.
 ///
 /// `build()` is `"external"`; `check_with_build` returns the build the verifier posted with
 /// the result (`"external"` when there was no result).
@@ -262,6 +302,19 @@ pub struct ExternalResim {
     db: OnceLock<SqlitePool>,
     posted: Notify,
     timeout: Duration,
+    online_window: Duration,
+    offline_wait: Duration,
+    /// When a verifier last claimed (or polled for) a job or posted a result.
+    last_seen: Mutex<Option<Instant>>,
+}
+
+/// How a queued job's wait ended.
+enum JobEnd {
+    Result(VerifyResult),
+    /// Nobody claimed it and no verifier is online.
+    NoVerifierOnline,
+    /// The full timeout passed.
+    TimedOut,
 }
 
 impl ExternalResim {
@@ -272,16 +325,39 @@ impl ExternalResim {
             db: OnceLock::new(),
             posted: Notify::new(),
             timeout,
+            online_window: VERIFIER_ONLINE_WINDOW,
+            offline_wait: VERIFIER_OFFLINE_WAIT,
+            last_seen: Mutex::new(None),
         }
     }
 
-    /// Queues a job and waits for its result; `None` when the wait timed out.
+    /// Replaces [`VERIFIER_ONLINE_WINDOW`] and [`VERIFIER_OFFLINE_WAIT`] (for tests).
+    pub fn with_presence(mut self, online_window: Duration, offline_wait: Duration) -> Self {
+        self.online_window = online_window;
+        self.offline_wait = offline_wait;
+        self
+    }
+
+    fn mark_seen(&self) {
+        *self.last_seen.lock().unwrap_or_else(|e| e.into_inner()) = Some(Instant::now());
+    }
+
+    /// Whether a verifier called the server within the online window.
+    fn verifier_online(&self) -> bool {
+        self.last_seen
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .is_some_and(|t| t.elapsed() < self.online_window)
+    }
+
+    /// Queues a job and waits for its result. On an error the job is retired (best effort),
+    /// so it is not left for a verifier to run for nothing.
     async fn run_job(
         &self,
         db: &SqlitePool,
         slp: &Path,
         replay_last_frame: i32,
-    ) -> anyhow::Result<Option<VerifyResult>> {
+    ) -> anyhow::Result<JobEnd> {
         let path = slp
             .to_str()
             .with_context(|| format!("non-UTF-8 replay path {slp:?}"))?;
@@ -298,22 +374,45 @@ impl ExternalResim {
         .bind(replay_last_frame)
         .fetch_one(db)
         .await?;
+        let waited = self.wait_for(db, id).await;
+        if waited.is_err() {
+            let _ = sqlx::query(
+                "UPDATE resim_jobs SET state = 'done' WHERE id = ? AND state != 'done'",
+            )
+            .bind(id)
+            .execute(db)
+            .await;
+        }
+        waited
+    }
 
-        let deadline = tokio::time::Instant::now() + self.timeout;
-        loop {
+    async fn wait_for(&self, db: &SqlitePool, id: i64) -> anyhow::Result<JobEnd> {
+        let started = tokio::time::Instant::now();
+        let deadline = started + self.timeout;
+        let give_up_early = started + self.offline_wait;
+        let end = loop {
             // Register for the wake-up before reading, so a result posted in between still wakes us.
             let posted = self.posted.notified();
             tokio::pin!(posted);
             posted.as_mut().enable();
-            if let Some(result) = finished(db, id).await? {
-                return Ok(Some(result));
+            let (state, result) = job_status(db, id).await?;
+            if let Some(result) = result {
+                return Ok(JobEnd::Result(result));
+            }
+            let now = tokio::time::Instant::now();
+            if now >= deadline {
+                break JobEnd::TimedOut;
+            }
+            if now >= give_up_early && state == "queued" && !self.verifier_online() {
+                break JobEnd::NoVerifierOnline;
             }
             tokio::select! {
                 () = posted => {}
                 () = tokio::time::sleep(EXTERNAL_RECHECK) => {}
-                () = tokio::time::sleep_until(deadline) => break,
+                () = tokio::time::sleep_until(deadline) => {}
+                () = tokio::time::sleep_until(give_up_early), if now < give_up_early => {}
             }
-        }
+        };
 
         // Give up, unless the result landed just now. Retiring the job stops it being offered.
         let mut tx = crate::db::begin_write(db).await?;
@@ -323,17 +422,17 @@ impl ExternalResim {
                 .execute(&mut *tx)
                 .await?;
         let result = if retired.rows_affected() == 0 {
-            finished(&mut *tx, id).await?
+            job_status(&mut *tx, id).await?.1
         } else {
             None
         };
         tx.commit().await?;
-        Ok(result)
+        Ok(result.map_or(end, JobEnd::Result))
     }
 }
 
-/// The posted result of job `id`, once it is `done`.
-async fn finished<'e, E>(db: E, id: i64) -> anyhow::Result<Option<VerifyResult>>
+/// The state of job `id`, and its posted result once it is `done`.
+async fn job_status<'e, E>(db: E, id: i64) -> anyhow::Result<(String, Option<VerifyResult>)>
 where
     E: sqlx::Executor<'e, Database = sqlx::Sqlite>,
 {
@@ -344,41 +443,48 @@ where
             .await?;
     match row {
         None => bail!("resim job {id} disappeared"),
-        Some((state, Some(json))) if state == "done" => Ok(Some(
-            serde_json::from_str(&json).with_context(|| format!("resim job {id} result_json"))?,
-        )),
-        Some(_) => Ok(None),
+        Some((state, Some(json))) if state == "done" => {
+            let result = serde_json::from_str(&json)
+                .with_context(|| format!("resim job {id} result_json"))?;
+            Ok((state, Some(result)))
+        }
+        Some((state, _)) => Ok((state, None)),
     }
 }
 
 #[async_trait]
 impl Resim for ExternalResim {
     async fn check(&self, slp: &Path, replay_last_frame: i32) -> ResimOutcome {
-        self.check_with_build(slp, replay_last_frame).await.0
+        match self.check_with_build(slp, replay_last_frame).await {
+            Ok((outcome, _)) => outcome,
+            Err(e) => ResimOutcome::Unavailable(format!("external verifier: {e:#}")),
+        }
     }
 
     fn build(&self) -> String {
         "external".into()
     }
 
-    async fn check_with_build(&self, slp: &Path, replay_last_frame: i32) -> (ResimOutcome, String) {
-        let Some(db) = self.db.get() else {
-            return (
-                ResimOutcome::Unavailable("external verifier not attached to a store".into()),
+    async fn check_with_build(
+        &self,
+        slp: &Path,
+        replay_last_frame: i32,
+    ) -> anyhow::Result<(ResimOutcome, String)> {
+        let db = self
+            .db
+            .get()
+            .context("external verifier not attached to a store")?;
+        Ok(match self.run_job(db, slp, replay_last_frame).await? {
+            JobEnd::Result(VerifyResult { outcome, build }) => (outcome, build),
+            JobEnd::NoVerifierOnline => (
+                ResimOutcome::Unavailable("no verifier online".into()),
                 self.build(),
-            );
-        };
-        match self.run_job(db, slp, replay_last_frame).await {
-            Ok(Some(VerifyResult { outcome, build })) => (outcome, build),
-            Ok(None) => (
+            ),
+            JobEnd::TimedOut => (
                 ResimOutcome::Unavailable("no verifier".into()),
                 self.build(),
             ),
-            Err(e) => (
-                ResimOutcome::Unavailable(format!("external verifier: {e:#}")),
-                self.build(),
-            ),
-        }
+        })
     }
 
     /// Also retires every job a previous run left unfinished. Nothing waits for them any
@@ -402,7 +508,12 @@ impl Resim for ExternalResim {
     }
 
     fn result_posted(&self) {
+        self.mark_seen();
         self.posted.notify_waiters();
+    }
+
+    fn verifier_seen(&self) {
+        self.mark_seen();
     }
 }
 

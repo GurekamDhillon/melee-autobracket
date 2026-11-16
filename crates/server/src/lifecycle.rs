@@ -114,12 +114,18 @@ pub async fn start_event(st: &AppState, event_id: i64) -> Result<(), LifecycleEr
     Ok(())
 }
 
-/// The stored bracket of a started event.
+/// The stored bracket of a started event, read on its own connection: only for a read that
+/// needs nothing else to be consistent with it (inside a transaction use
+/// [`load_bracket_on`]).
 pub async fn load_bracket(db: &SqlitePool, event_id: i64) -> Result<Bracket, LifecycleError> {
     let mut conn = db.acquire().await?;
     read_bracket(&mut conn, event_id).await
 }
 
+/// Overwrites the stored bracket outside any transaction: for tests that set up a bracket
+/// state directly. The server itself writes the bracket only inside the transaction that
+/// changes it.
+#[cfg(feature = "testkit")]
 pub async fn store_bracket(
     db: &SqlitePool,
     event_id: i64,
@@ -197,7 +203,8 @@ pub async fn load_bracket_on(
 /// the game as the build that re-simulated it: `None` when the engine did not run on the game
 /// (the verdicts decided before re-simulation: `Single`, `Conflicted`, `Illegal`, `Undecided`;
 /// and outcomes `Skipped` and `Unavailable`). The time of
-/// the verdict is recorded as `judged_at`, a late (voided) one included.
+/// the verdict is recorded as `judged_at`, a late (voided) one included, and so is
+/// `evidence_json` (what the worker found in the uploads, for the organiser).
 pub async fn apply_verdict(
     st: &AppState,
     game_id: i64,
@@ -205,6 +212,7 @@ pub async fn apply_verdict(
     winner_slot: Option<u8>,
     resim: &ResimOutcome,
     verifier_build: Option<&str>,
+    evidence_json: Option<&str>,
 ) -> Result<(), LifecycleError> {
     let verdict_json = to_json(v)?;
     let resim_json = to_json(resim)?;
@@ -225,6 +233,12 @@ pub async fn apply_verdict(
     if game_state != "judging" {
         return Ok(());
     }
+    // Kept whatever the verdict leads to, a late (voided) one included.
+    sqlx::query("UPDATE games SET evidence_json = ? WHERE id = ?")
+        .bind(evidence_json)
+        .bind(game_id)
+        .execute(&mut *tx)
+        .await?;
     let set_id = SetId::try_from(set_id)
         .map_err(|_| LifecycleError::Corrupt(format!("game {game_id} set_id {set_id}")))?;
 
@@ -248,6 +262,8 @@ pub async fn apply_verdict(
         .bind(game_id)
         .execute(&mut *tx)
         .await?;
+        // The replay is kept for study as it would have been on time.
+        quarantine(&mut tx, game_id, v).await?;
         tx.commit().await?;
         warn!(
             game_id,
@@ -338,19 +354,31 @@ pub async fn apply_verdict(
         .await?;
     }
 
+    quarantine(&mut tx, game_id, v).await?;
+    tx.commit().await?;
+    journal.emit();
+    Ok(())
+}
+
+/// Adds the game to the quarantine corpus when its verdict is one kept for study: the
+/// re-simulation diverged (`VerifiedInexact`, `Inexact`), the uploads disagree
+/// (`Conflicted`), or only one arrived (`Single`).
+async fn quarantine(
+    conn: &mut SqliteConnection,
+    game_id: i64,
+    v: &Verdict,
+) -> Result<(), LifecycleError> {
     if matches!(
         v,
         Verdict::VerifiedInexact | Verdict::Inexact | Verdict::Conflicted | Verdict::Single
     ) {
         sqlx::query("INSERT INTO quarantine (game_id, kind, created_at) VALUES (?, ?, ?)")
             .bind(game_id)
-            .bind(name)
+            .bind(verdict_name(v))
             .bind(now_unix())
-            .execute(&mut *tx)
+            .execute(&mut *conn)
             .await?;
     }
-    tx.commit().await?;
-    journal.emit();
     Ok(())
 }
 
@@ -489,6 +517,34 @@ async fn tag_for_log(conn: &mut SqliteConnection, event_id: i64, seed: u32) -> S
     }
 }
 
+/// The tags of the players in `slots` (a bracket set's), `None` unless both are entrants with a
+/// player row.
+pub(crate) async fn slot_tags(
+    conn: &mut SqliteConnection,
+    event_id: i64,
+    slots: [Slot; 2],
+) -> Result<Option<[String; 2]>, LifecycleError> {
+    let mut tags: [String; 2] = Default::default();
+    for (tag, slot) in tags.iter_mut().zip(slots) {
+        let Slot::Entrant(seed) = slot else {
+            return Ok(None);
+        };
+        let found: Option<String> = sqlx::query_scalar(
+            "SELECT p.tag FROM entrants n JOIN players p ON p.key = n.player_key
+             WHERE n.event_id = ? AND n.seed = ?",
+        )
+        .bind(event_id)
+        .bind(seed)
+        .fetch_optional(&mut *conn)
+        .await?;
+        let Some(found) = found else {
+            return Ok(None);
+        };
+        *tag = found;
+    }
+    Ok(Some(tags))
+}
+
 /// Queue reason for a set awarded with both of its entrants disqualified.
 pub const DOUBLE_DQ: &str = "double-dq";
 
@@ -562,6 +618,23 @@ pub(crate) async fn dq_award(
     Ok(Some(DqAward { slot, double }))
 }
 
+/// How many counted games of `event_id` no verifier checked although one was configured: they
+/// counted peer-only because the verifier was unavailable (their stored re-simulation outcome
+/// is `Unavailable`; with the verifier off it is `Skipped`).
+pub async fn unverified_games<'e, E>(db: E, event_id: i64) -> Result<u32, LifecycleError>
+where
+    E: sqlx::Executor<'e, Database = sqlx::Sqlite>,
+{
+    let n: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM games WHERE event_id = ? AND state = 'counted'
+           AND json_type(resim_json, '$.Unavailable') IS NOT NULL",
+    )
+    .bind(event_id)
+    .fetch_one(db)
+    .await?;
+    u32::try_from(n).map_err(|_| LifecycleError::Corrupt(format!("{n} unverified games")))
+}
+
 /// The verdict's variant name, as used for queue reasons and quarantine kinds.
 pub fn verdict_name(v: &Verdict) -> &'static str {
     match v {
@@ -573,6 +646,7 @@ pub fn verdict_name(v: &Verdict) -> &'static str {
         Verdict::Illegal(_) => "Illegal",
         Verdict::Undecided => "Undecided",
         Verdict::Inexact => "Inexact",
+        Verdict::VerifierUnavailable => "VerifierUnavailable",
     }
 }
 

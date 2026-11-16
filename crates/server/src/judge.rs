@@ -101,8 +101,11 @@ pub fn pre_judge(uploads: [Option<&[u8]>; 2], rules: &Ruleset) -> Pre {
     }
 }
 
-/// Turns a resim outcome into the final verdict for a game that needed one.
-pub fn finish(resim: &ResimOutcome, strict_resim: bool) -> Verdict {
+/// Turns a resim outcome into the final verdict for a game that needed one. `verifier_on` is
+/// whether the server is configured to re-simulate (`verifier.mode` not `off`): then a game
+/// the verifier could not check (`Unavailable`) does not count under `strict_resim`
+/// (`VerifierUnavailable`), and counts on peer agreement alone (`PeerOnly`) otherwise.
+pub fn finish(resim: &ResimOutcome, strict_resim: bool, verifier_on: bool) -> Verdict {
     match resim {
         ResimOutcome::Match => Verdict::Verified,
         ResimOutcome::Diverged { .. }
@@ -114,6 +117,7 @@ pub fn finish(resim: &ResimOutcome, strict_resim: bool) -> Verdict {
                 Verdict::VerifiedInexact
             }
         }
+        ResimOutcome::Unavailable(_) if verifier_on && strict_resim => Verdict::VerifierUnavailable,
         ResimOutcome::Unavailable(_) | ResimOutcome::Skipped => Verdict::PeerOnly,
     }
 }
@@ -123,4 +127,107 @@ pub fn finish(resim: &ResimOutcome, strict_resim: bool) -> Verdict {
 pub fn winner_slot(winner_port: u8) -> u8 {
     debug_assert!(matches!(winner_port, 1 | 2), "port {winner_port}");
     u8::from(winner_port == 2)
+}
+
+/// What the server knows about one stored upload, besides its bytes.
+#[derive(Debug, Clone, Default)]
+pub struct UploadMeta {
+    /// The tag of the player in this slot, if known.
+    pub tag: Option<String>,
+    /// SHA-256 of the file, lowercase hex.
+    pub sha256: String,
+    /// The `x-ab-build` the client sent with it.
+    pub client_build: String,
+}
+
+/// What one uploaded file says, for the organiser: its slot and player, a hash prefix, and
+/// whether it parses; for a readable file also the stage, timer, each player's port,
+/// character, start and final stocks and final percent, how the game ended, the winning port
+/// the replay derives, and the first rule it breaks (`"ok"` when legal). `file` is `None` when
+/// the stored file could not be read. Text from outside the server is [`clean`]ed.
+///
+/// [`clean`]: crate::logging::clean
+pub fn upload_evidence(
+    slot: u8,
+    meta: &UploadMeta,
+    file: Option<&[u8]>,
+    rules: &Ruleset,
+) -> serde_json::Value {
+    use crate::logging::{clean, label, sha_prefix};
+    let mut ev = serde_json::json!({
+        "slot": slot,
+        "tag": meta.tag.as_deref().map(label),
+        "sha256": label(sha_prefix(&meta.sha256)),
+        "client_build": label(&meta.client_build),
+    });
+    let facts = match file.map(replay::parse) {
+        None => {
+            ev["parse"] = "stored file unreadable".into();
+            return ev;
+        }
+        Some(Err(e)) => {
+            ev["parse"] = clean(&e.to_string(), crate::logging::MAX_DETAIL_CHARS).into();
+            return ev;
+        }
+        Some(Ok(facts)) => facts,
+    };
+    let players: Vec<serde_json::Value> = facts
+        .players
+        .iter()
+        .map(|p| {
+            let last = facts.finals.iter().find(|f| f.port == p.port);
+            serde_json::json!({
+                "port": p.port,
+                "character": p.character,
+                "kind": format!("{:?}", p.kind),
+                "start_stocks": p.start_stocks,
+                "final_stocks": last.map(|f| f.stocks),
+                "final_percent": last.map(|f| f.percent),
+            })
+        })
+        .collect();
+    ev["parse"] = "ok".into();
+    ev["stage"] = facts.stage.into();
+    ev["timer_secs"] = facts.timer_secs.into();
+    ev["players"] = players.into();
+    ev["last_frame"] = (facts.last_frame != i32::MIN)
+        .then_some(facts.last_frame)
+        .into();
+    ev["end_method"] = facts.end.as_ref().map(|e| e.method).into();
+    ev["lras_initiator"] = facts.end.as_ref().and_then(|e| e.lras_initiator).into();
+    ev["winner_port"] = replay::winner_port(&facts).into();
+    ev["legality"] = legality(&facts, rules).err().unwrap_or("ok").into();
+    ev
+}
+
+/// The last frame to re-simulate a lone upload to, as evidence: `Some` when the file parses,
+/// is legal under `rules` and has frames, so the engine could check it.
+pub fn evidence_resim_frame(file: &[u8], rules: &Ruleset) -> Option<i32> {
+    let facts = replay::parse(file).ok()?;
+    (legality(&facts, rules).is_ok() && facts.last_frame != i32::MIN).then_some(facts.last_frame)
+}
+
+/// A re-simulation outcome for the organiser: its kind and a one-line description, cleaned
+/// (an external verifier writes the strings in it).
+pub fn resim_evidence(outcome: &ResimOutcome) -> (&'static str, String) {
+    use crate::logging::{clean, resim_kind, MAX_DETAIL_CHARS};
+    let text = match outcome {
+        ResimOutcome::Match => String::new(),
+        ResimOutcome::Diverged {
+            frame,
+            port,
+            field,
+            engine_value,
+            replay_value,
+        } => format!(
+            "frame {frame}, port {port}, {field}: engine {engine_value}, replay {replay_value}"
+        ),
+        ResimOutcome::EarlyEnd {
+            engine_last,
+            replay_last,
+        } => format!("the engine stopped at frame {engine_last}; the replay ends at {replay_last}"),
+        ResimOutcome::Crashed(why) | ResimOutcome::Unavailable(why) => why.clone(),
+        ResimOutcome::Skipped => "verifier off".into(),
+    };
+    (resim_kind(outcome), clean(&text, MAX_DETAIL_CHARS))
 }

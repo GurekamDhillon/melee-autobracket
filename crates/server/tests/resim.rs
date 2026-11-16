@@ -487,3 +487,30 @@ async fn disc_of_minimum_size_starts() {
         .await
         .expect("a disc of exactly MIN_DISC_BYTES is accepted");
 }
+
+/// An engine that cannot be started any more (the binary was removed after start-up) is an
+/// internal error for the judging worker, which retries the game; it is not "unavailable",
+/// which could count the game unchecked.
+#[tokio::test]
+async fn engine_gone_after_start_is_an_error() {
+    let dir = tempfile::tempdir().unwrap();
+    // A symlink, not a copy: executing a file just written can fail with "text file busy"
+    // while another test forks.
+    let engine = dir.path().join("melee");
+    std::os::unix::fs::symlink(fake_engine(), &engine).unwrap();
+    let checker = Slpcheck::new(engine.clone(), fake_disc(&dir), Duration::from_secs(10))
+        .await
+        .unwrap();
+    std::fs::remove_file(&engine).unwrap();
+    let slp = replay(&dir, "match");
+    let err = checker
+        .check_with_build(&slp, 5000)
+        .await
+        .expect_err("the engine cannot start");
+    assert!(format!("{err:#}").contains("engine"), "{err:#}");
+    // Through `check` (what an external verify-worker reports) it is the verifier's fault.
+    assert!(matches!(
+        checker.check(&slp, 5000).await,
+        ResimOutcome::Unavailable(_)
+    ));
+}
