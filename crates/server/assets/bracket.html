@@ -417,6 +417,8 @@
     $("title").textContent = "Bracket";
     document.title = "Bracket";
     $("meta").textContent = "";
+    const shown = $("unverified");
+    if (shown) shown.remove();
     $("board").replaceChildren(el("p", "note", "No events yet. This page will update when one is created."));
   }
 

@@ -170,3 +170,21 @@ async fn documented_routes_exist() {
     }
     assert!(seen >= 21, "parsed {seen} routes from the table");
 }
+
+/// Falling back to "no events" also removes the "counted without engine verification" line
+/// an earlier event's view put under the header.
+#[tokio::test]
+async fn no_events_view_removes_the_unverified_line() {
+    let app = TestApp::spawn(|_| {}).await;
+    let body = fetch_root(&app).await.text().await.unwrap();
+    let start = body
+        .find("function renderNoEvents()")
+        .expect("renderNoEvents in the page");
+    let end = start
+        + body[start..]
+            .find("\n  }\n")
+            .expect("end of renderNoEvents");
+    let func = &body[start..end];
+    assert!(func.contains(r#"$("unverified")"#), "{func}");
+    assert!(func.contains(".remove()"), "{func}");
+}
