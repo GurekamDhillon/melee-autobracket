@@ -404,7 +404,10 @@ async fn external_check_without_verifier_is_unavailable() {
     assert_eq!(resim.build(), "external");
     // With no result there is no posted build either.
     assert_eq!(
-        resim.check_with_build(Path::new("/nowhere.slp"), 100).await,
+        resim
+            .check_with_build(Path::new("/nowhere.slp"), 100)
+            .await
+            .unwrap(),
         (
             ResimOutcome::Unavailable("no verifier".into()),
             "external".into()
@@ -415,6 +418,166 @@ async fn external_check_without_verifier_is_unavailable() {
         Signer::new(vk, &app.url).claim().await.status(),
         StatusCode::NO_CONTENT
     );
+}
+
+/// With no verifier seen recently, a check gives up after the short wait instead of the full
+/// timeout, and its job is no longer offered.
+#[tokio::test]
+async fn external_check_gives_up_early_when_no_verifier_is_online() {
+    let vk = SigningKey::generate(&mut OsRng);
+    let resim = Arc::new(
+        ExternalResim::new(Duration::from_secs(600))
+            .with_presence(Duration::from_secs(60), Duration::from_millis(300)),
+    );
+    let app = TestApp::spawn_with(external(&vk), resim.clone()).await;
+    let started = Instant::now();
+    let checked = tokio::time::timeout(
+        Duration::from_secs(10),
+        resim.check_with_build(Path::new("/nowhere.slp"), 100),
+    )
+    .await
+    .expect("gives up long before the 600 s timeout")
+    .unwrap();
+    assert_eq!(
+        checked,
+        (
+            ResimOutcome::Unavailable("no verifier online".into()),
+            "external".into()
+        )
+    );
+    assert!(started.elapsed() >= Duration::from_millis(300));
+    assert_eq!(
+        Signer::new(vk, &app.url).claim().await.status(),
+        StatusCode::NO_CONTENT
+    );
+}
+
+/// A verifier that polled recently is online: an unclaimed job is waited for past the short
+/// wait (here until the full timeout).
+#[tokio::test]
+async fn external_check_waits_while_a_verifier_is_online() {
+    let vk = SigningKey::generate(&mut OsRng);
+    let resim = Arc::new(
+        ExternalResim::new(Duration::from_millis(1500))
+            .with_presence(Duration::from_secs(60), Duration::from_millis(200)),
+    );
+    let app = TestApp::spawn_with(external(&vk), resim.clone()).await;
+    // An idle poll (nothing queued yet) counts as the verifier being there.
+    assert_eq!(
+        Signer::new(vk, &app.url).claim().await.status(),
+        StatusCode::NO_CONTENT
+    );
+    let started = Instant::now();
+    let (outcome, _) = resim
+        .check_with_build(Path::new("/nowhere.slp"), 100)
+        .await
+        .unwrap();
+    assert_eq!(outcome, ResimOutcome::Unavailable("no verifier".into()));
+    assert!(started.elapsed() >= Duration::from_millis(1500));
+}
+
+/// A claimed job is waited for past the short wait, until its result arrives.
+#[tokio::test]
+async fn claimed_job_is_waited_for() {
+    let vk = SigningKey::generate(&mut OsRng);
+    let resim = Arc::new(
+        ExternalResim::new(Duration::from_secs(30))
+            .with_presence(Duration::from_millis(100), Duration::from_millis(200)),
+    );
+    let app = TestApp::spawn_with(external(&vk), resim.clone()).await;
+    let checking = {
+        let resim = resim.clone();
+        tokio::spawn(async move { resim.check_with_build(Path::new("/nowhere.slp"), 100).await })
+    };
+    let verifier = Signer::new(vk, &app.url);
+    let job = claim_job(&verifier).await;
+    // Longer than both the short wait and the presence window.
+    tokio::time::sleep(Duration::from_millis(600)).await;
+    let result = VerifyResult {
+        outcome: ResimOutcome::Match,
+        build: "slow 1.0".into(),
+    };
+    assert_eq!(
+        verifier.post_result(job.id, &result).await,
+        StatusCode::NO_CONTENT
+    );
+    let checked = tokio::time::timeout(Duration::from_secs(10), checking)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert_eq!(checked, (ResimOutcome::Match, "slow 1.0".into()));
+}
+
+/// An internal error (here: no store to queue the job in) is an error, not "unavailable", so
+/// the worker retries the game instead of counting it unchecked.
+#[tokio::test]
+async fn external_internal_error_is_an_error() {
+    let resim = ExternalResim::new(Duration::from_secs(30));
+    assert!(resim
+        .check_with_build(Path::new("/nowhere.slp"), 100)
+        .await
+        .is_err());
+}
+
+/// With `accepted_builds` set, a result posted by a verifier on another build is not used:
+/// the game is judged as if no verifier had checked it.
+#[tokio::test]
+async fn verifier_build_must_be_accepted() {
+    for strict in [false, true] {
+        let vk = SigningKey::generate(&mut OsRng);
+        let resim = Arc::new(ExternalResim::new(Duration::from_secs(30)));
+        let app = TestApp::spawn_with(
+            |c| {
+                external(&vk)(c);
+                // The players' build ("b1") and the verifier build the server expects.
+                c.accepted_builds = vec!["b1".into(), "melee 1.2".into()];
+                c.strict_resim = strict;
+            },
+            resim,
+        )
+        .await;
+        let (host, guest, event) = two_player(&app).await;
+        upload_pair(&host, &guest, event, |s| simple_game(1, s)).await;
+        let st = app.state.clone();
+        let judging = tokio::spawn(async move { judge_due(&st).await });
+        let verifier = Signer::new(vk, &app.url);
+        let job = claim_job(&verifier).await;
+        let result = VerifyResult {
+            outcome: ResimOutcome::Match,
+            build: "melee 1.3+0123456789ab".into(),
+        };
+        assert_eq!(
+            verifier.post_result(job.id, &result).await,
+            StatusCode::NO_CONTENT
+        );
+        tokio::time::timeout(Duration::from_secs(10), judging)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        let (state, verdict, build) = game(&app, event).await;
+        let resim: String = sqlx::query_scalar("SELECT resim_json FROM games")
+            .fetch_one(&app.state.db)
+            .await
+            .unwrap();
+        assert_eq!(
+            serde_json::from_str::<ResimOutcome>(&resim).unwrap(),
+            ResimOutcome::Unavailable("verifier build not accepted: melee 1.3+0123456789ab".into())
+        );
+        assert_eq!(build, None, "the engine's run is not used");
+        if strict {
+            assert_eq!(
+                (state.as_str(), verdict),
+                ("review", Some(Verdict::VerifierUnavailable))
+            );
+        } else {
+            assert_eq!(
+                (state.as_str(), verdict),
+                ("counted", Some(Verdict::PeerOnly))
+            );
+        }
+    }
 }
 
 /// Kills the child process when dropped, so a failing assertion cannot leave it running.

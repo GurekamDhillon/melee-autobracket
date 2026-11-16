@@ -101,8 +101,11 @@ pub fn pre_judge(uploads: [Option<&[u8]>; 2], rules: &Ruleset) -> Pre {
     }
 }
 
-/// Turns a resim outcome into the final verdict for a game that needed one.
-pub fn finish(resim: &ResimOutcome, strict_resim: bool) -> Verdict {
+/// Turns a resim outcome into the final verdict for a game that needed one. `verifier_on` is
+/// whether the server is configured to re-simulate (`verifier.mode` not `off`): then a game
+/// the verifier could not check (`Unavailable`) does not count under `strict_resim`
+/// (`VerifierUnavailable`), and counts on peer agreement alone (`PeerOnly`) otherwise.
+pub fn finish(resim: &ResimOutcome, strict_resim: bool, verifier_on: bool) -> Verdict {
     match resim {
         ResimOutcome::Match => Verdict::Verified,
         ResimOutcome::Diverged { .. }
@@ -114,6 +117,7 @@ pub fn finish(resim: &ResimOutcome, strict_resim: bool) -> Verdict {
                 Verdict::VerifiedInexact
             }
         }
+        ResimOutcome::Unavailable(_) if verifier_on && strict_resim => Verdict::VerifierUnavailable,
         ResimOutcome::Unavailable(_) | ResimOutcome::Skipped => Verdict::PeerOnly,
     }
 }

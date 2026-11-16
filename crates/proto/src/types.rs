@@ -64,6 +64,10 @@ pub enum Verdict {
     Illegal(String),
     Undecided,
     Inexact,
+    /// A verifier is configured (`strict_resim` on) but could not check the game (no verifier
+    /// online, no disc, an engine that will not boot, a verifier build not accepted). Does not
+    /// count; the organiser decides.
+    VerifierUnavailable,
 }
 
 impl Verdict {
@@ -133,6 +137,11 @@ pub struct EventView {
     /// `scores` count only the games played before the decision.
     #[serde(default)]
     pub decided_by: Vec<(u32, String)>,
+    /// Counted games of this event that no verifier checked although one is configured: they
+    /// count on the two players' agreement alone (`PeerOnly`, because the verifier was
+    /// unavailable and `strict_resim` is off). Always 0 on a server with the verifier off.
+    #[serde(default)]
+    pub unverified_games: u32,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]

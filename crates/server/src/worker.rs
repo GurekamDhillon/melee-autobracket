@@ -6,16 +6,19 @@
 //! transaction ([`lifecycle::apply_verdict`]), a no-op unless the game is still `judging`.
 
 use std::path::PathBuf;
+use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
 use anyhow::Context;
 use proto::{ResimOutcome, Ruleset, Verdict};
 use tracing::{error, info, warn};
 
+use crate::config::{Config, VerifierMode};
 use crate::db::{begin_write, now_unix};
 use crate::judge::{self, Pre};
 use crate::lifecycle::{self, verdict_name};
 use crate::logging::{detail, label, resim_kind, Journal};
+use crate::resim::Resim;
 use crate::review::{self, STALLED};
 use crate::state::AppState;
 
@@ -46,6 +49,24 @@ pub async fn run(st: AppState) {
             () = tokio::time::sleep(TICK) => {}
         }
     }
+}
+
+/// Refuses an in-process verifier whose engine build is not on a non-empty
+/// `accepted_builds` (see [`Config::build_accepted`]): it would re-simulate the players'
+/// games on another build than theirs.
+pub fn check_verifier_build(cfg: &Config, resim: &dyn Resim) -> anyhow::Result<()> {
+    if cfg.verifier.mode != VerifierMode::InProcess {
+        return Ok(());
+    }
+    let build = resim.build();
+    if !cfg.build_accepted(&build) {
+        anyhow::bail!(
+            "the verifier's engine build {:?} is not in accepted_builds {:?}",
+            label(&build),
+            cfg.accepted_builds
+        );
+    }
+    Ok(())
 }
 
 /// Games left in `judging` by an interrupted run go back to `uploading`, to be judged again.
@@ -252,18 +273,43 @@ async fn judge_claimed(st: &AppState, game_id: i64, claim: Claim) -> anyhow::Res
                 .as_deref()
                 .context("agreeing pair without a host upload")?;
             let resim_started = Instant::now();
-            let (outcome, build) = st.resim.check_with_build(host, last_frame).await;
+            let (mut outcome, build) = st
+                .resim
+                .check_with_build(host, last_frame)
+                .await
+                .context("re-simulating")?;
             resim_ms = resim_started.elapsed().as_millis();
+            // A verifier on another engine build than the accepted ones checked nothing the
+            // players ran (only an external one can be: an in-process one refuses to start).
+            if engine_ran(&outcome) && !st.cfg.build_accepted(&build) {
+                outcome = ResimOutcome::Unavailable(format!(
+                    "verifier build not accepted: {}",
+                    label(&build)
+                ));
+            }
+            let verifier_on = st.cfg.verifier.mode != VerifierMode::Off;
+            let v: Verdict = judge::finish(&outcome, st.cfg.strict_resim, verifier_on);
             if let ResimOutcome::Unavailable(why) = &outcome {
                 warn!(
                     game_id,
                     event = claim.event_id,
                     set = claim.set_id,
+                    verdict = %verdict_display(&v),
                     detail = %detail(why),
-                    "verifier unavailable; judging peer-only"
+                    "verifier unavailable"
                 );
+                if verifier_on
+                    && v == Verdict::PeerOnly
+                    && !st.peer_only_alarm.swap(true, Ordering::Relaxed)
+                {
+                    error!(
+                        game_id,
+                        detail = %detail(why),
+                        "verifier unavailable: games are counting peer-only, without \
+                         re-simulation (set strict_resim to send them to the organiser instead)"
+                    );
+                }
             }
-            let v: Verdict = judge::finish(&outcome, st.cfg.strict_resim);
             // A build is recorded only when the engine actually ran on the game.
             let build = engine_ran(&outcome).then_some(build);
             (v, Some(judge::winner_slot(winner_port)), outcome, build)

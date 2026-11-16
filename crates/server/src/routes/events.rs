@@ -155,6 +155,7 @@ pub(super) async fn event_view(db: &SqlitePool, id: i64) -> Result<EventView, Ap
         .map(|(set_id, how)| Ok((to_int(set_id)?, how)))
         .collect::<Result<_, ApiError>>()?;
 
+    let unverified_games = crate::lifecycle::unverified_games(db, id).await?;
     let entrants = i64::try_from(tags.len()).unwrap_or(i64::MAX);
     Ok(EventView {
         summary: summary(id, name, state, entrants)?,
@@ -163,6 +164,7 @@ pub(super) async fn event_view(db: &SqlitePool, id: i64) -> Result<EventView, Ap
         bracket,
         scores,
         decided_by,
+        unverified_games,
     })
 }
 

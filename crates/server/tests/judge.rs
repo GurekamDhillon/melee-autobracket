@@ -447,18 +447,36 @@ fn finish_table() {
     };
     let crashed = ResimOutcome::Crashed("boom".into());
     let unavailable = ResimOutcome::Unavailable("no dolphin".into());
+    // (outcome, strict, lenient) with a verifier configured; with the verifier off only
+    // `Skipped` (and, defensively, `Unavailable`) can occur and both are PeerOnly.
     let cases = [
         (ResimOutcome::Match, Verdict::Verified, Verdict::Verified),
         (diverged, Verdict::Inexact, Verdict::VerifiedInexact),
         (early, Verdict::Inexact, Verdict::VerifiedInexact),
         (crashed, Verdict::Inexact, Verdict::VerifiedInexact),
-        (unavailable, Verdict::PeerOnly, Verdict::PeerOnly),
+        (
+            unavailable.clone(),
+            Verdict::VerifierUnavailable,
+            Verdict::PeerOnly,
+        ),
         (ResimOutcome::Skipped, Verdict::PeerOnly, Verdict::PeerOnly),
     ];
     for (outcome, strict, lenient) in cases {
-        assert_eq!(finish(&outcome, true), strict, "{outcome:?} strict");
-        assert_eq!(finish(&outcome, false), lenient, "{outcome:?} lenient");
+        assert_eq!(finish(&outcome, true, true), strict, "{outcome:?} strict");
+        assert_eq!(
+            finish(&outcome, false, true),
+            lenient,
+            "{outcome:?} lenient"
+        );
     }
+    for strict in [true, false] {
+        assert_eq!(finish(&unavailable, strict, false), Verdict::PeerOnly);
+        assert_eq!(
+            finish(&ResimOutcome::Skipped, strict, false),
+            Verdict::PeerOnly
+        );
+    }
+    assert!(!Verdict::VerifierUnavailable.counts());
 }
 
 #[test]

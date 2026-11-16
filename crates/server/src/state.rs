@@ -1,3 +1,4 @@
+use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex};
 
 use sqlx::SqlitePool;
@@ -22,6 +23,10 @@ pub struct AppState {
     /// When this process started, unix seconds. The stall check counts a set's inactivity
     /// from here at the earliest: time the server was down is not inactivity it observed.
     pub started_at: i64,
+    /// Set once a game counted peer-only because the configured verifier was unavailable has
+    /// been logged at error level: that happens once per process, every such game after it
+    /// only gets its own warning.
+    pub peer_only_alarm: Arc<AtomicBool>,
 }
 
 /// Abort handles of spawned background tasks, so an embedder (e.g. a test) can stop them.

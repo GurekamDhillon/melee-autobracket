@@ -562,6 +562,23 @@ pub(crate) async fn dq_award(
     Ok(Some(DqAward { slot, double }))
 }
 
+/// How many counted games of `event_id` no verifier checked although one was configured: they
+/// counted peer-only because the verifier was unavailable (their stored re-simulation outcome
+/// is `Unavailable`; with the verifier off it is `Skipped`).
+pub async fn unverified_games<'e, E>(db: E, event_id: i64) -> Result<u32, LifecycleError>
+where
+    E: sqlx::Executor<'e, Database = sqlx::Sqlite>,
+{
+    let n: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM games WHERE event_id = ? AND state = 'counted'
+           AND json_type(resim_json, '$.Unavailable') IS NOT NULL",
+    )
+    .bind(event_id)
+    .fetch_one(db)
+    .await?;
+    u32::try_from(n).map_err(|_| LifecycleError::Corrupt(format!("{n} unverified games")))
+}
+
 /// The verdict's variant name, as used for queue reasons and quarantine kinds.
 pub fn verdict_name(v: &Verdict) -> &'static str {
     match v {
@@ -573,6 +590,7 @@ pub fn verdict_name(v: &Verdict) -> &'static str {
         Verdict::Illegal(_) => "Illegal",
         Verdict::Undecided => "Undecided",
         Verdict::Inexact => "Inexact",
+        Verdict::VerifierUnavailable => "VerifierUnavailable",
     }
 }
 

@@ -36,6 +36,7 @@ const RATE_LIMIT_TRIM_PERIOD: Duration = Duration::from_secs(60);
 /// abort handles are kept in `AppState::tasks`.
 pub async fn build_app(cfg: Config, resim: Arc<dyn Resim>) -> anyhow::Result<(Router, AppState)> {
     cfg.validate().context("invalid configuration")?;
+    worker::check_verifier_build(&cfg, resim.as_ref())?;
     std::fs::create_dir_all(&cfg.replay_dir)
         .with_context(|| format!("creating replay directory {}", cfg.replay_dir.display()))?;
     let db = db::open(&cfg.db_path)
@@ -62,6 +63,7 @@ pub async fn build_app(cfg: Config, resim: Arc<dyn Resim>) -> anyhow::Result<(Ro
         tasks: Arc::default(),
         rejections: Arc::default(),
         started_at: db::now_unix(),
+        peer_only_alarm: Arc::default(),
     };
 
     if state.cfg.worker_enabled {

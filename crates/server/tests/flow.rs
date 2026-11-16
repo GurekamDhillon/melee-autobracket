@@ -410,6 +410,121 @@ async fn unavailable_verifier_is_peer_only() {
     assert_eq!(build, None);
 }
 
+/// A server configured to re-simulate (`in_process`; the verifier itself is the fake).
+fn in_process(c: &mut autobracket_server::Config) {
+    c.verifier.mode = autobracket_server::config::VerifierMode::InProcess;
+}
+
+/// With `strict_resim`, a game the configured verifier could not check does not count: it
+/// goes to the organiser as `VerifierUnavailable`.
+#[tokio::test]
+async fn unavailable_verifier_under_strict_resim_goes_to_queue() {
+    let app = TestApp::spawn_with(
+        |c| {
+            in_process(c);
+            c.strict_resim = true;
+        },
+        fake(vec![ResimOutcome::Unavailable("no disc".into())]),
+    )
+    .await;
+    let (app, host, guest, event) = two_player(app).await;
+    play_game(&app, event, 0, 1, &host, &guest, 1).await;
+    let (state, verdict, slot, resim, build) = game(&app, event, 0, 1).await;
+    assert_eq!(state, "review");
+    assert_eq!(verdict, Some(Verdict::VerifierUnavailable));
+    assert_eq!(slot, None);
+    assert_eq!(resim, Some(ResimOutcome::Unavailable("no disc".into())));
+    assert_eq!(build, None);
+    assert_eq!(set_row(&app, event, 0).await, ("review".into(), 0, 0));
+    assert_eq!(
+        queue_reasons(&app, event).await,
+        vec!["VerifierUnavailable"]
+    );
+    assert!(quarantine_kinds(&app).await.is_empty());
+    assert_eq!(event_view(&app, event).await.unverified_games, 0);
+}
+
+/// Without `strict_resim`, such a game counts peer-only, and the event view says how many
+/// counted games no verifier checked.
+#[tokio::test]
+async fn unavailable_verifier_counts_peer_only_and_is_visible() {
+    let app = TestApp::spawn_with(
+        in_process,
+        fake(vec![ResimOutcome::Unavailable("no disc".into())]),
+    )
+    .await;
+    let (app, host, guest, event) = two_player(app).await;
+    play_game(&app, event, 0, 1, &host, &guest, 1).await;
+    let (state, verdict, _, _, _) = game(&app, event, 0, 1).await;
+    assert_eq!(state, "counted");
+    assert_eq!(verdict, Some(Verdict::PeerOnly));
+    // The second game is re-simulated (the fake answers Match).
+    play_game(&app, event, 0, 2, &host, &guest, 1).await;
+    assert_eq!(game(&app, event, 0, 2).await.1, Some(Verdict::Verified));
+    assert_eq!(event_view(&app, event).await.unverified_games, 1);
+
+    // With the verifier off, PeerOnly is the normal verdict and is not counted as unverified.
+    let (app, host, guest, event) = two_player(TestApp::spawn(|_| {}).await).await;
+    play_game(&app, event, 0, 1, &host, &guest, 1).await;
+    assert_eq!(game(&app, event, 0, 1).await.1, Some(Verdict::PeerOnly));
+    assert_eq!(event_view(&app, event).await.unverified_games, 0);
+}
+
+/// An in-process verifier whose build is not on a non-empty `accepted_builds` refuses to
+/// start.
+#[tokio::test]
+async fn in_process_verifier_build_must_be_accepted() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut cfg = autobracket_server::Config::new(vec!["ab".repeat(32)]);
+    cfg.db_path = dir.path().join("db.sqlite");
+    cfg.replay_dir = dir.path().join("replays");
+    cfg.worker_enabled = false;
+    in_process(&mut cfg);
+    cfg.accepted_builds = vec!["melee 1.0".into()];
+    let err = autobracket_server::build_app(cfg.clone(), fake(vec![]))
+        .await
+        .err()
+        .expect("the fake build is not accepted");
+    let err = format!("{err:#}");
+    assert!(
+        err.contains("accepted_builds") && err.contains("fake"),
+        "{err}"
+    );
+
+    // The fake's build is accepted by its whole string.
+    cfg.accepted_builds.push("fake".into());
+    let (_, state) = autobracket_server::build_app(cfg, fake(vec![]))
+        .await
+        .unwrap();
+    state.tasks.abort_all();
+}
+
+/// Re-simulation runs on the host's upload (slot 0), with the replay's last frame.
+#[tokio::test]
+async fn resimulation_receives_the_host_file() {
+    struct Recording(Mutex<Vec<(std::path::PathBuf, i32)>>);
+    #[async_trait::async_trait]
+    impl autobracket_server::Resim for Recording {
+        async fn check(&self, slp: &std::path::Path, last_frame: i32) -> ResimOutcome {
+            self.0.lock().unwrap().push((slp.to_owned(), last_frame));
+            ResimOutcome::Match
+        }
+        fn build(&self) -> String {
+            "rec".into()
+        }
+    }
+    let rec = Arc::new(Recording(Mutex::new(Vec::new())));
+    let app = TestApp::spawn_with(|_| {}, rec.clone()).await;
+    let (app, host, guest, event) = two_player(app).await;
+    play_game(&app, event, 0, 1, &host, &guest, 2).await;
+    let host_path: String = sqlx::query_scalar("SELECT path FROM uploads WHERE slot = 0")
+        .fetch_one(&app.state.db)
+        .await
+        .unwrap();
+    let calls = rec.0.lock().unwrap().clone();
+    assert_eq!(calls, vec![(host_path.into(), 5400)]);
+}
+
 #[tokio::test]
 async fn game_never_counted_twice() {
     let (app, host, guest, event) = two_player(TestApp::spawn(|_| {}).await).await;
