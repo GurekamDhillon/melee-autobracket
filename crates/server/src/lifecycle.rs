@@ -6,8 +6,10 @@ use axum::http::StatusCode;
 use bracket::{Bracket, BracketError, Format, SetId, SetState, Side, Slot};
 use proto::{ResimOutcome, Ruleset, Verdict};
 use sqlx::{SqliteConnection, SqlitePool};
+use tracing::{info, warn};
 
 use crate::db::{begin_write, now_unix};
+use crate::logging::Journal;
 use crate::review::open_queue_item;
 use crate::routes::ApiError;
 use crate::state::AppState;
@@ -66,17 +68,18 @@ pub fn format_from_str(s: &str) -> Option<Format> {
 /// entrants in seed order, stores it, and opens a `sets` row for each Ready set.
 pub async fn start_event(st: &AppState, event_id: i64) -> Result<(), LifecycleError> {
     let mut tx = begin_write(&st.db).await?;
-    let row: Option<(String, String)> =
-        sqlx::query_as("SELECT state, format FROM events WHERE id = ?")
+    let row: Option<(String, String, String)> =
+        sqlx::query_as("SELECT state, format, name FROM events WHERE id = ?")
             .bind(event_id)
             .fetch_optional(&mut *tx)
             .await?;
-    let (state, format) = row.ok_or(LifecycleError::NoSuchEvent)?;
+    let (state, format, name) = row.ok_or(LifecycleError::NoSuchEvent)?;
     if state != "signup" {
         return Err(LifecycleError::AlreadyStarted);
     }
-    let format = format_from_str(&format)
-        .ok_or_else(|| LifecycleError::Corrupt(format!("event format {format:?}")))?;
+    let format_name = format;
+    let format = format_from_str(&format_name)
+        .ok_or_else(|| LifecycleError::Corrupt(format!("event format {format_name:?}")))?;
 
     let entrants: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM entrants WHERE event_id = ?")
         .bind(event_id)
@@ -101,6 +104,7 @@ pub async fn start_event(st: &AppState, event_id: i64) -> Result<(), LifecycleEr
         open_set(&mut tx, event_id, set_id).await?;
     }
     tx.commit().await?;
+    info!(event = event_id, name = %name, format = %format_name, entrants, "event started");
     Ok(())
 }
 
@@ -199,6 +203,7 @@ pub async fn apply_verdict(
     let resim_json = to_json(resim)?;
     let name = verdict_name(v);
     let judged_at = now_unix();
+    let mut journal = Journal::default();
     let mut tx = begin_write(&st.db).await?;
     let row: Option<(i64, i64, String, String)> = sqlx::query_as(
         "SELECT g.event_id, g.set_id, g.state, e.ruleset_json
@@ -237,10 +242,13 @@ pub async fn apply_verdict(
         .execute(&mut *tx)
         .await?;
         tx.commit().await?;
-        eprintln!(
-            "judge: game {game_id} judged {name} after set {event_id}/{set_id} left play \
-             ({}); voided",
-            set_state.as_deref().unwrap_or("no sets row")
+        warn!(
+            game_id,
+            event = event_id,
+            set = set_id,
+            verdict = %name,
+            set_state = %set_state.as_deref().unwrap_or("no sets row"),
+            "late verdict voided: the set left play while the game was judged"
         );
         return Ok(());
     }
@@ -289,7 +297,7 @@ pub async fn apply_verdict(
             ruleset.best_of
         };
         if wins >= i64::from(best_of / 2 + 1) {
-            award_on(&mut tx, event_id, bracket, set_id, slot, None).await?;
+            award_on(&mut tx, event_id, bracket, set_id, slot, None, &mut journal).await?;
         }
     } else {
         sqlx::query(
@@ -311,7 +319,16 @@ pub async fn apply_verdict(
         .bind(set_id)
         .execute(&mut *tx)
         .await?;
-        open_queue_item(&mut tx, event_id, set_id, Some(game_id), name, None).await?;
+        open_queue_item(
+            &mut tx,
+            event_id,
+            set_id,
+            Some(game_id),
+            name,
+            None,
+            &mut journal,
+        )
+        .await?;
     }
 
     if matches!(
@@ -326,6 +343,7 @@ pub async fn apply_verdict(
             .await?;
     }
     tx.commit().await?;
+    journal.emit();
     Ok(())
 }
 
@@ -337,6 +355,7 @@ pub async fn award_set(
     set_id: u32,
     winner_slot: u8,
 ) -> Result<(), LifecycleError> {
+    let mut journal = Journal::default();
     let mut tx = begin_write(&st.db).await?;
     let bracket = read_bracket(&mut tx, event_id).await?;
     award_on(
@@ -346,9 +365,11 @@ pub async fn award_set(
         set_id,
         winner_slot,
         Some(DecidedBy::Award),
+        &mut journal,
     )
     .await?;
     tx.commit().await?;
+    journal.emit();
     Ok(())
 }
 
@@ -363,6 +384,7 @@ pub(crate) async fn award_on(
     set_id: SetId,
     winner_slot: u8,
     how: Option<DecidedBy>,
+    journal: &mut Journal,
 ) -> Result<(), LifecycleError> {
     let mut pending = vec![(set_id, winner_slot, how)];
     while let Some((set_id, winner_slot, how)) = pending.pop() {
@@ -382,6 +404,27 @@ pub(crate) async fn award_on(
                 "set {event_id}/{set_id} has no sets row"
             )));
         }
+        let score: (i64, i64) =
+            sqlx::query_as("SELECT wins0, wins1 FROM sets WHERE event_id = ? AND set_id = ?")
+                .bind(event_id)
+                .bind(set_id)
+                .fetch_one(&mut *conn)
+                .await?;
+        let winner_seat = bracket
+            .sets
+            .get(set_id as usize)
+            .map(|s| s.slots[usize::from(winner_slot.min(1))]);
+        let winner = match winner_seat {
+            Some(Slot::Entrant(seed)) => entrant_tag(conn, event_id, seed).await?,
+            other => format!("{other:?}"),
+        };
+        journal.set_decided(
+            event_id,
+            set_id,
+            winner,
+            [score.0, score.1],
+            how.map_or("played", DecidedBy::as_str),
+        );
         for id in newly_ready {
             let set = &bracket.sets[id as usize];
             if set.state != SetState::Ready {
@@ -390,7 +433,7 @@ pub(crate) async fn award_on(
             open_set(conn, event_id, id).await?;
             if let Some(award) = dq_award(conn, event_id, set.slots).await? {
                 if award.double {
-                    open_queue_item(conn, event_id, id, None, DOUBLE_DQ, None).await?;
+                    open_queue_item(conn, event_id, id, None, DOUBLE_DQ, None, journal).await?;
                 }
                 pending.push((id, award.slot, Some(award.decided_by())));
             }
@@ -402,8 +445,32 @@ pub(crate) async fn award_on(
             .bind(event_id)
             .execute(&mut *conn)
             .await?;
+        let champion = match bracket.champion() {
+            Some(seed) => entrant_tag(conn, event_id, seed).await?,
+            None => "none".into(),
+        };
+        journal.event_completed(event_id, champion);
     }
     Ok(())
+}
+
+/// The tag of the entrant seeded `seed` in `event_id`.
+pub(crate) async fn entrant_tag(
+    conn: &mut SqliteConnection,
+    event_id: i64,
+    seed: u32,
+) -> Result<String, LifecycleError> {
+    let tag: Option<String> = sqlx::query_scalar(
+        "SELECT p.tag FROM entrants n JOIN players p ON p.key = n.player_key
+         WHERE n.event_id = ? AND n.seed = ?",
+    )
+    .bind(event_id)
+    .bind(seed)
+    .fetch_optional(&mut *conn)
+    .await?;
+    tag.ok_or_else(|| {
+        LifecycleError::Corrupt(format!("event {event_id} has no entrant seeded {seed}"))
+    })
 }
 
 /// Queue reason for a set awarded with both of its entrants disqualified.

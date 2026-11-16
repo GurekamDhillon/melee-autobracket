@@ -5,6 +5,7 @@ use proto::RegisterReq;
 use super::ApiError;
 use crate::auth::AnyKey;
 use crate::db::{begin_write, now_unix};
+use crate::logging::key_prefix;
 use crate::state::AppState;
 
 /// `POST /v1/players`: binds the signing key to a tag.
@@ -66,6 +67,7 @@ pub async fn register(State(state): State<AppState>, req: AnyKey) -> Result<Stat
         Err(e) => return Err(e.into()),
     }
     tx.commit().await?;
+    tracing::info!(tag = %body.tag, key = %key_prefix(&req.key), "player registered");
     Ok(StatusCode::CREATED)
 }
 

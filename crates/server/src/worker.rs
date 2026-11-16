@@ -10,10 +10,12 @@ use std::time::{Duration, Instant};
 
 use anyhow::Context;
 use proto::{ResimOutcome, Ruleset, Verdict};
+use tracing::{error, info, warn};
 
 use crate::db::{begin_write, now_unix};
 use crate::judge::{self, Pre};
-use crate::lifecycle;
+use crate::lifecycle::{self, verdict_name};
+use crate::logging::{resim_kind, Journal};
 use crate::review::{self, STALLED};
 use crate::state::AppState;
 
@@ -28,12 +30,12 @@ pub async fn run(st: AppState) {
     let mut last_stall_check: Option<Instant> = None;
     loop {
         if let Err(e) = judge_due(&st).await {
-            eprintln!("worker: judging failed: {e:#}");
+            error!(error = %format_args!("{e:#}"), "judging failed");
         }
         if last_stall_check.is_none_or(|t| t.elapsed() >= STALL_CHECK_PERIOD) {
             last_stall_check = Some(Instant::now());
             if let Err(e) = flag_stalled_sets(&st).await {
-                eprintln!("worker: looking for stalled sets failed: {e:#}");
+                error!(error = %format_args!("{e:#}"), "looking for stalled sets failed");
             }
         }
         tokio::select! {
@@ -95,7 +97,7 @@ pub async fn judge_due(st: &AppState) -> anyhow::Result<usize> {
                 .execute(&st.db)
                 .await;
                 if let Err(he) = handed_back {
-                    eprintln!("worker: game {game_id}: returning it to uploading failed: {he}");
+                    error!(game_id, error = %he, "returning a game to uploading failed");
                 }
                 first_err.get_or_insert(e.context(format!("judging game {game_id}")));
             }
@@ -118,6 +120,8 @@ pub async fn flag_stalled_sets(st: &AppState) -> anyhow::Result<usize> {
     }
     let now = now_unix();
     let cutoff = now.saturating_sub(i64::try_from(stall_secs).unwrap_or(i64::MAX));
+    let mut journal = Journal::default();
+    let mut flagged = Vec::new();
     let mut tx = begin_write(&st.db).await?;
     let idle: Vec<(i64, i64, i64)> = sqlx::query_as(
         "SELECT s.event_id, s.set_id, s.updated_at FROM sets s JOIN events e ON e.id = s.event_id
@@ -128,22 +132,30 @@ pub async fn flag_stalled_sets(st: &AppState) -> anyhow::Result<usize> {
     .fetch_all(&mut *tx)
     .await
     .context("finding idle sets")?;
-    let mut flagged = 0;
     for (event_id, set_id, updated_at) in idle {
         if review::game_in_progress(&mut tx, event_id, set_id).await? {
             continue;
         }
         let set = u32::try_from(set_id).with_context(|| format!("sets row set_id {set_id}"))?;
-        let detail = format!("no activity for {} s", now - updated_at);
-        review::send_to_review(&mut tx, event_id, set, STALLED, Some(&detail)).await?;
-        flagged += 1;
+        let idle_secs = now - updated_at;
+        let detail = format!("no activity for {idle_secs} s");
+        review::send_to_review(&mut tx, event_id, set, STALLED, Some(&detail), &mut journal)
+            .await?;
+        flagged.push((event_id, set, idle_secs));
     }
     tx.commit().await?;
-    Ok(flagged)
+    for &(event_id, set, idle_secs) in &flagged {
+        info!(event = event_id, set, idle_secs, "stalled set flagged");
+    }
+    journal.emit();
+    Ok(flagged.len())
 }
 
 /// What judging one game needs, read when it was claimed.
 struct Claim {
+    event_id: i64,
+    set_id: i64,
+    game_no: i64,
     ruleset: Ruleset,
     /// Stored replay path per slot (0 is the host).
     paths: [Option<PathBuf>; 2],
@@ -161,8 +173,9 @@ async fn claim(st: &AppState, game_id: i64) -> anyhow::Result<Option<Claim>> {
     if claimed.rows_affected() == 0 {
         return Ok(None);
     }
-    let ruleset_json: String = sqlx::query_scalar(
-        "SELECT e.ruleset_json FROM games g JOIN events e ON e.id = g.event_id WHERE g.id = ?",
+    let (event_id, set_id, game_no, ruleset_json): (i64, i64, i64, String) = sqlx::query_as(
+        "SELECT g.event_id, g.set_id, g.game_no, e.ruleset_json
+         FROM games g JOIN events e ON e.id = g.event_id WHERE g.id = ?",
     )
     .bind(game_id)
     .fetch_one(&mut *tx)
@@ -184,18 +197,30 @@ async fn claim(st: &AppState, game_id: i64) -> anyhow::Result<Option<Claim>> {
         paths[slot] = Some(PathBuf::from(path));
     }
     tx.commit().await?;
-    Ok(Some(Claim { ruleset, paths }))
+    Ok(Some(Claim {
+        event_id,
+        set_id,
+        game_no,
+        ruleset,
+        paths,
+    }))
 }
 
 /// Judges a claimed game and applies the verdict. Holds no transaction while re-simulating.
 async fn judge_claimed(st: &AppState, game_id: i64, claim: Claim) -> anyhow::Result<()> {
+    let started = Instant::now();
     let mut files: [Option<Vec<u8>>; 2] = [None, None];
     for (file, path) in files.iter_mut().zip(&claim.paths) {
         let Some(path) = path else { continue };
         match tokio::fs::read(path).await {
             Ok(bytes) => *file = Some(bytes),
             // A lost file is a missing upload: the game goes to the organiser, never counts.
-            Err(e) => eprintln!("worker: game {game_id}: reading {}: {e}", path.display()),
+            Err(e) => warn!(
+                game_id,
+                path = %path.display(),
+                error = %e,
+                "stored replay unreadable; judged as missing"
+            ),
         }
     }
     let ruleset = claim.ruleset;
@@ -206,6 +231,7 @@ async fn judge_claimed(st: &AppState, game_id: i64, claim: Claim) -> anyhow::Res
     .await
     .context("pre-judging")?;
 
+    let mut resim_ms = 0;
     let (verdict, winner_slot, resim, verifier_build) = match pre {
         // Decided before any re-simulation (`Single` included: the lone upload is not run
         // through the engine), so no verifier build checked it.
@@ -217,10 +243,16 @@ async fn judge_claimed(st: &AppState, game_id: i64, claim: Claim) -> anyhow::Res
             let host = claim.paths[0]
                 .as_deref()
                 .context("agreeing pair without a host upload")?;
+            let resim_started = Instant::now();
             let (outcome, build) = st.resim.check_with_build(host, last_frame).await;
+            resim_ms = resim_started.elapsed().as_millis();
             if let ResimOutcome::Unavailable(detail) = &outcome {
-                eprintln!(
-                    "worker: game {game_id}: verifier unavailable, judging peer-only: {detail}"
+                warn!(
+                    game_id,
+                    event = claim.event_id,
+                    set = claim.set_id,
+                    detail = %detail,
+                    "verifier unavailable; judging peer-only"
                 );
             }
             let v: Verdict = judge::finish(&outcome, st.cfg.strict_resim);
@@ -241,5 +273,25 @@ async fn judge_claimed(st: &AppState, game_id: i64, claim: Claim) -> anyhow::Res
         verifier_build.as_deref(),
     )
     .await?;
+    info!(
+        event = claim.event_id,
+        set = claim.set_id,
+        game = claim.game_no,
+        game_id,
+        verdict = %verdict_display(&verdict),
+        resim = %resim_kind(&resim),
+        verifier_build = %verifier_build.as_deref().unwrap_or("-"),
+        judging_ms = started.elapsed().as_millis(),
+        resim_ms,
+        "verdict"
+    );
     Ok(())
+}
+
+/// A verdict as logged: its name, with the failed rule of an `Illegal` one.
+fn verdict_display(v: &Verdict) -> String {
+    match v {
+        Verdict::Illegal(rule) => format!("Illegal({rule})"),
+        other => verdict_name(other).to_owned(),
+    }
 }

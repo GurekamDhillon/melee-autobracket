@@ -78,7 +78,7 @@ pub async fn replay(
     let bytes = match tokio::fs::read(&stored).await {
         Ok(bytes) => bytes,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            eprintln!("quarantine {id}: replay {stored} is missing");
+            tracing::warn!(quarantine = id, path = %stored, "quarantined replay is missing");
             return Err(ApiError::new(
                 StatusCode::NOT_FOUND,
                 "replay file is missing",

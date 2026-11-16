@@ -53,8 +53,10 @@ impl FromRequest<AppState> for AnyKey {
             .extensions
             .get::<OriginalUri>()
             .map_or(&parts.uri, |o| &o.0);
-        let headers = signed_headers(&parts.headers)
-            .ok_or_else(|| ApiError::new(StatusCode::UNAUTHORIZED, "missing signature headers"))?;
+        let headers = signed_headers(&parts.headers).ok_or_else(|| {
+            state.rejections.record();
+            ApiError::new(StatusCode::UNAUTHORIZED, "missing signature headers")
+        })?;
         let body = match Limited::new(body, state.cfg.max_replay_bytes)
             .collect()
             .await
@@ -76,7 +78,10 @@ impl FromRequest<AppState> for AnyKey {
         let path_and_query = uri.path_and_query().map_or(uri.path(), |pq| pq.as_str());
         let now = now_unix();
         let key = verify_request(&headers, parts.method.as_str(), path_and_query, now, &body)
-            .map_err(|_| ApiError::new(StatusCode::UNAUTHORIZED, "invalid signature"))?;
+            .map_err(|_| {
+                state.rejections.record();
+                ApiError::new(StatusCode::UNAUTHORIZED, "invalid signature")
+            })?;
         record_nonce(state, &key, &headers.nonce, now).await?;
         Ok(AnyKey { key, body })
     }
@@ -162,6 +167,7 @@ async fn record_nonce(state: &AppState, key: &str, nonce: &str, now: i64) -> Res
             .await
             .map_err(internal)?;
     if inserted.rows_affected() == 0 {
+        state.rejections.record();
         return Err(ApiError::new(
             StatusCode::UNAUTHORIZED,
             "nonce already used",
@@ -172,6 +178,6 @@ async fn record_nonce(state: &AppState, key: &str, nonce: &str, now: i64) -> Res
 
 /// Logs a store failure and maps it to a generic 500.
 fn internal(e: sqlx::Error) -> Rejection {
-    eprintln!("auth: database error: {e}");
+    tracing::error!(error = %e, "auth: database error");
     ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, "internal error")
 }

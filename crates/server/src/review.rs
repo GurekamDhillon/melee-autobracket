@@ -7,11 +7,13 @@ use axum::http::StatusCode;
 use bracket::{BracketError, SetId, SetState, Slot};
 use proto::Resolve;
 use sqlx::SqliteConnection;
+use tracing::info;
 
 use crate::db::{begin_write, now_unix};
 use crate::lifecycle::{
     award_on, dq_award, read_bracket, to_json, DecidedBy, LifecycleError, DOUBLE_DQ,
 };
+use crate::logging::{key_prefix, Journal};
 use crate::routes::ApiError;
 use crate::state::AppState;
 
@@ -30,6 +32,7 @@ pub(crate) async fn open_queue_item(
     game_id: Option<i64>,
     reason: &str,
     detail: Option<&str>,
+    journal: &mut Journal,
 ) -> Result<i64, LifecycleError> {
     let id = sqlx::query_scalar(
         "INSERT INTO queue (event_id, set_id, game_id, reason, state, created_at, detail)
@@ -43,6 +46,7 @@ pub(crate) async fn open_queue_item(
     .bind(detail)
     .fetch_one(&mut *conn)
     .await?;
+    journal.queue_opened(id, event_id, set_id, reason);
     Ok(id)
 }
 
@@ -75,6 +79,7 @@ pub(crate) async fn send_to_review(
     set_id: SetId,
     reason: &str,
     detail: Option<&str>,
+    journal: &mut Journal,
 ) -> Result<i64, LifecycleError> {
     let moved = sqlx::query(
         "UPDATE sets SET state = 'review', room_code = NULL, updated_at = ?
@@ -90,7 +95,7 @@ pub(crate) async fn send_to_review(
             "set {event_id}/{set_id} is not ready"
         )));
     }
-    open_queue_item(conn, event_id, set_id, None, reason, detail).await
+    open_queue_item(conn, event_id, set_id, None, reason, detail, journal).await
 }
 
 /// The queue detail of a no-show report: who reported it, and their note cut to
@@ -171,6 +176,7 @@ pub async fn resolve_queue_item(
         "at": now_unix(),
     }))?;
 
+    let mut journal = Journal::default();
     let mut tx = begin_write(&st.db).await?;
     let row: Option<(i64, i64, String)> =
         sqlx::query_as("SELECT event_id, set_id, state FROM queue WHERE id = ?")
@@ -200,6 +206,7 @@ pub async fn resolve_queue_item(
                     set_id,
                     slot,
                     Some(DecidedBy::Award),
+                    &mut journal,
                 )
                 .await?;
             }
@@ -232,7 +239,7 @@ pub async fn resolve_queue_item(
                 .bind(seed)
                 .execute(&mut *tx)
                 .await?;
-            award_dq_ready(&mut tx, event_id, &resolution).await?;
+            award_dq_ready(&mut tx, event_id, &resolution, &mut journal).await?;
         }
     }
 
@@ -242,6 +249,21 @@ pub async fn resolve_queue_item(
         .execute(&mut *tx)
         .await?;
     tx.commit().await?;
+    journal.emit();
+    let (resolution, slot) = match *r {
+        Resolve::Award { slot } => ("award", Some(slot)),
+        Resolve::Replay => ("replay", None),
+        Resolve::Dq { slot } => ("dq", Some(slot)),
+    };
+    info!(
+        id = item_id,
+        event = event_id,
+        set = set_id,
+        resolution = %resolution,
+        slot = %slot.map_or_else(|| "-".to_owned(), |s| s.to_string()),
+        to = %key_prefix(to_key),
+        "queue item resolved"
+    );
     Ok(())
 }
 
@@ -278,6 +300,7 @@ async fn award_dq_ready(
     conn: &mut SqliteConnection,
     event_id: i64,
     resolution: &str,
+    journal: &mut Journal,
 ) -> Result<(), LifecycleError> {
     loop {
         let bracket = read_bracket(conn, event_id).await?;
@@ -299,10 +322,11 @@ async fn award_dq_ready(
             id,
             award.slot,
             Some(award.decided_by()),
+            journal,
         )
         .await?;
         if award.double {
-            open_queue_item(conn, event_id, id, None, DOUBLE_DQ, None).await?;
+            open_queue_item(conn, event_id, id, None, DOUBLE_DQ, None, journal).await?;
         }
     }
 }

@@ -15,6 +15,7 @@ use super::{parse_body, ApiError};
 use crate::auth::To;
 use crate::db::{begin_write, now_unix};
 use crate::lifecycle::{self, format_to_str};
+use crate::logging::{key_prefix, label};
 use crate::review;
 use crate::state::AppState;
 
@@ -50,6 +51,13 @@ pub async fn create_event(
     .bind(now_unix())
     .fetch_one(&state.db)
     .await?;
+    tracing::info!(
+        event = id,
+        name = %label(&req.name),
+        format = %format_to_str(req.format),
+        best_of = ruleset.best_of,
+        "event created"
+    );
     let created = summary(id, req.name, "signup".into(), 0)?;
     Ok((StatusCode::CREATED, Json(created)))
 }
@@ -196,6 +204,12 @@ pub async fn rekey(
         }
     }
     tx.commit().await?;
+    tracing::info!(
+        old = %key_prefix(&old_key),
+        new = %key_prefix(&req.new_key),
+        to = %key_prefix(&to.key),
+        "player rekeyed"
+    );
     Ok(StatusCode::NO_CONTENT)
 }
 

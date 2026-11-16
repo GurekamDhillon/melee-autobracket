@@ -13,6 +13,7 @@ use proto::{VerifyJob, VerifyResult};
 use super::{parse_body, ApiError};
 use crate::auth::Verifier;
 use crate::db::{begin_write, now_unix};
+use crate::logging::{key_prefix, label, resim_kind};
 use crate::state::AppState;
 
 /// A claim older than this is presumed abandoned and the job is offered again.
@@ -20,7 +21,7 @@ const CLAIM_TTL_SECS: i64 = 300;
 
 /// `POST /v1/verify/claim`: takes the oldest job that is queued, or whose claim has gone
 /// stale. `200 VerifyJob`, or `204` when there is none.
-pub async fn claim(State(state): State<AppState>, _v: Verifier) -> Result<Response, ApiError> {
+pub async fn claim(State(state): State<AppState>, v: Verifier) -> Result<Response, ApiError> {
     let now = now_unix();
     let mut tx = begin_write(&state.db).await?;
     let job: Option<(i64, i32)> = sqlx::query_as(
@@ -40,6 +41,7 @@ pub async fn claim(State(state): State<AppState>, _v: Verifier) -> Result<Respon
         .execute(&mut *tx)
         .await?;
     tx.commit().await?;
+    tracing::info!(job = id, verifier = %key_prefix(&v.key), "verify job claimed");
     Ok(Json(VerifyJob {
         id,
         replay_last_frame,
@@ -92,6 +94,13 @@ pub async fn result(
         .execute(&mut *tx)
         .await?;
     tx.commit().await?;
+    tracing::info!(
+        job = id,
+        outcome = %resim_kind(&result.outcome),
+        build = %label(&result.build),
+        verifier = %key_prefix(&v.key),
+        "verify result posted"
+    );
     state.resim.result_posted();
     Ok(StatusCode::NO_CONTENT)
 }

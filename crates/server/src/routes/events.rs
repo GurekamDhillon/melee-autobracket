@@ -11,6 +11,7 @@ use super::{parse_body, ApiError};
 use crate::auth::Player;
 use crate::db::begin_write;
 use crate::lifecycle::{load_bracket, LifecycleError, MAX_ENTRANTS};
+use crate::logging::label;
 use crate::state::AppState;
 
 /// `GET /v1/events`: every event, oldest first.
@@ -96,6 +97,13 @@ pub async fn signup(
     .execute(&mut *tx)
     .await?;
     tx.commit().await?;
+    tracing::info!(
+        event = id,
+        tag = %player.tag,
+        seed = count,
+        engine_build = %label(&body.engine_build),
+        "signed up"
+    );
     Ok(StatusCode::CREATED)
 }
 

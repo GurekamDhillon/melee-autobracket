@@ -21,6 +21,7 @@ use super::{parse_body, ApiError};
 use crate::auth::Player;
 use crate::db::{begin_write, now_unix};
 use crate::lifecycle::{load_bracket_on, LifecycleError};
+use crate::logging::{label, sha_prefix, Journal};
 use crate::review::{self, NO_SHOW};
 use crate::state::AppState;
 
@@ -158,6 +159,7 @@ pub async fn room(
             "room code must be 4 characters of A-Z or 0-9, or host:port",
         ));
     }
+    let game = current_game(&mut tx, event, set).await?;
     sqlx::query("UPDATE sets SET room_code = ?, updated_at = ? WHERE event_id = ? AND set_id = ?")
         .bind(&req.code)
         .bind(now_unix())
@@ -166,6 +168,8 @@ pub async fn room(
         .execute(&mut *tx)
         .await?;
     tx.commit().await?;
+    // Never the code itself: it is the key to the netplay room.
+    tracing::info!(event, set, game = game.game_no, "room code posted");
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -203,8 +207,20 @@ pub async fn no_show(
         ));
     }
     let detail = review::no_show_detail(seat.slot, &player.tag, req.detail.as_deref());
-    review::send_to_review(&mut tx, event, narrow(set)?, NO_SHOW, Some(&detail)).await?;
+    let mut journal = Journal::default();
+    review::send_to_review(
+        &mut tx,
+        event,
+        narrow(set)?,
+        NO_SHOW,
+        Some(&detail),
+        &mut journal,
+    )
+    .await?;
     tx.commit().await?;
+    // The note is the player's own text, so it stays in the queue item, not the log.
+    tracing::info!(event, set, slot = seat.slot, tag = %player.tag, "no-show reported");
+    journal.emit();
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -341,6 +357,17 @@ pub async fn upload(
         let _ = tokio::fs::remove_file(&dest).await;
         return Err(e.into());
     }
+    tracing::info!(
+        event,
+        set,
+        game = n,
+        game_id,
+        slot = seat.slot,
+        bytes = player.body.len(),
+        sha256 = %sha_prefix(&sha256),
+        client_build = %label(&client_build),
+        "replay uploaded"
+    );
     state.wake.notify_one();
     Ok(StatusCode::ACCEPTED)
 }

@@ -392,9 +392,9 @@ impl Resim for ExternalResim {
             .await
             .context("retiring unfinished verifier jobs")?;
         if retired.rows_affected() > 0 {
-            eprintln!(
-                "external verifier: retired {} job(s) left unfinished by a previous run",
-                retired.rows_affected()
+            tracing::info!(
+                jobs = retired.rows_affected(),
+                "external verifier: retired jobs left unfinished by a previous run"
             );
         }
         let _ = self.db.set(db.clone());

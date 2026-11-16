@@ -7,8 +7,10 @@ use std::time::Duration;
 use anyhow::{bail, Context};
 use proto::{sign_request, SigningKey, VerifyJob, VerifyResult};
 use reqwest::{Method, StatusCode};
+use tracing::{info, warn};
 
 use crate::db::now_unix;
+use crate::logging::resim_kind;
 use crate::resim::{Resim, ScratchDir, Slpcheck};
 
 /// Pause after the server reports no queued jobs.
@@ -49,8 +51,8 @@ pub fn insecure_server_warning(server: &str) -> Option<String> {
             .is_ok_and(|ip| ip.is_loopback());
     (!loopback).then(|| {
         format!(
-            "verify-worker: warning: {server} is plain http; anyone on the path can swap the \
-             replays this worker checks. Use https:// in production."
+            "{server} is plain http; anyone on the path can swap the replays this worker \
+             checks. Use https:// in production."
         )
     })
 }
@@ -59,20 +61,20 @@ pub fn insecure_server_warning(server: &str) -> Option<String> {
 /// HTTP client can fail.
 pub async fn run(server: String, key: SigningKey, engine: Slpcheck) -> anyhow::Result<()> {
     if let Some(warning) = insecure_server_warning(&server) {
-        eprintln!("{warning}");
+        warn!("{warning}");
     }
     let client = Client::new(&server, key, CONNECT_TIMEOUT, REQUEST_TIMEOUT)?;
-    eprintln!(
-        "verify-worker: checking jobs from {} with engine build {}",
-        client.base,
-        engine.build()
+    info!(
+        server = %client.base,
+        build = %engine.build(),
+        "verify-worker started"
     );
     loop {
         match step(&client, &engine).await {
             Ok(true) => {}
             Ok(false) => tokio::time::sleep(IDLE_SLEEP).await,
             Err(e) => {
-                eprintln!("verify-worker: {e:#}");
+                warn!(error = %format_args!("{e:#}"), "verify-worker: retrying after an error");
                 tokio::time::sleep(ERROR_SLEEP).await;
             }
         }
@@ -98,6 +100,7 @@ async fn step(client: &Client, engine: &Slpcheck) -> anyhow::Result<bool> {
     let Some(job) = claim(client).await? else {
         return Ok(false);
     };
+    info!(job = job.id, "verify job claimed");
 
     let res = client
         .send(
@@ -121,7 +124,6 @@ async fn step(client: &Client, engine: &Slpcheck) -> anyhow::Result<bool> {
 
     let outcome = engine.check(&slp, job.replay_last_frame).await;
     drop(dir);
-    eprintln!("verify-worker: job {}: {outcome:?}", job.id);
 
     let result = VerifyResult {
         outcome,
@@ -136,9 +138,18 @@ async fn step(client: &Client, engine: &Slpcheck) -> anyhow::Result<bool> {
         )
         .await?;
     match res.status() {
-        StatusCode::NO_CONTENT => {}
+        StatusCode::NO_CONTENT => info!(
+            job = job.id,
+            outcome = %resim_kind(&result.outcome),
+            build = %result.build,
+            "verify result posted"
+        ),
         // The server gave up on the job, or another verifier finished it first.
-        StatusCode::CONFLICT => eprintln!("verify-worker: job {}: result not needed", job.id),
+        StatusCode::CONFLICT => info!(
+            job = job.id,
+            outcome = %resim_kind(&result.outcome),
+            "verify result not needed"
+        ),
         _ => bail!("posting job {} result: {}", job.id, describe(res).await),
     }
     Ok(true)

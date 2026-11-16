@@ -5,6 +5,7 @@ use tokio::sync::Notify;
 use tokio::task::AbortHandle;
 
 use crate::config::Config;
+use crate::logging::Rejections;
 use crate::resim::Resim;
 
 #[derive(Clone)]
@@ -16,6 +17,8 @@ pub struct AppState {
     pub wake: Arc<Notify>,
     /// The background tasks `build_app` spawned.
     pub tasks: Arc<Tasks>,
+    /// Requests refused for their signature, summarised in the log.
+    pub rejections: Arc<Rejections>,
 }
 
 /// Abort handles of spawned background tasks, so an embedder (e.g. a test) can stop them.

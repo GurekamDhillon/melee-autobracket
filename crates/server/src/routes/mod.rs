@@ -57,7 +57,7 @@ impl ApiError {
 
     /// Logs the cause; the client only sees a generic 500.
     pub fn internal(e: impl Display) -> Self {
-        eprintln!("internal error: {e}");
+        tracing::error!(error = %e, "internal error");
         ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, "internal error")
     }
 }

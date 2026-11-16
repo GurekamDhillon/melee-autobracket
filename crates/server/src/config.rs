@@ -71,6 +71,17 @@ pub enum VerifierMode {
     Off,
 }
 
+impl VerifierMode {
+    /// The mode as written in the configuration file.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            VerifierMode::InProcess => "in_process",
+            VerifierMode::External => "external",
+            VerifierMode::Off => "off",
+        }
+    }
+}
+
 impl Default for VerifierConfig {
     fn default() -> Self {
         VerifierConfig {
