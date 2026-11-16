@@ -470,6 +470,17 @@ that is the address to trust. A wrong value fails safe against spoofing but not 
 the header is ignored, so every player appears as the proxy's one address and shares one rate
 limit, and players get HTTP 429.
 
+### Stream
+
+To show a live stream on the `/stream` page, put the viewer's URL in `stream_url` (for example
+a MediaMTX WebRTC viewer, `stream_url = "https://live.example.org/melee/"`); unset, the page
+says no stream is configured. The page embeds the URL in a frame, and its security policy lets
+the browser frame that URL's origin (`https://live.example.org` here) and nothing else; every
+other page, and everything else on the stream page, stays first-party, so the stream's origin
+is the only third party a visitor's browser ever contacts, and only on that page. The URL must
+be `http` or `https` with a host, or the server refuses to start. Under it the page lists the
+sets being played right now, with links to their brackets.
+
 ### Logs
 
 The server logs to stderr (the journal, under systemd), one plain-text line per event with

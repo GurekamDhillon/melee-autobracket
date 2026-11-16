@@ -17,6 +17,7 @@ mod players;
 mod quarantine;
 mod results;
 mod sets;
+mod stream;
 mod verify_jobs;
 mod view;
 
@@ -24,7 +25,9 @@ pub fn router() -> Router<AppState> {
     Router::new()
         .route("/", get(view::home))
         .route("/events/{id}", get(view::event))
+        .route("/stream", get(view::stream))
         .route("/assets/fonts/{file}", get(view::font))
+        .route("/v1/stream", get(stream::stream))
         .route("/v1/players", post(players::register))
         .route("/v1/events", get(events::list))
         .route("/v1/events/{id}", get(events::view))

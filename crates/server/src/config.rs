@@ -71,6 +71,10 @@ pub struct Config {
     /// Accept `host:port` room codes (direct connection, for LAN events).
     #[serde(default)]
     pub allow_direct_connect: bool,
+    /// The live stream the `/stream` page embeds (an `http` or `https` URL with a host, e.g.
+    /// a MediaMTX WebRTC viewer). Only its origin ([`Config::stream_origin`]) may be framed.
+    #[serde(default)]
+    pub stream_url: Option<String>,
 }
 
 #[derive(Deserialize, Clone, Debug)]
@@ -142,6 +146,7 @@ impl Config {
             trusted_proxies: Vec::new(),
             no_show_grace_secs: default_no_show_grace_secs(),
             allow_direct_connect: false,
+            stream_url: None,
         }
     }
 
@@ -210,7 +215,24 @@ impl Config {
             bail!("max_connections must be at least 1");
         }
         crate::net::parse_cidrs(&self.trusted_proxies).context("trusted_proxies")?;
+        if let Some(url) = &self.stream_url {
+            if parse_stream_url(url).is_none() {
+                bail!(
+                    "stream_url must be an http or https URL with a host, \
+                     e.g. \"https://live.example.org/melee/\""
+                );
+            }
+        }
         Ok(())
+    }
+
+    /// `scheme://host[:port]` of `stream_url`, the one origin the stream page may frame; `None`
+    /// when no stream is configured. Lowercase, ASCII, without a default port.
+    pub fn stream_origin(&self) -> Option<String> {
+        self.stream_url
+            .as_deref()
+            .and_then(parse_stream_url)
+            .map(|url| url.origin().ascii_serialization())
     }
 
     /// Whether `build` is on `accepted_builds` (always, when the list is empty). An entry
@@ -224,6 +246,30 @@ impl Config {
                 .iter()
                 .any(|a| a == build || a == version)
     }
+}
+
+/// `text` as the URL of a stream viewer, or `None` unless it is an `http` or `https` URL with a
+/// host and nothing else before the path (no credentials) whose origin is plain enough to go
+/// into a CSP directive as it is: ASCII letters, digits, `.`, `-`, `:`, `/` and IPv6 brackets.
+fn parse_stream_url(text: &str) -> Option<reqwest::Url> {
+    // The URL parser forgives `https:///host` (and more slashes); the organiser meant a typo.
+    let rest = text
+        .strip_prefix("https://")
+        .or_else(|| text.strip_prefix("http://"))?;
+    if rest.is_empty() || rest.starts_with('/') {
+        return None;
+    }
+    let url = reqwest::Url::parse(text).ok()?;
+    if url.host_str().is_none() || !url.username().is_empty() || url.password().is_some() {
+        return None;
+    }
+    let origin = url.origin();
+    let plain = origin.is_tuple()
+        && origin
+            .ascii_serialization()
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b".-:/[]".contains(&b));
+    plain.then_some(url)
 }
 
 /// 64 lowercase hex characters: the form keys are compared in.
@@ -492,6 +538,65 @@ mod tests {
             let err = rejection(&format!("trusted_proxies = [\"10.0.0.0/8\", \"{bad}\"]"));
             assert!(err.contains("trusted_proxies"), "{bad}: {err}");
             assert!(err.contains(bad), "the entry is named: {err}");
+        }
+    }
+
+    #[test]
+    fn stream_url_parses_and_gives_its_origin() {
+        let cfg = Config::parse(&format!(
+            "to_keys = [\"{KEY}\"]\nstream_url = \"https://live.example.org:8889/melee/\"\n"
+        ))
+        .unwrap();
+        assert_eq!(
+            cfg.stream_origin().as_deref(),
+            Some("https://live.example.org:8889")
+        );
+        assert_eq!(Config::new(vec![KEY.into()]).stream_origin(), None);
+    }
+
+    /// The origin is `scheme://host[:port]` and nothing more: no path, no default port, no
+    /// credentials, lowercase host; `http` is allowed (a viewer on the LAN).
+    #[test]
+    fn stream_origin_is_scheme_host_and_port_only() {
+        for (url, origin) in [
+            (
+                "https://live.example.org/melee/",
+                "https://live.example.org",
+            ),
+            (
+                "https://Live.Example.org:443/x?y#z",
+                "https://live.example.org",
+            ),
+            ("http://192.168.1.20:8889/melee", "http://192.168.1.20:8889"),
+            ("http://[::1]:8889/", "http://[::1]:8889"),
+        ] {
+            let cfg =
+                Config::parse(&format!("to_keys = [\"{KEY}\"]\nstream_url = \"{url}\"\n")).unwrap();
+            assert_eq!(cfg.stream_url.as_deref(), Some(url));
+            assert_eq!(cfg.stream_origin().as_deref(), Some(origin), "{url}");
+        }
+    }
+
+    #[test]
+    fn rejects_bad_stream_url() {
+        for bad in [
+            "ftp://live.example.org/",
+            "live.example.org/melee",
+            "https://",
+            "https:///melee",
+            "",
+            "https://user:pw@live.example.org/",
+            "https://user@live.example.org/",
+            "https://live.example.org:99999/",
+            "https://live example.org/",
+            "https://live.example.org;frame-src/",
+            "https://live.example.org'/",
+            "https://live.example.org\\\"/",
+            "data:text/html,hi",
+            "javascript:alert(1)",
+        ] {
+            let err = rejection(&format!("stream_url = \"{bad}\""));
+            assert!(err.contains("stream_url"), "{bad}: {err}");
         }
     }
 

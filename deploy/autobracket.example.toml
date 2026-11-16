@@ -54,6 +54,9 @@ trusted_proxies = []
 no_show_grace_secs = 90
 # Accept HOST:PORT room codes (a direct connection to the host, for LAN events; reveals addresses).
 allow_direct_connect = false
+# Live stream to embed on the /stream page (e.g. a MediaMTX WebRTC viewer). Unset: the page says
+# no stream is configured. Only this URL's origin is allowed in the page's frame.
+# stream_url = "https://live.example.org/melee/"
 
 [verifier]
 # "in_process" runs the engine here, "external" waits for `autobracket verify-worker`, "off" skips

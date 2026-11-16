@@ -176,6 +176,13 @@ pub struct EventSummary {
     pub created_at: i64,
 }
 
+/// Where the live stream is (`GET /v1/stream`): the organiser's `stream_url`, or null when
+/// no stream is configured.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Default)]
+pub struct StreamInfo {
+    pub url: Option<String>,
+}
+
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub struct EventView {
     pub summary: EventSummary,

@@ -35,12 +35,27 @@ const SOURCES: &[(&str, &str, &str, &str)] = &[
         include_str!("../../assets/pages/event.html"),
         include_str!("../../assets/pages/event.js"),
     ),
+    (
+        "stream",
+        "Stream",
+        include_str!("../../assets/pages/stream.html"),
+        include_str!("../../assets/pages/stream.js"),
+    ),
 ];
 
 /// A finished page and the policy that pins its inline blocks.
 struct Page {
     html: String,
     csp: String,
+}
+
+impl Page {
+    /// The page's policy with one more directive, for a page that needs something of the
+    /// configuration at request time (the stream page's `frame-src`); the base policy of every
+    /// page stays as [`assemble`] made it.
+    fn csp_with(&self, directive: &str) -> String {
+        format!("{}; {directive}", self.csp)
+    }
 }
 
 /// Every page, assembled on first use.
@@ -73,11 +88,16 @@ fn assemble(title: &str, body: &str, script: &str) -> Page {
 
 /// The assembled page `name` (a key of [`SOURCES`]) with its headers.
 fn page(name: &'static str) -> Response {
+    page_with_csp(name, |p| p.csp.clone())
+}
+
+/// The assembled page `name` with the policy `csp` makes from it.
+fn page_with_csp(name: &'static str, csp: impl FnOnce(&Page) -> String) -> Response {
     match PAGES.get(name) {
         Some(p) => (
             [
-                (header::X_CONTENT_TYPE_OPTIONS, "nosniff"),
-                (header::CONTENT_SECURITY_POLICY, p.csp.as_str()),
+                (header::X_CONTENT_TYPE_OPTIONS, "nosniff".to_owned()),
+                (header::CONTENT_SECURITY_POLICY, csp(p)),
             ],
             Html(p.html.clone()),
         )
@@ -104,6 +124,16 @@ pub async fn event(
         return Err(ApiError::new(StatusCode::NOT_FOUND, "no such event"));
     }
     Ok(page("event"))
+}
+
+/// `GET /stream`: the stream page. With a `stream_url` configured its CSP alone gains
+/// `frame-src <origin>`, so the page may frame that origin and nothing else; without one it is
+/// as locked down as every other page.
+pub async fn stream(State(state): State<AppState>) -> Response {
+    match state.cfg.stream_origin() {
+        Some(origin) => page_with_csp("stream", |p| p.csp_with(&format!("frame-src {origin}"))),
+        None => page("stream"),
+    }
 }
 
 /// The pages' fonts by file name (`assets/fonts/README.md` says where they come from).

@@ -226,7 +226,9 @@ described above; the tables list the other statuses.
 |---|---|---|---|---|---|
 | GET | `/` | public | — | 200 HTML landing page | — |
 | GET | `/events/{id}` | public | — | 200 HTML bracket page | 400, 404 |
+| GET | `/stream` | public | — | 200 HTML stream page | — |
 | GET | `/assets/fonts/{file}` | public | — | 200 `font/woff2`, one of the page's fonts | 404 |
+| GET | `/v1/stream` | public | — | 200 `StreamInfo` | — |
 | GET | `/v1/events` | public | — | 200 `[EventSummary]` | — |
 | GET | `/v1/events/{id}` | public | — | 200 `EventView` | 400, 404 |
 | GET | `/v1/history` | public | — | 200 `[EventResult]`, complete events, newest first | — |
@@ -416,6 +418,17 @@ In a request every field is optional (missing ones take the defaults shown here)
   "description": "Bo3, Friday 8pm",
   "created_at": 1763200000
 }
+```
+
+### StreamInfo
+
+The organiser's `stream_url` as configured, or `null` when no stream is configured. The
+`/stream` page embeds it; that page's CSP allows framing the URL's origin and nothing else,
+and no page's HTML carries the URL (it reaches the page through this route).
+
+<!-- checked: StreamInfo -->
+```json
+{"url": "https://live.example.org/melee/"}
 ```
 
 ### EventView

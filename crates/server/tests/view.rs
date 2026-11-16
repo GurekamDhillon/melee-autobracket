@@ -18,7 +18,11 @@ async fn fetch(app: &TestApp, path: &str) -> reqwest::Response {
 async fn all_pages(app: &TestApp) -> Vec<String> {
     let event = app.create_event(Format::SingleElim).await;
     app.player("Mango").await;
-    vec!["/".to_owned(), format!("/events/{event}")]
+    vec![
+        "/".to_owned(),
+        "/stream".to_owned(),
+        format!("/events/{event}"),
+    ]
 }
 
 #[tokio::test]
@@ -89,6 +93,7 @@ fn example_config_parses() {
     assert_eq!(cfg.trusted_proxies, defaults.trusted_proxies);
     assert_eq!(cfg.no_show_grace_secs, defaults.no_show_grace_secs);
     assert_eq!(cfg.allow_direct_connect, defaults.allow_direct_connect);
+    assert_eq!(cfg.stream_url, None);
 }
 
 /// Standard base64 (with padding), as CSP hash sources use.
@@ -152,6 +157,87 @@ async fn pages_have_security_headers() {
             let expected = format!("{directive} 'sha256-{hash}'");
             assert!(csp.contains(&expected), "{path}: {expected} in {csp}");
         }
+    }
+}
+
+#[tokio::test]
+async fn stream_page_without_a_stream() {
+    let app = TestApp::spawn(|_| {}).await;
+    let info: serde_json::Value = fetch(&app, "/v1/stream").await.json().await.unwrap();
+    assert_eq!(info, serde_json::json!({ "url": null }));
+
+    let res = fetch(&app, "/stream").await;
+    assert_eq!(res.status(), StatusCode::OK);
+    let csp = res.headers()["content-security-policy"]
+        .to_str()
+        .unwrap()
+        .to_owned();
+    assert!(!csp.contains("frame-src"), "{csp}");
+    let body = res.text().await.unwrap();
+    for needle in [
+        "/v1/stream",
+        "No stream is configured",
+        "Now playing",
+        r#"allow="autoplay; fullscreen""#,
+        r#"referrerpolicy="no-referrer""#,
+        r#"title="Live stream""#,
+        r#"rel="noopener""#,
+        "Nothing is being played right now.",
+    ] {
+        assert!(body.contains(needle), "{needle:?} in the stream page");
+    }
+}
+
+#[tokio::test]
+async fn stream_page_frames_only_the_configured_origin() {
+    let app = TestApp::spawn(|c| {
+        c.stream_url = Some("https://live.example.org:8889/melee/".into());
+    })
+    .await;
+    let info: serde_json::Value = fetch(&app, "/v1/stream").await.json().await.unwrap();
+    assert_eq!(
+        info,
+        serde_json::json!({ "url": "https://live.example.org:8889/melee/" })
+    );
+
+    let res = fetch(&app, "/stream").await;
+    assert_eq!(res.status(), StatusCode::OK);
+    let csp = res.headers()["content-security-policy"]
+        .to_str()
+        .unwrap()
+        .to_owned();
+    assert!(
+        csp.contains("; frame-src https://live.example.org:8889"),
+        "{csp}"
+    );
+    assert!(!csp.contains("/melee"), "the origin only: {csp}");
+    assert_eq!(csp.matches("frame-src").count(), 1, "{csp}");
+    // The rest of the policy is the one every page gets.
+    for directive in [
+        "default-src 'none'",
+        "connect-src 'self'",
+        "frame-ancestors 'none'",
+    ] {
+        assert!(csp.contains(directive), "{directive} in {csp}");
+    }
+    let body = res.text().await.unwrap();
+    assert!(
+        !body.contains("http"),
+        "the URL reaches the page as JSON only"
+    );
+
+    for path in all_pages(&app).await {
+        if path == "/stream" {
+            continue;
+        }
+        let res = fetch(&app, &path).await;
+        let csp = res.headers()["content-security-policy"]
+            .to_str()
+            .unwrap()
+            .to_owned();
+        assert!(!csp.contains("frame-src"), "{path}: {csp}");
+        assert!(!csp.contains("live.example.org"), "{path}: {csp}");
+        assert!(!csp.contains("http"), "{path}: {csp}");
     }
 }
 
