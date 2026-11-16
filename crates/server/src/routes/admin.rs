@@ -8,14 +8,16 @@ use std::collections::HashMap;
 
 use axum::Json;
 use bracket::Bracket;
-use proto::{EventCreateReq, EventSummary, EventView, QueueItem, RekeyReq, Resolve};
+use proto::{
+    EventCreateReq, EventScheduleReq, EventSummary, EventView, QueueItem, RekeyReq, Resolve,
+};
 use rand::rngs::OsRng;
 use rand::Rng;
 use serde_json::{json, Value};
 use sqlx::SqliteConnection;
 
 use super::events::{event_view, summary};
-use super::{check_text, parse_body, ApiError, MAX_EVENT_NAME_CHARS};
+use super::{check_schedule, check_text, parse_body, ApiError, MAX_EVENT_NAME_CHARS};
 use crate::auth::To;
 use crate::db::{begin_write, now_unix};
 use crate::lifecycle::{self, format_to_str};
@@ -46,15 +48,19 @@ pub async fn create_event(
             .validate()
             .map_err(|e| ApiError::new(StatusCode::BAD_REQUEST, e))?;
     }
+    let description = check_schedule(req.starts_at, req.description)?;
     let ruleset_json = serde_json::to_string(&ruleset).map_err(ApiError::internal)?;
+    let created_at = now_unix();
     let id: i64 = sqlx::query_scalar(
-        "INSERT INTO events (name, format, ruleset_json, state, created_at)
-         VALUES (?, ?, ?, 'signup', ?) RETURNING id",
+        "INSERT INTO events (name, format, ruleset_json, state, created_at, starts_at, description)
+         VALUES (?, ?, ?, 'signup', ?, ?, ?) RETURNING id",
     )
     .bind(&req.name)
     .bind(format_to_str(req.format))
     .bind(ruleset_json)
-    .bind(now_unix())
+    .bind(created_at)
+    .bind(req.starts_at)
+    .bind(&description)
     .fetch_one(&state.db)
     .await?;
     tracing::info!(
@@ -62,10 +68,49 @@ pub async fn create_event(
         name = %crate::logging::detail(&req.name),
         format = %format_to_str(req.format),
         best_of = ruleset.best_of,
+        starts_at = req.starts_at,
         "event created"
     );
-    let created = summary(id, req.name, "signup".into(), 0)?;
+    let created = summary(
+        id,
+        req.name,
+        "signup".into(),
+        0,
+        req.starts_at,
+        description,
+        created_at,
+    )?;
     Ok((StatusCode::CREATED, Json(created)))
+}
+
+/// `POST /v1/admin/events/{id}/schedule` (`EventScheduleReq`): sets when the event starts and
+/// what it is about, in any state. Both fields are replaced: an omitted or null one clears
+/// it, as does an empty or all-whitespace description. 404 for an unknown event.
+pub async fn schedule(
+    State(state): State<AppState>,
+    path: Result<Path<i64>, PathRejection>,
+    to: To,
+) -> Result<StatusCode, ApiError> {
+    let Path(event) = path.map_err(|e| ApiError::new(StatusCode::BAD_REQUEST, e.to_string()))?;
+    let req: EventScheduleReq = parse_body(&to.body)?;
+    let description = check_schedule(req.starts_at, req.description)?;
+    let changed = sqlx::query("UPDATE events SET starts_at = ?, description = ? WHERE id = ?")
+        .bind(req.starts_at)
+        .bind(&description)
+        .bind(event)
+        .execute(&state.db)
+        .await?
+        .rows_affected();
+    if changed == 0 {
+        return Err(lifecycle::LifecycleError::NoSuchEvent.into());
+    }
+    tracing::info!(
+        event,
+        starts_at = req.starts_at,
+        to = %key_prefix(&to.key),
+        "event scheduled"
+    );
+    Ok(StatusCode::NO_CONTENT)
 }
 
 /// `DELETE /v1/admin/events/{id}/entrants/{tag}`: takes the player with `tag` out of an event

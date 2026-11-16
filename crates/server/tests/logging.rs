@@ -276,6 +276,8 @@ async fn event_name_must_be_short_and_printable() {
             format: Format::SingleElim,
             ruleset: None,
             best_of: None,
+            starts_at: None,
+            description: None,
         };
         let res = app.as_to().post_json("/v1/admin/events", &req).await;
         assert_eq!(res.status(), StatusCode::BAD_REQUEST, "{bad:?}");
@@ -285,6 +287,8 @@ async fn event_name_must_be_short_and_printable() {
         format: Format::SingleElim,
         ruleset: None,
         best_of: None,
+        starts_at: None,
+        description: None,
     };
     let res = app.as_to().post_json("/v1/admin/events", &req).await;
     assert_eq!(res.status(), StatusCode::CREATED);

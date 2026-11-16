@@ -145,3 +145,41 @@ async fn migration_0003_applies_to_a_populated_0002_database() {
     pool.close().await;
     db::open(&path).await.unwrap();
 }
+
+/// A database at the 0004 schema with an event, then opened by the current server: 0005 adds
+/// the start time and the description, both empty for the old row.
+#[tokio::test]
+async fn migration_0005_applies_to_a_populated_0004_database() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("old.sqlite");
+
+    let mut old = sqlx::migrate!("./migrations");
+    assert!(old.migrations.len() >= 5, "expected 0001 to 0005");
+    old.migrations = Cow::Owned(old.migrations[..4].to_vec());
+    assert_eq!(old.migrations[3].version, 4);
+    let opts = SqliteConnectOptions::new()
+        .filename(&path)
+        .create_if_missing(true);
+    let pool = SqlitePoolOptions::new().connect_with(opts).await.unwrap();
+    old.run(&pool).await.unwrap();
+    sqlx::query(
+        "INSERT INTO events (id, name, format, ruleset_json, state, bracket_json, created_at)
+         VALUES (1, 'Old', 'single_elim', '{}', 'signup', NULL, 1)",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    pool.close().await;
+
+    let pool = db::open(&path).await.unwrap();
+    let (starts_at, description): (Option<i64>, Option<String>) =
+        sqlx::query_as("SELECT starts_at, description FROM events")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!((starts_at, description), (None, None));
+
+    // Opening again is a no-op.
+    pool.close().await;
+    db::open(&path).await.unwrap();
+}

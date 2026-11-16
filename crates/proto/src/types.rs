@@ -138,6 +138,25 @@ pub struct EventCreateReq {
     /// Overrides `best_of` of the event's ruleset (`ruleset`, or else the server's own).
     #[serde(default)]
     pub best_of: Option<u8>,
+    /// When the event starts, unix seconds (0 to 4102444800).
+    #[serde(default)]
+    pub starts_at: Option<i64>,
+    /// What the event is about: at most 280 printable characters; empty or whitespace is
+    /// stored as absent.
+    #[serde(default)]
+    pub description: Option<String>,
+}
+
+/// Sets or clears an event's start time and description (`POST
+/// /v1/admin/events/{id}/schedule`): both fields are replaced, so an omitted one clears it.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Default)]
+pub struct EventScheduleReq {
+    /// When the event starts, unix seconds (0 to 4102444800).
+    #[serde(default)]
+    pub starts_at: Option<i64>,
+    /// At most 280 printable characters; empty or whitespace clears it.
+    #[serde(default)]
+    pub description: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
@@ -146,6 +165,15 @@ pub struct EventSummary {
     pub name: String,
     pub state: String,
     pub entrants: u32,
+    /// When the event starts, unix seconds; null when the organiser has not said.
+    #[serde(default)]
+    pub starts_at: Option<i64>,
+    /// What the event is about, or null.
+    #[serde(default)]
+    pub description: Option<String>,
+    /// When the event was created, unix seconds.
+    #[serde(default)]
+    pub created_at: i64,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
@@ -255,6 +283,8 @@ mod tests {
         let req: EventCreateReq =
             serde_json::from_str(r#"{"name":"W","format":"SingleElim","ruleset":null}"#).unwrap();
         assert_eq!(req.best_of, None);
+        assert_eq!(req.starts_at, None);
+        assert_eq!(req.description, None);
         let req: EventCreateReq = serde_json::from_str(
             r#"{"name":"W","format":"DoubleElim","ruleset":null,"best_of":5}"#,
         )

@@ -13,7 +13,9 @@ use autobracket_server::logging::{clean, label};
 use autobracket_server::verify_worker::insecure_server_warning;
 use bracket::Format;
 use clap::{Args, Subcommand, ValueEnum};
-use proto::{sign_request, EventCreateReq, QueueItem, RekeyReq, Resolve, SigningKey};
+use proto::{
+    sign_request, EventCreateReq, EventScheduleReq, QueueItem, RekeyReq, Resolve, SigningKey,
+};
 use reqwest::Method;
 use serde::Serialize;
 use serde_json::Value;
@@ -77,9 +79,25 @@ enum EventCmd {
         /// Games per set outside the grand final (odd); the rest of the server's ruleset applies.
         #[arg(long, value_name = "N")]
         best_of: Option<u8>,
+        /// When the event starts, unix seconds, e.g. `date -d '2026-11-20 20:00' +%s`
+        #[arg(long, value_name = "UNIX")]
+        starts_at: Option<i64>,
+        /// What the event is about, at most 280 characters.
+        #[arg(long)]
+        description: Option<String>,
     },
     /// Close sign-up and build the bracket.
     Start { id: i64 },
+    /// Set or clear when an event starts and what it is about; an omitted flag clears that field.
+    Schedule {
+        id: i64,
+        /// When the event starts, unix seconds, e.g. `date -d '2026-11-20 20:00' +%s`
+        #[arg(long, value_name = "UNIX")]
+        starts_at: Option<i64>,
+        /// What the event is about, at most 280 characters.
+        #[arg(long)]
+        description: Option<String>,
+    },
 }
 
 #[derive(Clone, Copy, ValueEnum)]
@@ -341,6 +359,8 @@ fn request(cmd: AdminCmd) -> anyhow::Result<Request> {
             name,
             format,
             best_of,
+            starts_at,
+            description,
         }) => {
             let req = EventCreateReq {
                 name,
@@ -351,6 +371,8 @@ fn request(cmd: AdminCmd) -> anyhow::Result<Request> {
                 // The server applies `best_of` to its own configured ruleset.
                 ruleset: None,
                 best_of,
+                starts_at,
+                description,
             };
             simple(Method::POST, "/v1/admin/events".into(), json(&req)?)
         }
@@ -358,6 +380,18 @@ fn request(cmd: AdminCmd) -> anyhow::Result<Request> {
             Method::POST,
             format!("/v1/admin/events/{id}/start"),
             Vec::new(),
+        ),
+        AdminCmd::Event(EventCmd::Schedule {
+            id,
+            starts_at,
+            description,
+        }) => simple(
+            Method::POST,
+            format!("/v1/admin/events/{id}/schedule"),
+            json(&EventScheduleReq {
+                starts_at,
+                description,
+            })?,
         ),
         AdminCmd::Invite(InviteCmd::New) => {
             simple(Method::POST, "/v1/admin/invites".into(), Vec::new())
@@ -479,6 +513,22 @@ mod tests {
         assert_eq!(
             path_of(&["entrants", "a b/c?"]).unwrap(),
             "/entrants/a%20b%2Fc%3F"
+        );
+    }
+
+    #[test]
+    fn schedule_request_clears_omitted_fields() {
+        let req = request(AdminCmd::Event(EventCmd::Schedule {
+            id: 3,
+            starts_at: None,
+            description: Some("x".into()),
+        }))
+        .unwrap();
+        assert_eq!(req.method, Method::POST);
+        assert_eq!(req.path, "/v1/admin/events/3/schedule");
+        assert_eq!(
+            String::from_utf8(req.body).unwrap(),
+            r#"{"starts_at":null,"description":"x"}"#
         );
     }
 
