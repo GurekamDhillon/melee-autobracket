@@ -1,0 +1,44 @@
+[package]
+name = "autobracket-server"
+edition.workspace = true
+version.workspace = true
+
+[lib]
+name = "autobracket_server"
+
+[[bin]]
+name = "autobracket"
+path = "src/main.rs"
+
+[features]
+# Test harness (`testkit` module) for this crate's tests and for other crates' tests.
+testkit = ["dep:reqwest", "dep:tempfile"]
+
+[dependencies]
+proto.workspace = true
+bracket.workspace = true
+replay.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+anyhow.workspace = true
+hex.workspace = true
+rand.workspace = true
+axum.workspace = true
+tokio.workspace = true
+sqlx.workspace = true
+tower_governor.workspace = true
+http-body-util.workspace = true
+bytes.workspace = true
+clap.workspace = true
+toml.workspace = true
+async-trait.workspace = true
+reqwest = { workspace = true, optional = true }
+tempfile = { workspace = true, optional = true }
+
+[dev-dependencies]
+replay = { workspace = true, features = ["testkit"] }
+autobracket-server = { path = ".", features = ["testkit"] }
+reqwest.workspace = true
+tower.workspace = true
