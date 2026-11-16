@@ -10,6 +10,7 @@ fn create_req(format: Format) -> EventCreateReq {
         name: "Weekly".into(),
         format,
         ruleset: None,
+        best_of: None,
     }
 }
 

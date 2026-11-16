@@ -13,6 +13,7 @@ use crate::state::AppState;
 mod admin;
 mod events;
 mod players;
+mod quarantine;
 mod sets;
 mod view;
 
@@ -32,6 +33,11 @@ pub fn router() -> Router<AppState> {
             "/v1/sets/{event}/{set}/games/{n}/replay",
             post(sets::upload),
         )
+        .route("/v1/admin/queue", get(admin::queue))
+        .route("/v1/admin/queue/{id}/resolve", post(admin::resolve))
+        .route("/v1/admin/players/{old_key}/rekey", post(admin::rekey))
+        .route("/v1/quarantine", get(quarantine::list))
+        .route("/v1/quarantine/{id}/replay/{slot}", get(quarantine::replay))
 }
 
 /// An error response: a status code and a JSON body of the form `{"error": "...", ...}`.

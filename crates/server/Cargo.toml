@@ -12,7 +12,7 @@ path = "src/main.rs"
 
 [features]
 # Test harness (`testkit` module) for this crate's tests and for other crates' tests.
-testkit = ["dep:reqwest", "dep:tempfile"]
+testkit = ["dep:tempfile", "replay/testkit"]
 
 [dependencies]
 proto.workspace = true
@@ -34,7 +34,7 @@ bytes.workspace = true
 clap.workspace = true
 toml.workspace = true
 async-trait.workspace = true
-reqwest = { workspace = true, optional = true }
+reqwest.workspace = true
 tempfile = { workspace = true, optional = true }
 
 [dev-dependencies]

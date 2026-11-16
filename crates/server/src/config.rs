@@ -42,6 +42,9 @@ pub struct Config {
     pub verifier: VerifierConfig,
     #[serde(default)]
     pub ruleset: Ruleset,
+    /// Runs the background judging worker. Off only in tests that drive judging themselves.
+    #[serde(default = "default_worker_enabled")]
+    pub worker_enabled: bool,
 }
 
 #[derive(Deserialize, Clone, Debug)]
@@ -94,6 +97,7 @@ impl Config {
             rate_burst: default_rate_burst(),
             verifier: VerifierConfig::default(),
             ruleset: Ruleset::default(),
+            worker_enabled: default_worker_enabled(),
         }
     }
 
@@ -136,6 +140,10 @@ fn default_rate_burst() -> u32 {
     40
 }
 
+fn default_worker_enabled() -> bool {
+    true
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -153,6 +161,7 @@ mod tests {
         assert_eq!((cfg.verifier.timeout_secs, cfg.verifier.jobs), (120, 2));
         assert!(cfg.accepted_builds.is_empty());
         assert_eq!(cfg.ruleset, Ruleset::default());
+        assert!(cfg.worker_enabled);
     }
 
     #[test]
