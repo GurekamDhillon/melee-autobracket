@@ -12,7 +12,7 @@ path = "src/main.rs"
 
 [features]
 # Test harness (`testkit` module) for this crate's tests and for other crates' tests.
-testkit = ["dep:reqwest", "dep:tempfile"]
+testkit = ["dep:reqwest", "dep:tempfile", "replay/testkit"]
 
 [dependencies]
 proto.workspace = true

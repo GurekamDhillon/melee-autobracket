@@ -1,11 +1,16 @@
 //! Test harness: a server on a random local port backed by a temporary
 //! directory, and signing HTTP clients for organisers and players.
 
+use std::collections::VecDeque;
 use std::net::SocketAddr;
-use std::sync::Arc;
+use std::path::Path;
+use std::sync::{Arc, Mutex};
 
+use async_trait::async_trait;
 use bracket::Format;
-use proto::{sign_request, EventCreateReq, EventSummary, RegisterReq, SigningKey, SignupReq};
+use proto::{
+    sign_request, EventCreateReq, EventSummary, RegisterReq, ResimOutcome, SigningKey, SignupReq,
+};
 use rand::rngs::OsRng;
 use rand::RngCore;
 use reqwest::Method;
@@ -26,7 +31,8 @@ pub struct TestApp {
 }
 
 impl TestApp {
-    /// Spawns with [`NoResim`]. Rate limits are raised out of reach unless `edit` lowers them.
+    /// Spawns with [`NoResim`]. Rate limits are raised out of reach and the background worker
+    /// is off (tests judge with [`crate::worker::judge_due`]) unless `edit` changes them.
     pub async fn spawn(edit: impl FnOnce(&mut Config)) -> Self {
         Self::spawn_with(edit, Arc::new(NoResim)).await
     }
@@ -40,6 +46,7 @@ impl TestApp {
         cfg.replay_dir = dir.path().join("replays");
         cfg.rate_per_sec = 1_000_000;
         cfg.rate_burst = 1_000_000;
+        cfg.worker_enabled = false;
         edit(&mut cfg);
 
         let (app, state) = build_app(cfg, resim).await.expect("build app");
@@ -47,7 +54,7 @@ impl TestApp {
             .await
             .expect("bind");
         let addr = listener.local_addr().expect("local addr");
-        tokio::spawn(async move {
+        let server = tokio::spawn(async move {
             axum::serve(
                 listener,
                 app.into_make_service_with_connect_info::<SocketAddr>(),
@@ -55,6 +62,7 @@ impl TestApp {
             .await
             .expect("serve");
         });
+        state.tasks.add(server.abort_handle());
         TestApp {
             url: format!("http://{addr}"),
             to,
@@ -130,6 +138,61 @@ impl TestApp {
         assert_eq!(res.status(), reqwest::StatusCode::OK, "starting event");
         event
     }
+}
+
+impl Drop for TestApp {
+    /// Stops the server and background tasks.
+    fn drop(&mut self) {
+        self.state.tasks.abort_all();
+    }
+}
+
+/// A verifier that returns queued outcomes in order, then `Match`; its build is `"fake"`.
+pub struct FakeResim(pub Mutex<VecDeque<ResimOutcome>>);
+
+#[async_trait]
+impl Resim for FakeResim {
+    async fn check(&self, _slp: &Path, _replay_last_frame: i32) -> ResimOutcome {
+        self.0
+            .lock()
+            .expect("FakeResim lock")
+            .pop_front()
+            .unwrap_or(ResimOutcome::Match)
+    }
+
+    fn build(&self) -> String {
+        "fake".into()
+    }
+}
+
+/// Plays game `n` of `set`: `host` (slot 0) and `guest` upload an agreeing pair that
+/// `winner_port` wins (with different `start_at`), then the due games are judged.
+pub async fn play_game(
+    app: &TestApp,
+    event: i64,
+    set: u32,
+    n: u8,
+    host: &TestPlayer,
+    guest: &TestPlayer,
+    winner_port: u8,
+) {
+    let path = format!("/v1/sets/{event}/{set}/games/{n}/replay");
+    for (p, start_at) in [
+        (host, "2026-11-15T20:00:00Z"),
+        (guest, "2026-11-15T20:00:01Z"),
+    ] {
+        let file = replay::testkit::simple_game(winner_port, start_at);
+        let res = p.post_bytes(&path, file, &[("x-ab-build", "b1")]).await;
+        assert_eq!(
+            res.status(),
+            reqwest::StatusCode::ACCEPTED,
+            "{} uploading game {n} of set {set}",
+            p.tag
+        );
+    }
+    crate::worker::judge_due(&app.state)
+        .await
+        .expect("judging uploaded games");
 }
 
 pub struct TestPlayer {
