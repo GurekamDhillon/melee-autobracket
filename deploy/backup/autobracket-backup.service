@@ -1,11 +1,13 @@
 [Unit]
 Description=autobracket nightly local backup (SQLite snapshot, optional Zitadel pg_dump)
-Documentation=file:///usr/share/doc/autobracket/backup.md
-# Only the local disk is written to: there is no off-site copy (docs/backup.md).
+# Only the local disk is written to: there is no off-site copy (docs/backup.md in the repo).
 After=autobracket.service docker.service
 
 [Service]
 Type=oneshot
+# "+" runs outside the sandbox: ReadWritePaths= below needs the directory to exist before the
+# namespace is set up. Change the path together with BACKUP_DIR and ReadWritePaths=.
+ExecStartPre=+/usr/bin/install -d -m 700 -o root -g root /var/backups/autobracket
 ExecStart=/usr/local/bin/autobracket-backup.sh
 # Runs as root: it must read the DynamicUser's state directory and talk to Docker. Keep the
 # rest of the system read-only to it.
@@ -27,8 +29,10 @@ MemoryDenyWriteExecute=yes
 SystemCallArchitectures=native
 # @system-service keeps setrlimit etc., which the docker CLI (Go) needs at start-up.
 SystemCallFilter=@system-service
-# Enough to read the service's private state directory and manage its own files.
-CapabilityBoundingSet=CAP_DAC_OVERRIDE CAP_DAC_READ_SEARCH CAP_FOWNER
+# Enough to read the service's private state directory and manage its own files. CAP_CHOWN:
+# sqlite3 gives any -wal/-shm it has to create the database owner's uid, so a run killed
+# while the server is stopped cannot leave root-owned side files the server could not open.
+CapabilityBoundingSet=CAP_DAC_OVERRIDE CAP_DAC_READ_SEARCH CAP_FOWNER CAP_CHOWN
 # Where backups are written (BACKUP_DIR in backup.env; change both together), and the live
 # database's directory: a reader of a WAL-mode SQLite database writes to its -shm file, so
 # the state directory cannot be read-only here. Paths marked "-" may be missing.

@@ -135,6 +135,31 @@ n=$(find "$bdir" -maxdepth 1 -name 'autobracket-*.sqlite' | wc -l)
 [ "$(find "$bdir" -maxdepth 1 -name 'zitadel-*.pgdump' | wc -l)" = 8 ] || fail "pg rotation ran although postgres is not configured"
 pass "rotation keeps the newest 7 sqlite snapshots"
 
+# 3b. Rotation never deletes the snapshot just written, even when other files sort after it
+# (clock stepped backwards: future-stamped names), and never touches a hand-placed file whose
+# name is not of the generated shape (nor counts it towards KEEP).
+: > "$bdir/autobracket-manual.sqlite"
+: > "$bdir/autobracket-2020-notes.sqlite"
+for i in 1 2 3 4 5 6 7; do : > "$bdir/autobracket-2099123$i-000000.sqlite"; done
+before=$(find "$bdir" -maxdepth 1 -name 'autobracket-*.sqlite' | sort)
+sleep 1
+run
+[ "$status" = 0 ] || fail "clock-step run exited $status: $out"
+after=$(find "$bdir" -maxdepth 1 -name 'autobracket-*.sqlite' | sort)
+newest="$(comm -13 <(echo "$before") <(echo "$after"))"
+if [ -z "$newest" ] || [ ! -f "$newest" ]; then
+    fail "the snapshot just written was deleted by rotation (or never written): $out"
+fi
+[ "$("$SQLITE3" -readonly "$newest" "PRAGMA integrity_check;")" = ok ] || fail "surviving snapshot fails integrity_check"
+[ -e "$bdir/autobracket-manual.sqlite" ] || fail "hand-placed file was deleted by rotation"
+[ -e "$bdir/autobracket-2020-notes.sqlite" ] || fail "hand-placed file was deleted by rotation"
+n=$(find "$bdir" -maxdepth 1 -regextype posix-extended -regex '.*/autobracket-[0-9]{8}-[0-9]{6}\.sqlite' | wc -l)
+[ "$n" = 7 ] || fail "rotation kept $n stamped sqlite files, want 7 (the new one plus the 6 newest-sorting)"
+[ -e "$bdir/autobracket-20991237-000000.sqlite" ] || fail "newest-sorting file was deleted"
+[ ! -e "$bdir/autobracket-20991231-000000.sqlite" ] || fail "oldest future file should have made room for the new snapshot"
+pass "rotation spares the just-written snapshot and hand-placed files"
+rm -f "$bdir"/autobracket-2099*.sqlite "$bdir/autobracket-manual.sqlite" "$bdir/autobracket-2020-notes.sqlite"
+
 # 4. Postgres path through a fake docker that behaves like `docker exec ... pg_dump`.
 cat > "$work/bin/docker" <<'SH'
 #!/usr/bin/env bash

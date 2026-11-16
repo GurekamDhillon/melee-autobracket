@@ -66,6 +66,7 @@ DOCKER="${DOCKER:-docker}"
 case "$KEEP" in
     '' | *[!0-9]*) die "KEEP must be a positive integer, got '$KEEP'" ;;
 esac
+KEEP=$((10#$KEEP)) # "08" is eight, not octal
 [ "$KEEP" -ge 1 ] || die "KEEP must be at least 1"
 case "$BACKUP_DIR" in
     /?*) ;;
@@ -90,16 +91,24 @@ cleanup() {
 }
 trap cleanup EXIT
 
-# Deletes all but the newest $KEEP files matching "$1*$2" in BACKUP_DIR (the timestamp in the
-# name sorts chronologically). Temporary files start with a dot and are never matched.
+# rotate PREFIX SUFFIX JUST_WRITTEN: deletes all but the newest $KEEP files named
+# PREFIX<YYYYMMDD-HHMMSS>SUFFIX in BACKUP_DIR (the stamp sorts chronologically). Only names of
+# exactly that shape are touched, so a hand-placed file is left alone (and not counted), and
+# the file this run just wrote is never deleted, even when the clock stepped backwards since
+# the last run. Temporary files start with a dot and never match.
 rotate() {
-    local prefix="$1" suffix="$2" n=0 f
-    # Newest first; `tail -n +$((KEEP + 1))` leaves the KEEP newest alone.
+    local prefix="$1" suffix="$2" keep_name suffix_re n=0 f
+    keep_name="$(basename "$3")"
+    suffix_re="${suffix//./\\.}" # a literal dot in the regex below
+    # The just-written file plus, newest first, the KEEP-1 newest others stay: `tail -n +KEEP`
+    # of the others (which exclude it) names the rest.
     while IFS= read -r f; do
         [ -n "$f" ] || continue
         rm -f -- "$f"
         n=$((n + 1))
-    done < <(find "$BACKUP_DIR" -maxdepth 1 -type f -name "$prefix*$suffix" -print | sort -r | tail -n +$((KEEP + 1)))
+    done < <(find "$BACKUP_DIR" -maxdepth 1 -type f -regextype posix-extended \
+        -regex ".*/${prefix}[0-9]{8}-[0-9]{6}${suffix_re}" ! -name "$keep_name" -print \
+        | sort -r | tail -n +"$KEEP")
     [ "$n" = 0 ] || log "removed $n old $prefix*$suffix (keeping $KEEP)"
 }
 
@@ -127,7 +136,7 @@ esac
 chmod 600 "$sqlite_tmp"
 mv -f -- "$sqlite_tmp" "$sqlite_final"
 log "sqlite: $sqlite_final ($(stat -c %s "$sqlite_final") bytes, integrity ok)"
-rotate autobracket- .sqlite
+rotate autobracket- .sqlite "$sqlite_final"
 
 # --- 2. Zitadel Postgres (optional) -----------------------------------------------------
 if [ -z "$PG_CONTAINER" ]; then
@@ -155,7 +164,7 @@ else
     chmod 600 "$pg_tmp"
     mv -f -- "$pg_tmp" "$pg_final"
     log "postgres: $pg_final ($(stat -c %s "$pg_final") bytes)"
-    rotate zitadel- .pgdump
+    rotate zitadel- .pgdump "$pg_final"
 fi
 
 log "done; $BACKUP_DIR holds $(find "$BACKUP_DIR" -maxdepth 1 -type f ! -name '.*' | wc -l) files (local only, no off-site copy)"

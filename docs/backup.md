@@ -49,8 +49,10 @@ shows up in `systemctl --failed`):
    files (`.*.tmp`) are removed on any exit.
 
 The timer fires at 03:30 local time with up to 30 minutes of random delay
-(`RandomizedDelaySec`) and catches up a missed night at the next boot (`Persistent=true`).
-The service unit runs as root (it must read the `DynamicUser`'s private state directory and
+(`RandomizedDelaySec`) and catches up a missed night at the next boot (`Persistent=true`); a
+catch-up run that starts before the Zitadel container is up fails once with "container not
+running" and succeeds the next night. The service unit creates `BACKUP_DIR` (an `ExecStartPre`
+outside the sandbox) and runs as root (it must read the `DynamicUser`'s private state directory and
 reach Docker), with the rest of the file system read-only except `BACKUP_DIR` and the state
 directory; a WAL reader writes to the database's `-shm` file, so the latter cannot be
 read-only.
@@ -65,6 +67,7 @@ sudo install -m 755 deploy/backup/autobracket-backup.sh /usr/local/bin/
 sudo install -m 600 deploy/backup/backup.env.example /etc/autobracket/backup.env
 sudo $EDITOR /etc/autobracket/backup.env                   # PG_CONTAINER etc., or leave the defaults
 sudo install -m 644 deploy/backup/autobracket-backup.service deploy/backup/autobracket-backup.timer /etc/systemd/system/
+sudo install -d -m 700 /var/backups/autobracket             # the unit also does this on every start
 sudo systemctl daemon-reload
 sudo systemctl start autobracket-backup.service            # one run now, to check it works
 sudo ls -la /var/backups/autobracket
@@ -72,8 +75,8 @@ sudo systemctl enable --now autobracket-backup.timer
 systemctl list-timers autobracket-backup.timer
 ```
 
-If you change `BACKUP_DIR`, change `ReadWritePaths=` in the service unit to match (a
-drop-in `systemctl edit autobracket-backup.service` works). Logs: `journalctl -u
+If you change `BACKUP_DIR`, change `ReadWritePaths=` and the `ExecStartPre=` line in the
+service unit to match (a drop-in `systemctl edit autobracket-backup.service` works). Logs: `journalctl -u
 autobracket-backup`.
 
 Test the script without touching the system: `scripts/test-backup.sh` runs it against a
@@ -85,20 +88,23 @@ the skipped-Postgres path and the Postgres path through a fake `docker`.
 ### autobracket (SQLite)
 
 The snapshot is a complete database file. Stop the server, keep the broken database, put the
-snapshot in its place with the right owner, start the server:
+snapshot in its place with the right owner, start the server. `/var/lib/private` is readable
+by root only, so every command below runs through `sudo` with absolute paths (an
+unprivileged `cd` into it fails):
 
 ```sh
+state=/var/lib/private/autobracket          # the real StateDirectory (DynamicUser)
 sudo systemctl stop autobracket
-cd /var/lib/private/autobracket            # the real StateDirectory (DynamicUser)
-sudo mv autobracket.sqlite autobracket.sqlite.broken
-sudo rm -f autobracket.sqlite-wal autobracket.sqlite-shm     # stale WAL would be applied to the restored file
-sudo install -m 600 -o "$(stat -c %U .)" -g "$(stat -c %G .)" \
-  /var/backups/autobracket/autobracket-YYYYMMDD-HHMMSS.sqlite autobracket.sqlite
+sudo mv "$state/autobracket.sqlite" "$state/autobracket.sqlite.broken"
+sudo rm -f "$state/autobracket.sqlite-wal" "$state/autobracket.sqlite-shm"   # a stale WAL would be applied to the restored file
+owner="$(sudo stat -c %U "$state")"; group="$(sudo stat -c %G "$state")"
+sudo install -m 600 -o "$owner" -g "$group" \
+  /var/backups/autobracket/autobracket-YYYYMMDD-HHMMSS.sqlite "$state/autobracket.sqlite"
 sudo systemctl start autobracket
 journalctl -u autobracket -n 20
 ```
 
-The owner is the state directory's owner (the dynamic user; `stat -c %U .` prints it, which
+The owner is the state directory's owner (the dynamic user; `sudo stat -c %U` prints it, which
 may be a bare uid when the service is stopped: that is fine). The server re-enables WAL
 mode on start. Results, events, players and replay records since the snapshot are gone;
 replay files in `replays/` stay on disk but the database no longer knows the later ones.
