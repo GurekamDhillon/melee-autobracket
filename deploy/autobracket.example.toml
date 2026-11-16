@@ -1,4 +1,5 @@
 # autobracket server configuration. Copy to /etc/autobracket/autobracket.toml.
+# Easier: `autobracket init --dir DIR` writes a config with a new organiser key already in it.
 # Every value below is the default except to_keys, allow_no_organiser, db_path and replay_dir.
 
 # Address and port the HTTP server listens on.
@@ -15,8 +16,10 @@ require_invite = false
 # Tournament organiser public keys, lowercase hex (printed by `autobracket keygen`), e.g.
 # to_keys = ["<64 hex characters>"]. The server refuses to start with none...
 to_keys = []
-# ...unless this is true. It is set here only so this file runs as-is for a first look; with no
-# organiser key nobody can create or run events. Delete this line once to_keys holds your key.
+# ...unless this is true.
+# !!! REMOVE THE NEXT LINE when you add your key to to_keys. It is here ONLY so this example
+# !!! parses as-is; it switches off the check that refuses a server nobody can administer.
+# !!! `autobracket init` writes a config with a real key and without this line.
 allow_no_organiser = true
 # Public keys of external verifier workers, lowercase hex (for verifier mode "external").
 verifier_keys = []
