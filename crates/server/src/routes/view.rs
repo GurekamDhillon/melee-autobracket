@@ -41,6 +41,18 @@ const SOURCES: &[(&str, &str, &str, &str)] = &[
         include_str!("../../assets/pages/stream.html"),
         include_str!("../../assets/pages/stream.js"),
     ),
+    (
+        "schedule",
+        "Schedule",
+        include_str!("../../assets/pages/schedule.html"),
+        include_str!("../../assets/pages/schedule.js"),
+    ),
+    (
+        "history",
+        "History",
+        include_str!("../../assets/pages/history.html"),
+        include_str!("../../assets/pages/history.js"),
+    ),
 ];
 
 /// A finished page and the policy that pins its inline blocks.
@@ -134,6 +146,16 @@ pub async fn stream(State(state): State<AppState>) -> Response {
         Some(origin) => page_with_csp("stream", |p| p.csp_with(&format!("frame-src {origin}"))),
         None => page("stream"),
     }
+}
+
+/// `GET /schedule`: what is running and what is coming up.
+pub async fn schedule() -> Response {
+    page("schedule")
+}
+
+/// `GET /history`: completed events and their placings.
+pub async fn history() -> Response {
+    page("history")
 }
 
 /// The pages' fonts by file name (`assets/fonts/README.md` says where they come from).

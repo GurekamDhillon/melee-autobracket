@@ -26,6 +26,8 @@ pub fn router() -> Router<AppState> {
         .route("/", get(view::home))
         .route("/events/{id}", get(view::event))
         .route("/stream", get(view::stream))
+        .route("/schedule", get(view::schedule))
+        .route("/history", get(view::history))
         .route("/assets/fonts/{file}", get(view::font))
         .route("/v1/stream", get(stream::stream))
         .route("/v1/players", post(players::register))

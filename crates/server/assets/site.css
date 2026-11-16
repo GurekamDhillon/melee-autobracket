@@ -506,6 +506,12 @@ ol.entrants.few { grid-template-columns: min(17rem, 100%); }
 .card .quiet { color: var(--on-surface-quiet); font-size: 0.875rem; }
 a.card:hover, a.card:focus-visible { background: var(--accent); rotate: 0deg; translate: 0 -4px; box-shadow: var(--shadow-hover); outline: none; }
 
+/* A card that is not itself a link (schedule, history): its name links, the rest is text. */
+.card p { margin: 0 0 var(--sp-1); }
+.card a { color: inherit; }
+.card time { font-variant-numeric: tabular-nums; }
+.card .rows { margin: var(--sp-3) 0 var(--sp-2); }
+
 /* ---- rows: list rows for tables (players, placings, head to head) ---- */
 .rows { display: grid; gap: var(--sp-2); margin: 0 0 var(--sp-5); padding: 0; list-style: none; }
 .row-line {
@@ -525,6 +531,9 @@ a.card:hover, a.card:focus-visible { background: var(--accent); rotate: 0deg; tr
 .row-line.head { background: var(--accent); font-size: 0.8125rem; }
 .row-line a { color: inherit; }
 .row-line .num { text-align: right; }
+/* A placing: the ordinal, then the tag. */
+.row-line.placing { grid-template-columns: 2.6rem minmax(0, 1fr); }
+.placing .place { color: var(--on-surface-quiet); font-size: 0.8125rem; }
 
 /* ---- podium: the first three places, as stickers ---- */
 .podium { display: flex; flex-wrap: wrap; gap: var(--sp-3); margin: 0 0 var(--sp-4); padding: 0; list-style: none; }

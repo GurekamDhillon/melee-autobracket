@@ -21,8 +21,34 @@ async fn all_pages(app: &TestApp) -> Vec<String> {
     vec![
         "/".to_owned(),
         "/stream".to_owned(),
+        "/schedule".to_owned(),
+        "/history".to_owned(),
         format!("/events/{event}"),
     ]
+}
+
+#[tokio::test]
+async fn schedule_and_history_pages_fetch_their_data() {
+    let app = TestApp::spawn(|_| {}).await;
+    let schedule = fetch(&app, "/schedule").await.text().await.unwrap();
+    for needle in [
+        "/v1/events",
+        "Happening now",
+        "Coming up",
+        "time to be announced",
+        "autobracket-client register",
+    ] {
+        assert!(schedule.contains(needle), "/schedule has {needle:?}");
+    }
+    let history = fetch(&app, "/history").await.text().await.unwrap();
+    for needle in [
+        "/v1/history",
+        "No completed events yet",
+        "and ",
+        "AB.ordinal(",
+    ] {
+        assert!(history.contains(needle), "/history has {needle:?}");
+    }
 }
 
 #[tokio::test]
@@ -451,5 +477,5 @@ async fn documented_routes_exist() {
         );
         seen += 1;
     }
-    assert!(seen >= 29, "parsed {seen} routes from the table");
+    assert!(seen >= 31, "parsed {seen} routes from the table");
 }
