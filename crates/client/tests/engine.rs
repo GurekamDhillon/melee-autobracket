@@ -50,55 +50,39 @@ fn exit_of(mode: &str) -> Option<RunExit> {
     engine.last_exit()
 }
 
-#[test]
-fn no_opponent_line_and_exit_4_is_a_no_opponent_exit() {
-    assert_eq!(
-        exit_of("no-opponent"),
-        Some(RunExit {
-            code: Some(4),
-            no_opponent: true
-        })
-    );
+fn exit(code: i32, no_opponent: bool) -> Option<RunExit> {
+    Some(RunExit {
+        code: Some(code),
+        no_opponent,
+    })
 }
 
 #[test]
-fn exit_4_alone_is_a_no_opponent_exit() {
-    assert_eq!(
-        exit_of("exit4"),
-        Some(RunExit {
-            code: Some(4),
-            no_opponent: true
-        })
-    );
+fn the_no_opponent_line_with_exit_5_is_a_no_opponent_exit() {
+    assert_eq!(exit_of("no-opponent"), exit(5, true));
 }
 
 #[test]
-fn the_no_opponent_line_alone_is_a_no_opponent_exit() {
-    assert_eq!(
-        exit_of("line-exit1"),
-        Some(RunExit {
-            code: Some(1),
-            no_opponent: true
-        })
-    );
+fn the_no_opponent_line_decides_whatever_the_exit_code() {
+    assert_eq!(exit_of("line-exit0"), exit(0, true));
+    assert_eq!(exit_of("line-exit1"), exit(1, true));
 }
 
 #[test]
-fn exit_1_is_not_a_no_opponent_exit() {
-    assert_eq!(
-        exit_of("fail"),
-        Some(RunExit {
-            code: Some(1),
-            no_opponent: false
-        })
-    );
-    assert_eq!(
-        exit_of("quick"),
-        Some(RunExit {
-            code: Some(0),
-            no_opponent: false
-        })
-    );
+fn exit_5_without_the_line_is_not_a_no_opponent_exit() {
+    assert_eq!(exit_of("exit5"), exit(5, false));
+}
+
+#[test]
+fn a_failed_disc_check_is_not_a_no_opponent_exit() {
+    assert_eq!(exit_of("disc-fail"), exit(4, false));
+}
+
+#[test]
+fn other_exits_are_not_no_opponent_exits() {
+    assert_eq!(exit_of("fail"), exit(1, false));
+    assert_eq!(exit_of("quick"), exit(0, false));
+    assert_eq!(exit_of("usage"), exit(2, false));
 }
 
 #[test]

@@ -24,19 +24,37 @@ pub struct GameParams<'a> {
 }
 
 /// The line the engine prints on stderr when it was hosting and no guest joined within its
-/// `--np-join-wait`.
+/// `--np-join-wait` (it then exits 5, but only this line decides a no-show).
 pub const NO_OPPONENT_LINE: &str = "play: netplay: no opponent joined";
-/// The engine's exit status in that case.
-pub const NO_OPPONENT_EXIT_CODE: i32 = 4;
+/// The engine's exit status when its disc check failed: the configured `iso` is not a
+/// usable game image.
+pub const DISC_CHECK_EXIT_CODE: i32 = 4;
+/// The engine's exit status for a usage error, such as an argument it does not know.
+pub const USAGE_EXIT_CODE: i32 = 2;
+/// How many lines of the log [`RunSetup::log_tail`] holds.
+const LOG_TAIL_LINES: usize = 10;
 
 /// How a run ended.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct RunExit {
     /// The exit status; `None` when the process was ended by a signal.
     pub code: Option<i32>,
-    /// The game gave up because nobody joined: it exited with [`NO_OPPONENT_EXIT_CODE`] or
-    /// printed [`NO_OPPONENT_LINE`].
+    /// The game gave up because nobody joined: it printed [`NO_OPPONENT_LINE`]. The exit
+    /// code alone never decides this.
     pub no_opponent: bool,
+}
+
+/// What the last run was started with, for explaining a failure caused by the player's
+/// own setup.
+#[derive(Clone, Debug, Default)]
+pub struct RunSetup {
+    /// The disc image path given to the game.
+    pub iso: Option<String>,
+    /// The argument template the run used (`host_args` or `join_args`).
+    pub args: Vec<String>,
+    /// Where the run's log is, and its last lines.
+    pub log: Option<PathBuf>,
+    pub log_tail: Vec<String>,
 }
 
 pub trait Engine {
@@ -61,6 +79,10 @@ pub trait Engine {
     fn last_exit(&mut self) -> Option<RunExit> {
         None
     }
+    /// What the last run was started with; empty if not known.
+    fn last_setup(&self) -> RunSetup {
+        RunSetup::default()
+    }
 }
 
 /// Runs `{melee}` with `host_args` or `join_args`. Each argument has `{iso}`, `{relay}`,
@@ -79,6 +101,8 @@ pub struct CommandEngine {
     output: Output,
     run: Option<Run>,
     last_exit: Option<RunExit>,
+    /// The last run's directory and argument template.
+    last_run: Option<(PathBuf, Vec<String>)>,
 }
 
 /// Where the game's output lines are forwarded.
@@ -126,6 +150,7 @@ impl CommandEngine {
             output: Arc::new(|line: &str| eprintln!("{line}")),
             run: None,
             last_exit: None,
+            last_run: None,
         })
     }
 
@@ -148,6 +173,7 @@ impl CommandEngine {
         } else {
             &self.join_args
         };
+        self.last_run = Some((dir.clone(), template.clone()));
         let args: Vec<String> = template
             .iter()
             .map(|a| {
@@ -310,9 +336,34 @@ impl Engine for CommandEngine {
         }
         self.last_exit
     }
+
+    fn last_setup(&self) -> RunSetup {
+        let Some((dir, args)) = &self.last_run else {
+            return RunSetup {
+                iso: Some(self.iso.clone()),
+                ..RunSetup::default()
+            };
+        };
+        let log = dir.join("engine.log");
+        let text = std::fs::read(&log).map_or_else(
+            |_| String::new(),
+            |b| String::from_utf8_lossy(&b).into_owned(),
+        );
+        let lines: Vec<&str> = text.lines().collect();
+        let tail = lines[lines.len().saturating_sub(LOG_TAIL_LINES)..]
+            .iter()
+            .map(|l| l.to_string())
+            .collect();
+        RunSetup {
+            iso: Some(self.iso.clone()),
+            args: args.clone(),
+            log: Some(log),
+            log_tail: tail,
+        }
+    }
 }
 
-/// How a run in `dir` that exited with `code` ended, from its code and its `engine.log`.
+/// How a run in `dir` that exited with `code` ended, from its `engine.log`.
 fn run_exit(code: Option<i32>, dir: &Path) -> RunExit {
     let printed = std::fs::read(dir.join("engine.log")).is_ok_and(|log| {
         String::from_utf8_lossy(&log)
@@ -321,7 +372,7 @@ fn run_exit(code: Option<i32>, dir: &Path) -> RunExit {
     });
     RunExit {
         code,
-        no_opponent: code == Some(NO_OPPONENT_EXIT_CODE) || printed,
+        no_opponent: printed,
     }
 }
 

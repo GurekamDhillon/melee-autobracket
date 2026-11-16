@@ -10,9 +10,12 @@
 #     quick         prints the host's MATCH CODE line on stderr, writes one replay, exits.
 #     sleepy        prints the MATCH CODE line, sleeps 30 s, writes one replay.
 #     no-opponent   prints the MATCH CODE line and the engine's "no opponent joined" line,
-#                   exits 4 without a replay.
-#     exit4         exits 4 without that line and without a replay.
+#                   exits 5 without a replay.
+#     exit5         prints the MATCH CODE line, exits 5 without that line or a replay.
+#     line-exit0    prints the "no opponent joined" line, exits 0 without a replay.
 #     line-exit1    prints the "no opponent joined" line, exits 1 without a replay.
+#     disc-fail     prints a disc check error, exits 4 (the engine's disc check failed).
+#     usage         prints an unknown-argument error, exits 2 (a usage error).
 #     fail          exits 1 without a replay.
 #     cwd           writes `stray.txt` to its current directory, then one replay.
 #     (otherwise)   prints the MATCH CODE line, sleeps 1 s, writes one replay.
@@ -61,11 +64,24 @@ case "${1:-}" in
     no-opponent)
         echo "$code_line" >&2
         echo "play: netplay: no opponent joined" >&2
+        exit 5
+        ;;
+    exit5)
+        echo "$code_line" >&2
+        exit 5
+        ;;
+    line-exit0)
+        echo "play: netplay: no opponent joined" >&2
+        exit 0
+        ;;
+    disc-fail)
+        echo "play: disc check failed: not an NTSC 1.02 image" >&2
         exit 4
         ;;
-    exit4)
-        echo "$code_line" >&2
-        exit 4
+    usage)
+        echo "fake: log line one" >&2
+        echo "error: unexpected argument '--np-join-wait' found" >&2
+        exit 2
         ;;
     line-exit1)
         echo "play: netplay: no opponent joined" >&2

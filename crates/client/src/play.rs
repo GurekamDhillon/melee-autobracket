@@ -10,7 +10,7 @@ use proto::{Next, Role};
 use reqwest::StatusCode;
 
 use crate::api::{is_retryable, Api, ApiError};
-use crate::engine::{Engine, GameParams, RunExit};
+use crate::engine::{Engine, GameParams, RunExit, DISC_CHECK_EXIT_CODE, USAGE_EXIT_CODE};
 
 /// How long the host waits for the game to print its room code.
 const ROOM_CODE_WAIT: Duration = Duration::from_secs(60);
@@ -210,7 +210,7 @@ impl Failures {
         if self.count >= MAX_FAILED_RUNS {
             let last = match exit.and_then(|e| e.code) {
                 Some(code) => format!("last exit code {code}"),
-                None => "last run had no exit code".to_string(),
+                None => "no exit code from the last run".to_string(),
             };
             return After::GiveUp {
                 error: anyhow::anyhow!(
@@ -221,8 +221,10 @@ impl Failures {
                     launch.set_id,
                     launch.game_no
                 ),
+                // Worded as this client's failure, not the opponent's.
                 detail: format!(
-                    "the game ended without a replay {MAX_FAILED_RUNS} times in a row ({last})"
+                    "client could not complete a game: {MAX_FAILED_RUNS} runs without a \
+                     replay, {last}"
                 ),
             };
         }
@@ -239,6 +241,39 @@ impl Failures {
     fn waiting(&self, set_id: u32, game_no: u8) -> bool {
         self.game == Some((set_id, game_no)) && self.retry_at.is_some_and(|t| Instant::now() < t)
     }
+}
+
+/// An exit that means the player's own setup is broken and will not fix itself: the
+/// engine's disc check failed, or it refused its arguments. `play` stops at once, and
+/// nothing is reported to the organiser.
+fn setup_error(engine: &dyn Engine, exit: Option<RunExit>) -> Option<anyhow::Error> {
+    let code = exit?.code?;
+    let setup = engine.last_setup();
+    if code == DISC_CHECK_EXIT_CODE {
+        let iso = setup.iso.as_deref().unwrap_or("(unknown)");
+        return Some(anyhow::anyhow!(
+            "the engine's disc check failed (exit code {code}) for the disc image {iso}. \
+             Check that `iso` in the client config points at your own NTSC 1.02 Melee \
+             image, then run `play` again"
+        ));
+    }
+    if code == USAGE_EXIT_CODE {
+        let log = match &setup.log {
+            Some(path) if !setup.log_tail.is_empty() => format!(
+                "\nLast lines of {}:\n  {}",
+                path.display(),
+                setup.log_tail.join("\n  ")
+            ),
+            _ => String::new(),
+        };
+        return Some(anyhow::anyhow!(
+            "the engine refused its arguments (exit code {code}, a usage error). It was \
+             started with the template {:?} (`host_args` or `join_args` in the client \
+             config); fix it, then run `play` again.{log}",
+            setup.args
+        ));
+    }
+    None
 }
 
 /// Acts on [`After`] for `launch`'s set.
@@ -431,7 +466,13 @@ async fn run(
                     // Playing; nothing to do until the game exits.
                 } else if let Some(launch) = s.launched.take() {
                     let produced = collect(engine, launch, s)?;
-                    let outcome = Outcome::of(launch, produced, engine.last_exit());
+                    let exit = engine.last_exit();
+                    if !produced {
+                        if let Some(e) = setup_error(engine, exit) {
+                            return Err(e);
+                        }
+                    }
+                    let outcome = Outcome::of(launch, produced, exit);
                     let after = failures.record(launch, outcome, relay);
                     upload_pending(api, &mut net, event, s).await?;
                     settle(api, &mut net, event, launch, after).await?;

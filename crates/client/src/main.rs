@@ -70,9 +70,15 @@ enum Cmd {
     ///
     /// If your opponent never joins: with an engine that supports it, add
     /// `"--np-join-wait", "SECS"` to `host_args` in the config. The game then stops hosting
-    /// after SECS seconds with nobody joined, and after two such runs in a row `play`
-    /// reports a no-show to the organiser and waits for their decision. A game that keeps
-    /// ending without a replay is reported to the organiser too, before `play` gives up.
+    /// after SECS seconds with nobody joined (printing `play: netplay: no opponent joined`
+    /// and exiting 5), and after two such runs in a row `play` reports a no-show to the
+    /// organiser and waits for their decision. An engine too old for the flag exits 2.
+    ///
+    /// `play` stops at once, reporting nothing, when the engine's exit says your own setup
+    /// is broken: 4 (its disc check failed: check `iso`) or 2 (it refused its arguments:
+    /// check `host_args` / `join_args`). A game that keeps ending without a replay for
+    /// other reasons is reported to the organiser as this client failing, before `play`
+    /// gives up.
     Play {
         event: i64,
         /// Seconds between checks with the server.

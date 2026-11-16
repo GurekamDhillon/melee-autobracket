@@ -28,9 +28,10 @@ const HEADER: &str = "\
 # `autobracket-client init --headless`, which adds \"--headless\", \"--no-audio\" to
 # both host_args and join_args, or add those two arguments to both by hand.
 #
-# Opponent no-show: a newer engine can stop hosting when nobody joins within SECS seconds
-# (an engine without the flag refuses to start). The client then reports a no-show to the
-# organiser after two such runs. To use it, add to host_args:
+# Opponent no-show: a newer engine can stop hosting when nobody joins within SECS seconds;
+# it then prints \"play: netplay: no opponent joined\" and exits 5. After two such runs
+# the client reports a no-show to the organiser. An engine without the flag refuses to
+# start (exit 2, and `play` stops with an error). To use it, add to host_args:
 #   \"--np-join-wait\", \"120\",
 #
 # Preset fighters and stage instead of netplay character select. Use it while character

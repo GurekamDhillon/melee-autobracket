@@ -4,13 +4,14 @@
 mod common;
 
 use std::collections::VecDeque;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
 use autobracket_client::api::Api;
-use autobracket_client::engine::{Engine, GameParams, RunExit};
+use autobracket_client::config::ClientConfig;
+use autobracket_client::engine::{CommandEngine, Engine, GameParams, RunExit};
 use autobracket_client::play::{play_event_with, PlayOptions, MAX_FAILED_RUNS};
 use common::{host_play, json, Stub};
 use proto::{Next, SigningKey};
@@ -28,7 +29,7 @@ struct Ending {
 const NO_OPPONENT: Ending = Ending {
     replay: false,
     exit: Some(RunExit {
-        code: Some(4),
+        code: Some(5),
         no_opponent: true,
     }),
 };
@@ -254,9 +255,13 @@ async fn giving_up_reports_the_stuck_set_first() {
     );
     let reports = no_shows(&stub);
     assert_eq!(reports.len(), 1, "{reports:?}");
-    let detail = reports[0]["detail"].as_str().unwrap();
-    assert!(detail.contains(&MAX_FAILED_RUNS.to_string()), "{detail}");
-    assert!(detail.contains("exit code 1"), "{detail}");
+    assert_eq!(
+        reports[0]["detail"],
+        format!(
+            "client could not complete a game: {MAX_FAILED_RUNS} runs without a replay, \
+             last exit code 1"
+        )
+    );
 }
 
 async fn refused_report_is_not_fatal(status: u16) {
@@ -294,4 +299,71 @@ async fn a_retryable_no_show_failure_is_retried() {
 
     assert_eq!(no_shows(&stub).len(), 2);
     assert_eq!(hosts.load(Ordering::SeqCst), 2);
+}
+
+/// Plays with the real command engine running `fake_melee.sh` in `mode` for every host run;
+/// `play`'s error, and the work directory.
+async fn play_command_engine(stub: &Stub, mode: &str) -> (anyhow::Error, TempDir) {
+    let work = TempDir::new().unwrap();
+    let mut cfg = ClientConfig::with_defaults(
+        "07".repeat(32),
+        "fake".into(),
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/fake_melee.sh"),
+        PathBuf::from("/isos/my melee.iso"),
+        work.path().to_path_buf(),
+    );
+    cfg.host_args = vec![mode.into(), "--np-join-wait".into(), "120".into()];
+    let mut engine = CommandEngine::new(&cfg).unwrap();
+    engine.set_output(|_| {});
+    let err = tokio::time::timeout(
+        Duration::from_secs(10),
+        play_event_with(&api(stub), &mut engine, 1, &opts()),
+    )
+    .await
+    .expect("play did not stop")
+    .expect_err("play must fail");
+    (err, work)
+}
+
+fn runs(work: &TempDir) -> usize {
+    std::fs::read_dir(work.path())
+        .unwrap()
+        .filter(|e| {
+            e.as_ref()
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .starts_with("run-")
+        })
+        .count()
+}
+
+#[tokio::test]
+async fn a_failed_disc_check_ends_play_at_once_without_a_report() {
+    let stub = server(&[204]).await;
+
+    let (err, work) = play_command_engine(&stub, "disc-fail").await;
+
+    let msg = format!("{err:#}");
+    assert!(msg.contains("disc check failed"), "{msg}");
+    assert!(msg.contains("/isos/my melee.iso"), "{msg}");
+    assert_eq!(runs(&work), 1, "exactly one host run");
+    assert!(no_shows(&stub).is_empty(), "reported a no-show");
+}
+
+#[tokio::test]
+async fn a_usage_error_ends_play_at_once_without_a_report() {
+    let stub = server(&[204]).await;
+
+    let (err, work) = play_command_engine(&stub, "usage").await;
+
+    let msg = format!("{err:#}");
+    assert!(msg.contains("exit code 2"), "{msg}");
+    assert!(msg.contains("--np-join-wait"), "the template: {msg}");
+    assert!(
+        msg.contains("error: unexpected argument '--np-join-wait' found"),
+        "the log tail: {msg}"
+    );
+    assert_eq!(runs(&work), 1, "exactly one host run");
+    assert!(no_shows(&stub).is_empty(), "reported a no-show");
 }
