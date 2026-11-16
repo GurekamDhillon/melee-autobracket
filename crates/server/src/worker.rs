@@ -6,7 +6,7 @@
 //! transaction ([`lifecycle::apply_verdict`]), a no-op unless the game is still `judging`.
 
 use std::path::PathBuf;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::Context;
 use proto::{ResimOutcome, Ruleset, Verdict};
@@ -14,16 +14,27 @@ use proto::{ResimOutcome, Ruleset, Verdict};
 use crate::db::{begin_write, now_unix};
 use crate::judge::{self, Pre};
 use crate::lifecycle;
+use crate::review::{self, STALLED};
 use crate::state::AppState;
 
 /// How often the worker looks for due games when nothing wakes it.
 const TICK: Duration = Duration::from_secs(1);
+/// Least time between two looks for stalled sets ([`flag_stalled_sets`]).
+const STALL_CHECK_PERIOD: Duration = Duration::from_secs(30);
 
-/// Judges due games forever: on every wake-up and at least once per [`TICK`].
+/// Judges due games forever: on every wake-up and at least once per [`TICK`]. Looks for
+/// stalled sets on the first tick and then at most once per [`STALL_CHECK_PERIOD`].
 pub async fn run(st: AppState) {
+    let mut last_stall_check: Option<Instant> = None;
     loop {
         if let Err(e) = judge_due(&st).await {
             eprintln!("worker: judging failed: {e:#}");
+        }
+        if last_stall_check.is_none_or(|t| t.elapsed() >= STALL_CHECK_PERIOD) {
+            last_stall_check = Some(Instant::now());
+            if let Err(e) = flag_stalled_sets(&st).await {
+                eprintln!("worker: looking for stalled sets failed: {e:#}");
+            }
         }
         tokio::select! {
             () = st.wake.notified() => {}
@@ -94,6 +105,41 @@ pub async fn judge_due(st: &AppState) -> anyhow::Result<usize> {
         Some(e) => Err(e),
         None => Ok(judged),
     }
+}
+
+/// Sends every stalled set to the organiser queue (reason `stalled`), as a no-show report
+/// would: a `ready` set of a `running` event with no activity for `set_stall_secs`
+/// (`sets.updated_at`) and no game uploading or awaiting a verdict. Does nothing when
+/// `set_stall_secs` is 0. Returns how many sets were flagged.
+pub async fn flag_stalled_sets(st: &AppState) -> anyhow::Result<usize> {
+    let stall_secs = st.cfg.set_stall_secs;
+    if stall_secs == 0 {
+        return Ok(0);
+    }
+    let now = now_unix();
+    let cutoff = now.saturating_sub(i64::try_from(stall_secs).unwrap_or(i64::MAX));
+    let mut tx = begin_write(&st.db).await?;
+    let idle: Vec<(i64, i64, i64)> = sqlx::query_as(
+        "SELECT s.event_id, s.set_id, s.updated_at FROM sets s JOIN events e ON e.id = s.event_id
+         WHERE s.state = 'ready' AND e.state = 'running' AND s.updated_at < ?
+         ORDER BY s.event_id, s.set_id",
+    )
+    .bind(cutoff)
+    .fetch_all(&mut *tx)
+    .await
+    .context("finding idle sets")?;
+    let mut flagged = 0;
+    for (event_id, set_id, updated_at) in idle {
+        if review::game_in_progress(&mut tx, event_id, set_id).await? {
+            continue;
+        }
+        let set = u32::try_from(set_id).with_context(|| format!("sets row set_id {set_id}"))?;
+        let detail = format!("no activity for {} s", now - updated_at);
+        review::send_to_review(&mut tx, event_id, set, STALLED, Some(&detail)).await?;
+        flagged += 1;
+    }
+    tx.commit().await?;
+    Ok(flagged)
 }
 
 /// What judging one game needs, read when it was claimed.

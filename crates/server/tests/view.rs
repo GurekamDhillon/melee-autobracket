@@ -49,6 +49,7 @@ fn example_config_parses() {
     assert_eq!(cfg.relay, defaults.relay);
     assert_eq!(cfg.rate_per_sec, defaults.rate_per_sec);
     assert_eq!(cfg.rate_burst, defaults.rate_burst);
+    assert_eq!(cfg.set_stall_secs, defaults.set_stall_secs);
     assert_eq!(cfg.verifier.mode, VerifierMode::Off);
     assert_eq!(cfg.ruleset, defaults.ruleset);
 }

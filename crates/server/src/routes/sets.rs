@@ -10,7 +10,7 @@ use axum::extract::{Path, Query, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::Json;
 use bracket::{Bracket, EntrantId, SetState, Side, Slot};
-use proto::{Next, Role, RoomReq, Ruleset};
+use proto::{Next, NoShowReq, Role, RoomReq, Ruleset};
 use rand::rngs::OsRng;
 use rand::RngCore;
 use serde::Deserialize;
@@ -21,6 +21,7 @@ use super::{parse_body, ApiError};
 use crate::auth::Player;
 use crate::db::{begin_write, now_unix};
 use crate::lifecycle::{load_bracket_on, LifecycleError};
+use crate::review::{self, NO_SHOW};
 use crate::state::AppState;
 
 #[derive(Deserialize)]
@@ -157,12 +158,52 @@ pub async fn room(
             "room code must be 4 characters of A-Z or 0-9, or host:port",
         ));
     }
-    sqlx::query("UPDATE sets SET room_code = ? WHERE event_id = ? AND set_id = ?")
+    sqlx::query("UPDATE sets SET room_code = ?, updated_at = ? WHERE event_id = ? AND set_id = ?")
         .bind(&req.code)
+        .bind(now_unix())
         .bind(event)
         .bind(set)
         .execute(&mut *tx)
         .await?;
+    tx.commit().await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// `POST /v1/sets/{event}/{set}/no-show` (`NoShowReq`; an empty body is no note): a player of
+/// the set reports that the opponent has not shown up. The set goes to the organiser queue
+/// (reason `no-show`, detail naming the reporting slot and their note) and to `review`, with
+/// no room code. `409` unless the set is `ready` with no game uploading or awaiting a verdict.
+pub async fn no_show(
+    State(state): State<AppState>,
+    path: Result<Path<(i64, i64)>, PathRejection>,
+    player: Player,
+) -> Result<StatusCode, ApiError> {
+    let Path((event, set)) = path.map_err(bad_request)?;
+    let mut tx = begin_write(&state.db).await?;
+    let seat = seat(&mut tx, event, set, &player.key).await?;
+    match seat.set_state.as_str() {
+        "ready" => {}
+        "review" => {
+            return Err(ApiError::new(
+                StatusCode::CONFLICT,
+                "set is already waiting for the organiser",
+            ))
+        }
+        _ => return Err(ApiError::new(StatusCode::CONFLICT, "set is not in play")),
+    }
+    let req: NoShowReq = if player.body.is_empty() {
+        NoShowReq::default()
+    } else {
+        parse_body(&player.body)?
+    };
+    if review::game_in_progress(&mut tx, event, set).await? {
+        return Err(ApiError::new(
+            StatusCode::CONFLICT,
+            "a game of this set is in progress or awaiting a verdict",
+        ));
+    }
+    let detail = review::no_show_detail(seat.slot, &player.tag, req.detail.as_deref());
+    review::send_to_review(&mut tx, event, narrow(set)?, NO_SHOW, Some(&detail)).await?;
     tx.commit().await?;
     Ok(StatusCode::NO_CONTENT)
 }
@@ -252,8 +293,11 @@ pub async fn upload(
             .bind(now_unix())
             .fetch_one(&mut *tx)
             .await?;
-            sqlx::query("UPDATE sets SET room_code = NULL WHERE event_id = ? AND set_id = ?")
-                .bind(event)
+            sqlx::query(
+                "UPDATE sets SET room_code = NULL, updated_at = ? WHERE event_id = ? AND set_id = ?",
+            )
+            .bind(now_unix())
+            .bind(event)
                 .bind(set)
                 .execute(&mut *tx)
                 .await?;

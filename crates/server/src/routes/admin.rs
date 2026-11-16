@@ -15,6 +15,7 @@ use super::{parse_body, ApiError};
 use crate::auth::To;
 use crate::db::{begin_write, now_unix};
 use crate::lifecycle::{self, format_to_str};
+use crate::review;
 use crate::state::AppState;
 
 /// RFC 4648 base32 alphabet.
@@ -85,26 +86,30 @@ pub async fn queue(
     _to: To,
 ) -> Result<Json<Vec<QueueItem>>, ApiError> {
     let rows: Vec<QueueRow> = sqlx::query_as(
-        "SELECT q.id, q.event_id, q.set_id, q.game_id, q.reason, g.verdict_json, g.resim_json
+        "SELECT q.id, q.event_id, q.set_id, q.game_id, q.reason, g.verdict_json, g.resim_json,
+                q.detail
          FROM queue q LEFT JOIN games g ON g.id = q.game_id
          WHERE q.state = 'open' ORDER BY q.id",
     )
     .fetch_all(&state.db)
     .await?;
     rows.into_iter()
-        .map(|(id, event_id, set_id, game_id, reason, verdict, resim)| {
-            Ok(QueueItem {
-                id,
-                event_id,
-                set_id: u32::try_from(set_id).map_err(|_| {
-                    ApiError::internal(format_args!("queue item {id} set_id {set_id}"))
-                })?,
-                game_id,
-                reason,
-                verdict: parse_stored(verdict.as_deref())?,
-                resim: parse_stored(resim.as_deref())?,
-            })
-        })
+        .map(
+            |(id, event_id, set_id, game_id, reason, verdict, resim, detail)| {
+                Ok(QueueItem {
+                    id,
+                    event_id,
+                    set_id: u32::try_from(set_id).map_err(|_| {
+                        ApiError::internal(format_args!("queue item {id} set_id {set_id}"))
+                    })?,
+                    game_id,
+                    reason,
+                    verdict: parse_stored(verdict.as_deref())?,
+                    resim: parse_stored(resim.as_deref())?,
+                    detail,
+                })
+            },
+        )
         .collect::<Result<_, _>>()
         .map(Json)
 }
@@ -117,6 +122,7 @@ type QueueRow = (
     String,
     Option<String>,
     Option<String>,
+    Option<String>,
 );
 
 /// `POST /v1/admin/queue/{id}/resolve` (`Resolve`).
@@ -127,7 +133,7 @@ pub async fn resolve(
 ) -> Result<StatusCode, ApiError> {
     let Path(id) = path.map_err(|e| ApiError::new(StatusCode::BAD_REQUEST, e.to_string()))?;
     let r: Resolve = parse_body(&to.body)?;
-    lifecycle::resolve_queue_item(&state, id, &r, &to.key).await?;
+    review::resolve_queue_item(&state, id, &r, &to.key).await?;
     Ok(StatusCode::NO_CONTENT)
 }
 

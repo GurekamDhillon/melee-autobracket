@@ -15,6 +15,7 @@ pub mod db;
 pub mod judge;
 pub mod lifecycle;
 pub mod resim;
+pub mod review;
 pub mod routes;
 pub mod state;
 #[cfg(feature = "testkit")]

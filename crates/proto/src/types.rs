@@ -92,6 +92,14 @@ pub struct RoomReq {
     pub code: String,
 }
 
+/// A player's report that their opponent has not shown up for the set.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Default)]
+pub struct NoShowReq {
+    /// Optional short note for the organiser; the server keeps the first 200 characters.
+    #[serde(default)]
+    pub detail: Option<String>,
+}
+
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub struct EventCreateReq {
     pub name: String,
@@ -137,6 +145,10 @@ pub struct QueueItem {
     pub reason: String,
     pub verdict: Option<Verdict>,
     pub resim: Option<ResimOutcome>,
+    /// What opened the item, beyond `reason`: for a no-show, the slot and tag that reported
+    /// it and their note; for a stalled set, how long it had been idle.
+    #[serde(default)]
+    pub detail: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]

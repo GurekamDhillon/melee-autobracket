@@ -30,6 +30,7 @@ pub fn router() -> Router<AppState> {
         .route("/v1/admin/invites", post(admin::create_invite))
         .route("/v1/me/next", get(sets::next))
         .route("/v1/sets/{event}/{set}/room", post(sets::room))
+        .route("/v1/sets/{event}/{set}/no-show", post(sets::no_show))
         .route(
             "/v1/sets/{event}/{set}/games/{n}/replay",
             post(sets::upload),
