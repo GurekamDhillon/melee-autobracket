@@ -621,7 +621,7 @@ async fn quarantine_serves_replay_bytes() {
 
 #[tokio::test]
 async fn quarantine_single_upload_has_no_guest_replay() {
-    let app = TestApp::spawn(|c| c.upload_timeout_secs = 0).await;
+    let app = TestApp::spawn(|c| c.upload_timeout_secs = 1).await;
     let ps = players(&app, 2).await;
     let event = app
         .started_event(Format::SingleElim, &[&ps[0], &ps[1]])
@@ -630,6 +630,11 @@ async fn quarantine_single_upload_has_no_guest_replay() {
         upload(&ps[0], event, 0, 1, simple_game(1, START_A)).await,
         StatusCode::ACCEPTED
     );
+    // The upload timeout has passed.
+    sqlx::query("UPDATE games SET first_upload_at = first_upload_at - 2")
+        .execute(&app.state.db)
+        .await
+        .unwrap();
     assert_eq!(judge_due(&app.state).await.unwrap(), 1);
     let items: Vec<QuarantineItem> = app
         .as_to()
@@ -798,7 +803,7 @@ async fn best_of_overrides_configured_ruleset() {
             create(&app, req).await,
             (
                 StatusCode::BAD_REQUEST,
-                json!({ "error": "best_of must be odd" })
+                json!({ "error": format!("best_of must be an odd number of games, not {n}") })
             )
         );
     }
@@ -809,7 +814,7 @@ async fn best_of_overrides_configured_ruleset() {
             create(&app, req).await,
             (
                 StatusCode::BAD_REQUEST,
-                json!({ "error": format!("{field} must be odd") })
+                json!({ "error": format!("{field} must be an odd number of games, not {n}") })
             )
         );
     }
@@ -818,6 +823,30 @@ async fn best_of_overrides_configured_ruleset() {
         .await
         .unwrap();
     assert_eq!(count, 3);
+}
+
+/// An event's ruleset is checked like the configured one: rules no game could pass, a
+/// malformed Gecko hash and an unknown rule are refused.
+#[tokio::test]
+async fn create_event_validates_the_whole_ruleset() {
+    let app = TestApp::spawn(|_| {}).await;
+    for (ruleset, field) in [
+        (json!({ "stocks": 0 }), "stocks"),
+        (json!({ "legal_stages": [] }), "legal_stages"),
+        (json!({ "allowed_gecko": ["ABC"] }), "allowed_gecko"),
+        (json!({ "best_of_final": 5 }), "best_of_final"),
+    ] {
+        let req = json!({ "name": "W", "format": "SingleElim", "ruleset": ruleset });
+        let (status, body) = create(&app, req).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{field}: {body}");
+        let error = body["error"].as_str().unwrap();
+        assert!(error.contains(field), "{field}: {error}");
+    }
+    let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM events")
+        .fetch_one(&app.state.db)
+        .await
+        .unwrap();
+    assert_eq!(count, 0);
 }
 
 #[tokio::test]

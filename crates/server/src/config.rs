@@ -19,11 +19,17 @@ pub struct Config {
     pub relay: String,
     #[serde(default)]
     pub require_invite: bool,
-    /// Tournament organiser public keys, lowercase hex.
+    /// Tournament organiser public keys, lowercase hex. Must not be empty unless
+    /// `allow_no_organiser` is set.
     pub to_keys: Vec<String>,
+    /// Lets the server start with no organiser key (nobody can create or run events). Only
+    /// for trying the server out.
+    #[serde(default)]
+    pub allow_no_organiser: bool,
     #[serde(default)]
     pub verifier_keys: Vec<String>,
-    /// Accepted client engine builds; empty accepts any.
+    /// Accepted engine builds, for clients at sign-up and for the verifier; empty accepts any.
+    /// See [`Config::build_accepted`].
     #[serde(default)]
     pub accepted_builds: Vec<String>,
     #[serde(default = "default_upload_timeout_secs")]
@@ -47,8 +53,9 @@ pub struct Config {
     pub verifier: VerifierConfig,
     #[serde(default)]
     pub ruleset: Ruleset,
-    /// Runs the background judging worker. Off only in tests that drive judging themselves.
-    #[serde(default = "default_worker_enabled")]
+    /// Runs the background judging worker. Not settable from the configuration file: only
+    /// tests that drive judging themselves turn it off, in code.
+    #[serde(skip_deserializing, default = "default_worker_enabled")]
     pub worker_enabled: bool,
 }
 
@@ -59,6 +66,7 @@ pub struct VerifierConfig {
     pub engine: PathBuf,
     pub iso: PathBuf,
     pub timeout_secs: u64,
+    /// Games judged at the same time (each may wait on one re-simulation). At least 1.
     pub jobs: usize,
 }
 
@@ -104,6 +112,7 @@ impl Config {
             relay: default_relay(),
             require_invite: false,
             to_keys,
+            allow_no_organiser: false,
             verifier_keys: Vec::new(),
             accepted_builds: Vec::new(),
             upload_timeout_secs: default_upload_timeout_secs(),
@@ -132,20 +141,8 @@ impl Config {
 
     /// Rejects values the server cannot run with, naming the offending field.
     pub fn validate(&self) -> anyhow::Result<()> {
-        let r = &self.ruleset;
-        for (field, n) in [
-            ("ruleset.best_of", r.best_of),
-            ("ruleset.best_of_finals", r.best_of_finals),
-        ] {
-            if n % 2 == 0 {
-                bail!("{field} must be an odd number of games, not {n}");
-            }
-        }
-        if r.stocks == 0 {
-            bail!("ruleset.stocks must be at least 1");
-        }
-        if r.legal_stages.is_empty() {
-            bail!("ruleset.legal_stages must list at least one stage");
+        if let Err(e) = self.ruleset.validate() {
+            bail!("ruleset.{e}");
         }
         for (field, keys) in [
             ("to_keys", &self.to_keys),
@@ -155,13 +152,49 @@ impl Config {
                 bail!("{field}: {bad:?} is not a public key (64 lowercase hex characters)");
             }
         }
+        if self.to_keys.is_empty() && !self.allow_no_organiser {
+            bail!(
+                "to_keys is empty, so nobody could create or run an event: add your organiser \
+                 public key (from `autobracket keygen`), or set allow_no_organiser = true"
+            );
+        }
         if self.rate_per_sec == 0 {
             bail!("rate_per_sec must be at least 1");
         }
         if self.rate_burst == 0 {
             bail!("rate_burst must be at least 1");
         }
+        if self.upload_timeout_secs == 0 {
+            bail!("upload_timeout_secs must be at least 1");
+        }
+        let v = &self.verifier;
+        if v.mode != VerifierMode::InProcess {
+            for (field, path) in [("verifier.engine", &v.engine), ("verifier.iso", &v.iso)] {
+                if !path.as_os_str().is_empty() {
+                    bail!(
+                        "{field} is set but verifier.mode is \"{}\": the engine runs here only \
+                         with mode = \"in_process\" (remove {field}, or set the mode)",
+                        v.mode.as_str()
+                    );
+                }
+            }
+        }
+        if v.jobs == 0 {
+            bail!("verifier.jobs must be at least 1");
+        }
         Ok(())
+    }
+
+    /// Whether `build` is on `accepted_builds` (always, when the list is empty). An entry
+    /// matches when it equals the whole build string, or the part before its first `+` (the
+    /// version, without the binary's hash).
+    pub fn build_accepted(&self, build: &str) -> bool {
+        let version = build.split_once('+').map_or(build, |(v, _)| v);
+        self.accepted_builds.is_empty()
+            || self
+                .accepted_builds
+                .iter()
+                .any(|a| a == build || a == version)
     }
 }
 
@@ -321,6 +354,75 @@ mod tests {
         std::fs::write(&path, format!("to_keys = [\"{KEY}\"]\nrate_burst = 0\n")).unwrap();
         let err = format!("{:#}", Config::load(&path).unwrap_err());
         assert!(err.contains("rate_burst"), "{err}");
+    }
+
+    #[test]
+    fn rejects_bad_gecko_hashes_and_ruleset_typos() {
+        let err = rejection("[ruleset]\nallowed_gecko = [\"ABC\"]");
+        assert!(err.contains("ruleset.allowed_gecko"), "{err}");
+        let err = rejection("[ruleset]\nbest_of_final = 5");
+        assert!(err.contains("best_of_final"), "{err}");
+    }
+
+    #[test]
+    fn rejects_engine_or_iso_unless_in_process() {
+        for mode in ["off", "external"] {
+            for field in ["engine", "iso"] {
+                let err = rejection(&format!(
+                    "[verifier]\nmode = \"{mode}\"\n{field} = \"/opt/melee\""
+                ));
+                assert!(err.contains(&format!("verifier.{field}")), "{err}");
+                assert!(err.contains(mode), "{err}");
+            }
+        }
+        // The mode defaults to off, so this is the TO who forgot to set it.
+        let err = rejection("[verifier]\nengine = \"/opt/melee\"");
+        assert!(
+            err.contains("verifier.engine") && err.contains("off"),
+            "{err}"
+        );
+        Config::parse(&format!(
+            "to_keys = [\"{KEY}\"]\n[verifier]\nmode = \"in_process\"\nengine = \"/e\"\niso = \"/i\"\n"
+        ))
+        .unwrap();
+    }
+
+    #[test]
+    fn rejects_zero_upload_timeout_and_jobs() {
+        let err = rejection("upload_timeout_secs = 0");
+        assert!(err.contains("upload_timeout_secs"), "{err}");
+        let err = rejection("[verifier]\njobs = 0");
+        assert!(err.contains("verifier.jobs"), "{err}");
+    }
+
+    #[test]
+    fn empty_to_keys_needs_allow_no_organiser() {
+        let err = format!("{:#}", Config::parse("to_keys = []\n").unwrap_err());
+        assert!(
+            err.contains("to_keys") && err.contains("allow_no_organiser"),
+            "{err}"
+        );
+        let cfg = Config::parse("to_keys = []\nallow_no_organiser = true\n").unwrap();
+        assert!(cfg.to_keys.is_empty());
+    }
+
+    #[test]
+    fn worker_enabled_is_not_a_config_key() {
+        let err = rejection("worker_enabled = false");
+        assert!(err.contains("worker_enabled"), "{err}");
+    }
+
+    #[test]
+    fn build_acceptance_matches_whole_or_version_part() {
+        let mut cfg = Config::new(vec![KEY.into()]);
+        assert!(cfg.build_accepted("anything+0123456789ab"));
+        cfg.accepted_builds = vec!["melee 1.2.0".into(), "melee 1.3.0+aaaaaaaaaaaa".into()];
+        assert!(cfg.build_accepted("melee 1.2.0"));
+        assert!(cfg.build_accepted("melee 1.2.0+0123456789ab"));
+        assert!(cfg.build_accepted("melee 1.3.0+aaaaaaaaaaaa"));
+        assert!(!cfg.build_accepted("melee 1.3.0+bbbbbbbbbbbb"));
+        assert!(!cfg.build_accepted("melee 1.2.1+0123456789ab"));
+        assert!(!cfg.build_accepted("melee 1.2"));
     }
 
     #[test]

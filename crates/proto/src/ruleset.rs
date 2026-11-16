@@ -1,8 +1,9 @@
 use serde::{Deserialize, Serialize};
 
-/// Match rules for an event. Missing fields deserialise to the defaults.
+/// Match rules for an event. Missing fields deserialise to the defaults; unknown fields are
+/// refused, so a misspelt rule is an error rather than a silent default.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct Ruleset {
     pub stocks: u8,
     pub timer_secs: u32,
@@ -27,6 +28,36 @@ impl Default for Ruleset {
             banned_characters: vec![],
             allowed_gecko: vec![],
         }
+    }
+}
+
+impl Ruleset {
+    /// Checks that games can be played and judged under these rules: `best_of` and
+    /// `best_of_finals` odd (so not 0), `stocks` at least 1, at least one legal stage, and
+    /// every `allowed_gecko` entry shaped like a SHA-256 ([`is_gecko_hash`]). The error names
+    /// the field first (e.g. `best_of must be ...`).
+    pub fn validate(&self) -> Result<(), String> {
+        for (field, n) in [
+            ("best_of", self.best_of),
+            ("best_of_finals", self.best_of_finals),
+        ] {
+            if n % 2 == 0 {
+                return Err(format!("{field} must be an odd number of games, not {n}"));
+            }
+        }
+        if self.stocks == 0 {
+            return Err("stocks must be at least 1".into());
+        }
+        if self.legal_stages.is_empty() {
+            return Err("legal_stages must list at least one stage".into());
+        }
+        if let Some(bad) = self.allowed_gecko.iter().find(|h| !is_gecko_hash(h)) {
+            return Err(format!(
+                "allowed_gecko: {:?} is not a SHA-256 (64 lowercase hex characters)",
+                bad.chars().take(80).collect::<String>()
+            ));
+        }
+        Ok(())
     }
 }
 
@@ -55,6 +86,81 @@ mod tests {
         // 64 bytes but not 64 ASCII characters.
         assert!(!is_gecko_hash(&format!("{}é", &SHA[..62])));
         assert!(!is_gecko_hash("0541574b"));
+    }
+
+    #[test]
+    fn default_ruleset_is_valid() {
+        Ruleset::default().validate().unwrap();
+        let r = Ruleset {
+            allowed_gecko: vec![SHA.into()],
+            ..Ruleset::default()
+        };
+        r.validate().unwrap();
+    }
+
+    #[test]
+    fn validate_names_the_bad_field() {
+        let cases: Vec<(Ruleset, &str)> = vec![
+            (
+                Ruleset {
+                    best_of: 0,
+                    ..Ruleset::default()
+                },
+                "best_of",
+            ),
+            (
+                Ruleset {
+                    best_of: 4,
+                    ..Ruleset::default()
+                },
+                "best_of",
+            ),
+            (
+                Ruleset {
+                    best_of_finals: 6,
+                    ..Ruleset::default()
+                },
+                "best_of_finals",
+            ),
+            (
+                Ruleset {
+                    stocks: 0,
+                    ..Ruleset::default()
+                },
+                "stocks",
+            ),
+            (
+                Ruleset {
+                    legal_stages: vec![],
+                    ..Ruleset::default()
+                },
+                "legal_stages",
+            ),
+            (
+                Ruleset {
+                    allowed_gecko: vec![SHA.to_uppercase()],
+                    ..Ruleset::default()
+                },
+                "allowed_gecko",
+            ),
+            (
+                Ruleset {
+                    allowed_gecko: vec![SHA.into(), "abc".into()],
+                    ..Ruleset::default()
+                },
+                "allowed_gecko",
+            ),
+        ];
+        for (r, field) in cases {
+            let err = r.validate().expect_err(field);
+            assert!(err.starts_with(field), "{field}: {err}");
+        }
+    }
+
+    #[test]
+    fn unknown_fields_are_refused() {
+        let err = serde_json::from_str::<Ruleset>(r#"{"best_of_final":5}"#).unwrap_err();
+        assert!(err.to_string().contains("best_of_final"), "{err}");
     }
 
     #[test]

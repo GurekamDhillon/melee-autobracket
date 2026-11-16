@@ -24,22 +24,23 @@ const BASE32: &[u8; 32] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
 const INVITE_LEN: usize = 12;
 
 /// `POST /v1/admin/events`: a new event open for sign-up. The ruleset is the supplied one,
-/// or else `cfg.ruleset`, with `best_of` overridden when the request gives it. Every
-/// `best_of` and `best_of_finals` must be odd.
+/// or else `cfg.ruleset`, with `best_of` overridden when the request gives it. The result
+/// must pass [`proto::Ruleset::validate`] (400 naming the field otherwise).
 pub async fn create_event(
     State(state): State<AppState>,
     to: To,
 ) -> Result<(StatusCode, Json<EventSummary>), ApiError> {
     let req: EventCreateReq = parse_body(&to.body)?;
     check_text("name", &req.name, MAX_EVENT_NAME_CHARS)?;
-    if let Some(r) = &req.ruleset {
-        check_odd("best_of", r.best_of)?;
-        check_odd("best_of_finals", r.best_of_finals)?;
-    }
     let mut ruleset = req.ruleset.unwrap_or_else(|| state.cfg.ruleset.clone());
+    ruleset
+        .validate()
+        .map_err(|e| ApiError::new(StatusCode::BAD_REQUEST, e))?;
     if let Some(best_of) = req.best_of {
-        check_odd("best_of", best_of)?;
         ruleset.best_of = best_of;
+        ruleset
+            .validate()
+            .map_err(|e| ApiError::new(StatusCode::BAD_REQUEST, e))?;
     }
     let ruleset_json = serde_json::to_string(&ruleset).map_err(ApiError::internal)?;
     let id: i64 = sqlx::query_scalar(
@@ -223,16 +224,4 @@ pub(super) fn parse_stored<T: serde::de::DeserializeOwned>(
             .map_err(|e| ApiError::internal(format_args!("stored JSON {j:?}: {e}")))
     })
     .transpose()
-}
-
-/// 400 unless a set length is odd (and so not 0).
-fn check_odd(field: &str, n: u8) -> Result<(), ApiError> {
-    if n % 2 == 1 {
-        Ok(())
-    } else {
-        Err(ApiError::new(
-            StatusCode::BAD_REQUEST,
-            format!("{field} must be odd"),
-        ))
-    }
 }

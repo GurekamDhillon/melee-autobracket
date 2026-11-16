@@ -293,12 +293,17 @@ async fn conflicting_uploads_go_to_queue() {
 
 #[tokio::test]
 async fn single_upload_times_out_to_queue() {
-    let app = TestApp::spawn(|c| c.upload_timeout_secs = 0).await;
+    let app = TestApp::spawn(|c| c.upload_timeout_secs = 1).await;
     let (app, host, _guest, event) = two_player(app).await;
     assert_eq!(
         upload(&host, event, 0, 1, simple_game(1, START_A)).await,
         StatusCode::ACCEPTED
     );
+    // The upload timeout has passed.
+    sqlx::query("UPDATE games SET first_upload_at = first_upload_at - 2")
+        .execute(&app.state.db)
+        .await
+        .unwrap();
     assert_eq!(judge_due(&app.state).await.unwrap(), 1);
 
     let (state, verdict, slot, _, build) = game(&app, event, 0, 1).await;

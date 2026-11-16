@@ -35,19 +35,37 @@ pub fn label(s: &str) -> String {
 /// Longest error or engine message shown in the log.
 pub const MAX_DETAIL_CHARS: usize = 300;
 
+/// Whether `c` must not appear raw in a one-line log record or in stored text: a control
+/// character (`\n`, `\r`, ESC, NUL, NEL, ...), the line and paragraph separators U+2028 and
+/// U+2029, or a Unicode bidirectional control (U+202A-U+202E, U+2066-U+2069, U+200E, U+200F,
+/// U+061C), which can make a line read differently from what it holds. Everything else
+/// (combining marks, any script, emoji sequences) is ordinary text. [`clean`] escapes exactly
+/// these and [`is_printable_within`] refuses exactly these.
+pub fn needs_escape(c: char) -> bool {
+    c.is_control()
+        || matches!(
+            c,
+            '\u{2028}'
+                | '\u{2029}'
+                | '\u{202a}'..='\u{202e}'
+                | '\u{2066}'..='\u{2069}'
+                | '\u{200e}'
+                | '\u{200f}'
+                | '\u{61c}'
+        )
+}
+
 /// Text from outside the process (players, verifiers, the engine, stored rows) made safe for a
-/// one-line log record: cut to `max_chars` characters, then every character that is not
-/// printable (control characters, the line and paragraph separators U+2028/U+2029, NEL, and
-/// anything else `char::escape_debug` would escape) written as its Rust escape (`\n`,
-/// `\u{1b}`). The log formatter does not escape `%` fields itself, so without this a newline
-/// in a field would start a forged log line.
+/// one-line log record: cut to `max_chars` characters, then every character [`needs_escape`]
+/// names written as its Rust escape (`\n`, `\u{1b}`, `\u{202e}`). The log formatter does not
+/// escape `%` fields itself, so without this a newline in a field would start a forged log line.
 pub fn clean(s: &str, max_chars: usize) -> String {
     let mut out = String::with_capacity(s.len());
     for c in s.chars().take(max_chars) {
-        match c {
-            // `escape_debug` escapes these too, but they cannot break a line.
-            '\\' | '"' | '\'' => out.push(c),
-            _ => out.extend(c.escape_debug()),
+        if needs_escape(c) {
+            out.extend(c.escape_debug());
+        } else {
+            out.push(c);
         }
     }
     out
@@ -59,12 +77,9 @@ pub fn detail(s: impl std::fmt::Display) -> String {
 }
 
 /// Whether text from a request may be stored: at most `max_chars` characters and nothing
-/// [`clean`] would have to escape except quotes and backslashes (so no control characters,
-/// line or paragraph separators, or other unprintable characters).
+/// [`clean`] would have to escape (see [`needs_escape`]).
 pub fn is_printable_within(s: &str, max_chars: usize) -> bool {
-    s.chars().count() <= max_chars
-        && s.chars()
-            .all(|c| matches!(c, '\\' | '"' | '\'') || c.escape_debug().len() == 1)
+    s.chars().count() <= max_chars && !s.chars().any(needs_escape)
 }
 
 /// The variant name of a re-simulation outcome.
@@ -243,6 +258,41 @@ mod tests {
         // Cut to 64 characters before escaping.
         assert_eq!(label(&"\n".repeat(100)), "\\n".repeat(64));
         assert_eq!(clean("é".repeat(10).as_str(), 3), "ééé");
+    }
+
+    /// Ordinary text in any script is accepted and logged as-is: combining marks, Thai,
+    /// Devanagari, emoji with a variation selector or a zero-width joiner.
+    #[test]
+    fn ordinary_text_in_any_script_is_accepted_as_is() {
+        for ok in [
+            "Cafe\u{301} Melee",                          // combining acute accent
+            "\u{e21}\u{e27}\u{e22}\u{e44}\u{e17}\u{e22}", // Thai
+            "\u{915}\u{94d}\u{937}",                      // Devanagari conjunct (virama)
+            "\u{2764}\u{fe0f} netplay",                   // emoji + variation selector
+            "\u{1f468}\u{200d}\u{1f4bb}",                 // emoji ZWJ sequence
+            "Ünïcødé 🎮",
+        ] {
+            assert!(is_printable_within(ok, 80), "{ok:?}");
+            assert_eq!(label(ok), ok, "{ok:?}");
+        }
+    }
+
+    /// Control characters, the line and paragraph separators and the bidirectional controls
+    /// are refused, and escaped by the same predicate.
+    #[test]
+    fn controls_separators_and_bidi_controls_are_refused_and_escaped() {
+        for c in [
+            '\n', '\r', '\t', '\0', '\u{1b}', '\u{7f}', '\u{85}', '\u{2028}', '\u{2029}',
+            '\u{202a}', '\u{202b}', '\u{202c}', '\u{202d}', '\u{202e}', '\u{2066}', '\u{2067}',
+            '\u{2068}', '\u{2069}', '\u{200e}', '\u{200f}', '\u{61c}',
+        ] {
+            let s = format!("a{c}b");
+            assert!(!is_printable_within(&s, 80), "{c:?}");
+            let out = label(&s);
+            assert!(!out.contains(c), "{c:?} kept in {out:?}");
+            assert!(out.starts_with('a') && out.ends_with('b'), "{out:?}");
+        }
+        assert_eq!(label("x\u{202e}y"), "x\\u{202e}y");
     }
 
     #[test]
