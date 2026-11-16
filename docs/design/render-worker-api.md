@@ -1,25 +1,55 @@
 # Render worker API (design)
 
-Status: **draft for desktop review**, 2026-11-15. No code yet. This document extends
+Status: **draft, revision 2 after the desktop's review** (2026-11-16; review in
+`.superpowers/sdd/2026-11-15-verified-autobracket/worker-api-desktop-review.md`, plus the
+owner's host-agnostic requirement of the same day). No code yet.
+This document extends
 `docs/api.md`; everything there (signing, conventions, error bodies, limits, the rate limit)
 applies to every route below unless this document says otherwise. Once agreed, the routes and
 types move into `docs/api.md` and the `proto` crate with `checked` examples like the rest.
 
 The problem: the server holds every replay of every counted game. A machine with a GPU and a
-copy of the engine (today: the owner's Windows desktop) turns them into video: a VOD of each
-set, and short clips of notable moments. The desktop's facts (phase2-desktop-answers.md):
+copy of the engine (today: the owner's Windows desktop; tomorrow perhaps another machine, another
+GPU vendor, Linux) turns them into video: a VOD of each set, and short clips of notable moments.
+The desktop's facts (phase2-desktop-answers.md and the review of 2026-11-16):
 
-- The worker is a Windows Task Scheduler job. It runs at below-normal priority, **pauses while
-  the owner plays**, and may therefore sit on a job for hours.
-- It renders with `melee slpcheck --video-out … --audio-out …`. `--from-frame N --to-frame M`
-  has landed (branch `port/video-range`, a3778b5cf): N and M are `.slp` frame indices (the
-  replay starts at -123); the simulation runs from frame 0 and the output covers `N..=M`
-  inclusive, exit 0. `N <= 0` means from the start. `M` past the last frame, or `N > M`, exits 2,
-  so the **server clamps every range to the game's frame count before queueing**. Seek runs
-  ~560 fps headless, so a clip near the end of a 6-minute game costs ~40 s before encoding
-  starts.
-- Output is mp4, H.264 (NVENC) + AAC, faststart. VOD 1080p60 at ~6 Mbps (~45 MB/min), clips
-  720p60 at ~4 Mbps. Full render ~155 fps (~2.5x realtime): a 4-minute set in ~1.6 minutes.
+- On the current desktop the worker is a Windows Task Scheduler job. It runs at below-normal
+  priority, **pauses while the owner plays**, and may therefore sit on a job for hours. Any
+  other host runs it as a service the same way (section 11).
+- **The engine makes no mp4 and does no muxing.** `melee slpcheck --slp F --video-out X` writes
+  raw RGBA at 60 fps to stdout (`-`), a file or a named pipe; `--audio-out Y` writes raw s16le
+  stereo at 32000 Hz (pre-roll skipped; sample 0 is the first output frame). The only engine
+  video knob is `--video-size WxH` (both even, W 64..7680, H 64..4320, default 1280x720; wider
+  than 4:3 renders 16:9). `--video-realtime` is not used. Run with `MELEE_WINDOW_HIDDEN=1`.
+- **ffmpeg is a hard worker dependency**: it encodes (H.264 + AAC) and muxes (mp4, faststart).
+  The proven pipeline on the current desktop (Windows, NVIDIA):
+  `melee slpcheck --slp F --video-out - --audio-out \\.\pipe\NAME | ffmpeg -f rawvideo -pix_fmt rgba -s WxH -r 60 -i - -f s16le -ar 32000 -ac 2 -i \\.\pipe\NAME -c:v h264_nvenc -preset p4 -tune ll -c:a aac -movflags +faststart -f mp4 out.mp4`.
+  The Linux equivalent uses a FIFO: `mkfifo "$T/audio.pcm"`, then the same command with
+  `--audio-out "$T/audio.pcm"` / `-i "$T/audio.pcm"` and whichever H.264 encoder the host has.
+  ~155 fps is the whole pipeline on that desktop (~2.5x realtime): a 4-minute set in ~1.6
+  minutes.
+- **The GPU host may change** (owner heads-up, 2026-11-16): not necessarily this desktop, not
+  necessarily NVIDIA, possibly Linux. So nothing in the API or a job assumes Windows, NVIDIA or
+  one worker host. The encoder is worker configuration, probed from `ffmpeg -encoders`
+  (`h264_nvenc`, `h264_amf`, `h264_qsv`, `h264_vaapi`, `h264_videotoolbox`, else `libx264`) and
+  reported after the fact; paths, the pause predicate and the scheduler are worker-side
+  (section 11). Several renderer keys may be registered and claim concurrently.
+- `--from-frame N --to-frame M` (branch `port/video-range`, a3778b5cf): N and M are `.slp` frame
+  indices (the replay starts at -123); the simulation runs from frame 0 and the output covers
+  `N..=M` inclusive. `N <= 0` means from the start. `M` may equal the replay's last frame (the
+  final frame is output; no off-by-one); `M` past it, or `N > M`, exits 2, so the **server clamps
+  every range before queueing**. The expected frame count is `M - max(N, -123) + 1`. Seek runs
+  ~560 fps headless, so a clip near the end of a 6-minute game costs ~40 s before encoding.
+- `--progress` (bc0e66284) prints `progress <frame> <last>` on stderr every 60 replay frames,
+  during the seek too (`frame` may be negative); `--verify-disc` checks the disc header (GALE01
+  rev 2, plain GCM) and exits 4 on a bad image. A `--csv FILE` `status` column is the real
+  result signal; exit codes are listed in section 2.
+- Output depends only on replay, engine build and disc, **but the mp4 bytes are not
+  reproducible** across ffmpeg, NVENC and driver versions: a rerun yields a different sha256.
+  The report records the ffmpeg version.
+- VOD 1080p60 at ~6 Mbps (~45 MB/min), clips 720p60 at ~4 Mbps.
+- Akaneia replays run on a **second disc** (`GW_ISO_AKANEIA`, auto-chosen by the engine from the
+  replay's gecko codes and fighters).
 
 Contents:
 1. [Shape of the design](#1-shape-of-the-design)
@@ -34,6 +64,7 @@ Contents:
 10. [Configuration](#10-configuration)
 11. [Worker loop](#11-worker-loop)
 12. [Open questions for the desktop](#12-open-questions-for-the-desktop)
+13. [Broadcast (later)](#13-broadcast-later)
 
 ## 1. Shape of the design
 
@@ -61,9 +92,12 @@ A heartbeat may say `paused`; a paused lease does not expire on the normal clock
 longer, bounded one, so a six-hour play session does not throw the job back in the queue, and
 a worker that dies while paused does not hold the job forever.
 
-**Everything the output depends on is in the job.** Engine build, disc image hash, replay hashes
-and the render settings are part of the job and are recorded with the output, so any output can
-be reproduced (or rejected as stale when the engine changes).
+**Everything the output depends on is in the job.** Engine build, disc image hashes, replay
+hashes and the render settings are part of the job and are recorded with the output, so any
+output can be re-rendered from the same inputs (or rejected as stale when the engine changes).
+"Reproduced" means the same frames and sound, not the same bytes: the encoder is ffmpeg with
+NVENC, whose output varies with ffmpeg, driver and GPU, so the server never expects a rerun to
+match an earlier sha256. The hash protects the transfer, not the identity of the render.
 
 ## 2. Jobs
 
@@ -99,17 +133,34 @@ itself, as the detector found it) and `pad_before_frames` / `pad_after_frames` (
 90: 2 s before, 1.5 s after, as the desktop proposed). The server clamps the padded range to the
 replay's `[first_frame, last_frame]` (from the replay's own metadata, read when the upload was
 judged) before handing it out, so the worker always receives a `render_from`/`render_to` that
-`slpcheck` accepts (`from <= to`, `to <= last_frame`) and never has to know the game's length.
-A `render_from <= 0` means "from the start" to `slpcheck` and includes the pre-game frames; the
+`slpcheck` accepts (`from <= to`, `to <= last_frame`; `to == last_frame` is valid and outputs
+the final frame, so there is no `- 1`) and never has to know the game's length. A
+`render_from <= 0` means "from the start" to `slpcheck` and includes the pre-game frames; the
 server lets that stand rather than special-casing it. A job whose range cannot be clamped into
 the game (a moment entirely past `last_frame`: a detector bug) is refused at creation (400) rather
 than queued. The unclamped moment is kept (`moment_from`/`moment_to`) for the page's "at 2:14"
 caption.
 
-**Clip cost.** The engine simulates from frame 0 at ~560 fps to reach `render_from`, then encodes
-at ~155 fps: a 10 s clip at the end of a 6-minute game is ~40 s of seek plus ~4 s of encode. A
-clip job is therefore never "instant", and `max_running_secs` for clips (1800) allows for a
-worker at below-normal priority seeking through a timeout game several times over.
+**Expected frame count.** For every output the server computes and stores
+`expected_frames = render_to - max(render_from, -123) + 1` (for a whole game,
+`last_frame - max(first_frame, -123) + 1`). The worker must produce exactly that many frames and
+the server checks it at `finish` (section 6). This closes the one hole the engine leaves open:
+`slpcheck` exits 0 when ffmpeg or the pipe dies mid-run ("an output closed at frame N;
+stopping"), so an exit code of 0 does not prove a complete render.
+
+**Clip cost.** The engine simulates from frame 0 at ~560 fps to reach `render_from`, then the
+pipeline encodes at ~155 fps: a 10 s clip at the end of a 6-minute game is ~40 s of seek plus
+~4 s of encode. A clip job is therefore never "instant", and `max_running_secs` for clips (1800)
+allows for a worker at below-normal priority seeking through a timeout game several times over.
+
+**Discs.** A vanilla replay renders on the GALE01 disc; an Akaneia replay (recognised by the
+engine from the replay's gecko codes and fighters) renders on the second disc the worker has as
+`GW_ISO_AKANEIA`. The server marks each `RenderInput` with `disc: "vanilla" | "akaneia"` (open
+question 16 is how the server tells) and the job's `source` carries one hash per disc. A set
+that needs a disc the server has no hash for (`render.akaneia_iso_sha256` unset) gets no
+automatic job, and an admin create for it is 409 `no akaneia disc configured`: the organiser
+either adds the hash or lives without those VODs. Excluding is the default because an
+unverifiable disc is exactly the thing the hash is there to catch.
 
 ### Job key (idempotency)
 
@@ -168,16 +219,36 @@ Backoff after a retryable failure is `min(60 * 4^(attempt-1), 3600)` seconds: 60
 (partial VODs are served, marked incomplete) and keeps the last `reason` and the worker key that
 posted it, so the organiser can read it in the admin listing. A release because the worker lacks
 the job's engine build sets `not_before` to `now + 300` so the same worker does not re-claim it
-every two seconds; the claim filter (section 5) is the real fix.
+on every poll; the claim filter (section 5) is the real fix.
 
-The terminal failure reasons the worker posts are free text (200 printable characters) plus a
-short `code` from a fixed list so the server can count them: `engine-crash`, `engine-timeout`,
-`replay-unreadable`, `encoder-unavailable` (no NVENC session, say), `disk-full`,
-`output-too-large`, `build-mismatch` (the worker's engine build does not match the job and it
-chose to fail rather than release), `bad-range` (`slpcheck` exited 2 on the job's
-`render_from`/`render_to`: the server's clamp was wrong, so not retryable, and the organiser
-sees the reason), `tool-missing` (an `analyse` job on a worker without the
-analysis tool; usually a `release` with `no-build` is better), `other`.
+The failure the worker posts is free text (`reason`, 200 printable characters) plus a `code`
+from a fixed list, so the server can count them and the organiser can read them. The engine is
+deterministic, so anything the engine decides about the replay is **not** retryable: another
+attempt gives the same answer. What is retryable is the machinery around it: ffmpeg, NVENC, the
+pipe, the disk, time, and a native fault once. The engine's exit code is only a hint; the real
+signal is the `status` column of its `--csv FILE` output, and stderr for the detail.
+
+| `code` | Engine signal | Retryable | Meaning for the organiser |
+|---|---|---|---|
+| `replay-unreadable` | exit 1, status `parse-error` | no | the stored file is not a readable replay |
+| `engine-panic` | exit 1, status `panic@frame` | no | an engine bug on this replay; quarantine-worthy |
+| `replay-diverged` | exit 1, status `diverged` or `match-ended-early` | no | the replay does not re-simulate on this build (the verifier should have said so too) |
+| `bad-range` | exit 2 and stderr mentions `--from-frame`/`--to-frame` | no | the server's clamp was wrong; a server bug |
+| `unsupported` | exit 3 | no | a replay feature the engine does not do |
+| `bad-disc` | exit 4, or `--verify-disc` failed | no; the worker should `release` with `no-build` instead of failing | the worker's disc is wrong; fix the worker |
+| `boot-error` | exit 1, status `boot-error` | once | the engine could not boot; usually environmental |
+| `engine-crash` | native fault (a Windows exception code as the exit status; a signal on Linux) | once | a GPU or engine crash; if the job's previous `failure.code` is already `engine-crash` on the same output, the worker posts it non-retryable |
+| `encoder-failed` | ffmpeg exited non-zero, or no hardware encoder session could be opened and no fallback was allowed | yes | ffmpeg/driver trouble |
+| `frame-count-mismatch` | exit 0 but ffmpeg's frame count or stderr `video-out: N frames` differs from `expected_frames`, or the server rejected `finish` for it | yes | the pipe or ffmpeg died mid-run |
+| `io-error` | pipe, scratch or disk failure (disk full included) | yes | worker-side |
+| `engine-timeout` | the worker's own per-output timeout, or the server's `max_running_secs` | yes | too slow; a paused machine, a huge game |
+| `output-too-large` | the file exceeds the kind's cap | no | lower the bitrate or raise the cap |
+| `build-mismatch` | the worker's build is not the job's and it chose to fail rather than release | no | the claim filter should have prevented this |
+| `tool-missing` | an `analyse` job on a worker without the tool or schema | no; prefer `release` with `no-build` | |
+| `other` | anything else, with `reason` | as the worker says | |
+
+Exit 2 is also "usage, missing disc, unreadable file"; the worker maps it to `bad-range` only
+when stderr names the range flags, otherwise `other` with the stderr tail, not retryable.
 
 ## 3. Lease, heartbeat and pause
 
@@ -212,8 +283,19 @@ Running time is bounded too: the sum of `running` intervals in one attempt may n
 `render.max_running_secs` (default 7200 for `vod`, 1800 for `clip` and `analyse`); past it the server revokes
 the lease and the attempt counts as failed (`engine-timeout` from the server's side).
 
-A heartbeat may carry `progress` (which output, frames done, frames total) purely for the
-admin listing; it is never required and never validated beyond its shape.
+**Pause granularity.** The engine cannot be paused mid-render, so the worker pauses only
+*between outputs*: it checks its pause predicate before starting each output, and once a render
+is running it finishes it (a game is ~1.6 minutes at full speed; longer at below-normal priority
+beside a running game). The `paused` heartbeat therefore means "between outputs and waiting".
+The predicate is a worker setting (section 11), not part of the protocol; the server only sees
+`running` and `paused`.
+
+A heartbeat may carry `progress` purely for the admin listing; it is never required and never
+validated beyond its shape. The worker fills it from `slpcheck --progress`, which prints
+`progress <frame> <last>` on stderr every 60 replay frames, during the seek too (`frame` may be
+negative): `{"output", "phase": "seek" | "encode" | "upload", "frame", "first", "last"}` and the
+listing shows `(frame - first) / (last - first)`. During an upload `frame` is null and the
+listing uses `UploadState.received` instead.
 
 **Who may act on a leased job.** Every job route with `{id}` after a claim (`replays`,
 `heartbeat`, `outputs/*`, `result`, `release`) checks that the job is leased to the signing key
@@ -286,7 +368,7 @@ lists the other statuses.
 | POST | `/v1/render/jobs/{id}/outputs/{name}/finish` | renderer | `RenderReport` | 200 `UploadState` (`stored`) | 400; 404; 409 lease lost, bytes missing (body lists the missing ranges), **sha256 mismatch** (upload discarded; begin again), already stored |
 | POST | `/v1/render/jobs/{id}/result` | renderer | `RenderResult` | 204, empty | 400; 404; 409 lease lost, an `ok` result while an output is missing or not `stored` |
 | POST | `/v1/render/jobs/{id}/release` | renderer | `ReleaseReq`, or empty | 204, empty | 400; 404; 409 not leased to this key |
-| POST | `/v1/admin/render/jobs` | organiser | `RenderJobCreateReq` | 201 `RenderJob`; 200 `RenderJob` an identical job exists | 400; 404 no such set or game; 409 set not decided, game not counted |
+| POST | `/v1/admin/render/jobs` | organiser | `RenderJobCreateReq` | 201 `RenderJob`; 200 `RenderJob` an identical job exists | 400; 404 no such set or game; 409 set not decided, game not counted, no akaneia disc configured |
 | GET | `/v1/admin/render/jobs?event={id}&state={state}` | organiser | — | 200 `[RenderJob]`, newest first, at most 200 | 400 |
 | GET | `/v1/admin/render/jobs/{id}` | organiser | — | 200 `RenderJob` | 400; 404 |
 | POST | `/v1/admin/render/jobs/{id}/rerun` | organiser | `RerunReq`, or empty | 200 `RenderJob` | 400; 404; 409 job is `queued` or `leased` (cancel first) |
@@ -307,10 +389,11 @@ Notes on individual routes:
   for work marks itself seen; the admin listing shows when each renderer key was last seen. A
   claim is a single transaction, so two workers cannot lease one job.
 - **Replays.** `{n}` is the index into the job's `inputs` (0-based). The file comes from the
-  job row, never from the request. The body is the stored upload of the slot the job names
-  (`inputs[n].slot`, slot 0 unless the organiser chose otherwise); for a `Verified` game both
-  slots' files are byte-identical anyway. `x-ab-sha256` repeats `inputs[n].sha256` so the worker
-  can check the download without re-reading the job.
+  job row, never from the request. The body is the stored upload the server chose for
+  `inputs[n]`: **the copy the verifier re-simulated** when there was one (the file the server
+  already knows plays back on this build), else slot 0's; `inputs[n].slot` says which. Nothing in
+  the render depends on which player recorded the file. `x-ab-sha256` repeats `inputs[n].sha256`
+  so the worker can check the download without re-reading the job.
 - **Heartbeat** is the only route that may say `paused`. A heartbeat on a job whose lease has
   expired is 409 even if nobody else has claimed it: the worker must discard its work on it and
   claim again (it will usually get the same job back, with the outputs already stored still
@@ -374,13 +457,21 @@ arrived:
    streams the assembled file through SHA-256 and compares with the hash from `begin`; a match
    moves the file into place (`media_dir`, section 8) and marks the output `stored`; a mismatch
    deletes the upload and answers 409 `sha256 mismatch` so the worker begins again (with the
-   same hash, if it trusts its file; the server cannot tell which side is wrong).
+   same hash, if it trusts its file; the server cannot tell which side is wrong). For a media
+   output the server also requires `report.frames == expected_frames` (section 2) and
+   `report.duration_ms` within one frame of `frames / 60 * 1000`; otherwise 409
+   `frame count mismatch`, the upload is discarded, and the worker treats it as a
+   `frame-count-mismatch` failure (retryable) rather than re-uploading the same truncated file.
+   The worker should have caught this itself from ffmpeg's exit status and the engine's
+   `video-out: N frames` line; the server check is the backstop.
 
 Open uploads expire `upload_ttl_secs` (default 86400, a day) after their last chunk; the lease
 rules still apply, so in practice an upload dies with its lease unless the same worker re-claims
 the job and resumes it, which it can: `UploadState` is keyed by `(job, name)`, not by attempt, so
 a re-claim after a reboot continues where the chunks stopped, as long as the worker's rendered
-file is the same bytes (same hash). Partial uploads live in `media_dir/incoming/{job}-{name}.part`
+file is the same bytes (same hash): the worker keeps a finished mp4 in scratch until its
+`finish` succeeds, precisely so a restart resumes the upload instead of re-rendering (a
+re-render would produce different bytes and a new hash). Partial uploads live in `media_dir/incoming/{job}-{name}.part`
 as a sparse file written at `offset`, plus a small `.ranges` sidecar; on start the server deletes
 `.part` files with no `render_uploads` row.
 
@@ -398,20 +489,24 @@ them: the first frame of a replay is -123, game start is 0, ranges are inclusive
 
 ### RenderSpec
 
-The render settings; part of the job key. Field names mirror what the worker will pass to
-`slpcheck` (open question 2).
+The render settings; part of the job key. The spec describes the *result* (size, codec,
+bitrates, container, overlays), not the machine: only `width`/`height` reach the engine
+(`--video-size WxH`); everything else is an ffmpeg argument the worker derives, and the encoder
+implementation (NVENC, AMF, QSV, VAAPI, VideoToolbox, libx264) is the worker's choice, reported
+afterwards in `RenderReport.encoder`. Two workers with different GPUs produce the same spec with
+different bytes, and that is fine (section 1).
 
 | Field | Type | |
 |---|---|---|
 | `preset` | `"vod"` or `"clip"` | which server preset filled the rest; informational once filled in |
-| `width`, `height` | integer | 1920×1080 (vod), 1280×720 (clip) |
-| `fps` | integer | 60 |
-| `video_codec` | `"h264"` | the only value today |
-| `video_kbps` | integer | 6000 (vod), 4000 (clip) |
+| `width`, `height` | integer | even; 64..7680 × 64..4320 (the engine's bounds); 1920×1080 (vod), 1280×720 (clip); wider than 4:3 renders 16:9 |
+| `fps` | `60` | fixed by the engine; present so a reader of the manifest need not know that |
+| `video_codec` | `"h264"` | the codec, not the encoder |
+| `video_kbps` | integer | target bitrate: 6000 (vod), 4000 (clip) |
 | `audio_codec` | `"aac"` | |
 | `audio_kbps` | integer | 160 |
 | `container` | `"mp4-faststart"` | |
-| `hud` | `"game"` or `"none"` | render the in-game HUD (open question 9) |
+| `overlay` | object or null | ffmpeg `drawtext` overlays the worker draws (the engine has none): `tags` (bool: the two tags), `score` (bool: set score before this game), `round` (bool: round name, section 7 of api.md), `clip_title` (bool: the clip's `label` as a title card for the first second), `fade` (bool: a short fade in/out on clips). The text comes from the job (`tags`, `score`, `round_name`, `clip.label`); fonts are the worker's. Default: vod `{"tags": true, "score": true, "round": true}`, clip `{"tags": true, "clip_title": true, "fade": true}` |
 
 ```json
 {
@@ -420,7 +515,7 @@ The render settings; part of the job key. Field names mirror what the worker wil
   "video_codec": "h264", "video_kbps": 6000,
   "audio_codec": "aac", "audio_kbps": 160,
   "container": "mp4-faststart",
-  "hud": "game"
+  "overlay": {"tags": true, "score": true, "round": true, "clip_title": false, "fade": false}
 }
 ```
 
@@ -430,8 +525,8 @@ What the output depends on besides the replays; part of the job key.
 
 | Field | Type | |
 |---|---|---|
-| `engine_build` | string | exact build string, as `SignupReq.engine_build` (at most 64 printable characters); the worker must run this build |
-| `iso_sha256` | string or null | lowercase hex SHA-256 of the disc image the server was told about (`render.iso_sha256` in config); null when unknown; the worker compares with its own (open question 3) |
+| `engine_build` | string | exact build string (at most 64 printable characters): first line of the engine's `version.txt`, `+`, first 12 hex of the executable's SHA-256, as `crates/client` `config::engine_build` computes it and as players report it in `SignupReq.engine_build`; the worker must run this build |
+| `discs` | object | lowercase hex SHA-256 per disc the job may need: `{"vanilla": "<hex>", "akaneia": "<hex>" or null}` from `render.iso_sha256` / `render.akaneia_iso_sha256`; a job never references a disc whose hash is null (section 2). The worker compares with its own one-time hashes (cached by size and mtime; `--verify-disc` is the cheap header check, not a substitute) and `release`s with `no-build` on a mismatch, never fails |
 
 ### RenderInput
 
@@ -442,10 +537,12 @@ One replay the job reads.
 | `n` | integer | index for `GET …/replays/{n}` |
 | `game_no` | integer | 1-based game number in the set |
 | `game_id` | integer | the server's game id |
-| `slot` | 0 or 1 | whose upload is served |
+| `slot` | 0 or 1 | whose upload is served (the verifier's re-simulated copy when there was one, else slot 0) |
+| `disc` | `"vanilla"` or `"akaneia"` | which disc the replay needs; `source.discs[disc]` is its hash |
 | `sha256` | string | the file's hash (from `uploads.sha256`) |
 | `bytes` | integer | |
-| `first_frame`, `last_frame` | integer | from the replay's metadata |
+| `first_frame`, `last_frame` | integer | from the replay's metadata; `last_frame` is accepted as `--to-frame` and outputs the final frame |
+| `ports` | [integer, integer] | the two human players' controller ports in the replay, in bracket slot order (`ports[0]` is slot 0's port); for overlays and for mapping analysis halves |
 
 ### RenderOutput
 
@@ -454,6 +551,8 @@ One replay the job reads.
 | `name` | string | `game-{n}.mp4` for a VOD, `clip.mp4` for a clip, `analysis.json` for an analysis |
 | `input` | integer | which `RenderInput.n` it comes from |
 | `render_from`, `render_to` | integer or null | the frame range to encode, inclusive, already clamped to `[first_frame, last_frame]` so `slpcheck` accepts it; passed straight to `--from-frame`/`--to-frame`; null means the whole game (VOD: no range flags) |
+| `expected_frames` | integer or null | `render_to - max(render_from, -123) + 1` (whole game: from `first_frame`); the frame count the worker must deliver and `finish` checks; null for `analysis.json` |
+| `score` | [integer, integer] or null | the set score before this game, `[slot 0, slot 1]`, for the overlay |
 | `state` | `"missing"`, `"uploading"` or `"stored"` | |
 | `bytes`, `sha256` | integer, string, or null | once begun |
 | `report` | `RenderReport` or null | once stored; for `analysis.json` the media fields are 0 and `schema` is filled |
@@ -480,7 +579,8 @@ One replay the job reads.
 | `clip` | object or null | for a clip: `game_no`, `moment_from`, `moment_to`, `pad_before_frames`, `pad_after_frames`, `label` (string or null, the detector's name for it: `"combo"`, `"edgeguard-kill"`, `"zero-to-death"`, `"comeback"`, or the organiser's text) |
 | `analyse` | `AnalyseSpec` or null | for an analysis |
 | `failure` | object or null | for a failed attempt or job: `code`, `reason`, `at`, `worker_key` |
-| `tags` | [slot 0 tag, slot 1 tag] | for the worker's logs and the page |
+| `tags` | [slot 0 tag, slot 1 tag] | for overlays, the worker's logs and the page |
+| `round_name` | string | the set's round name (api.md section 7), for overlays |
 | `created_at`, `updated_at` | integer | |
 
 A claim answer (a VOD):
@@ -493,25 +593,28 @@ A claim answer (a VOD):
   "state": "leased",
   "priority": 0, "attempt": 1, "max_attempts": 4, "not_before": null,
   "lease": {"lease_until": 1763201200, "worker_key": "d75a…511a", "paused_since": null, "progress": null},
-  "source": {"engine_build": "melee (rust) 0.1.0 development build+0cd085d", "iso_sha256": "9b1c…e2f0"},
+  "source": {"engine_build": "melee (rust) 0.1.0 development build+0cd085d1234", "discs": {"vanilla": "9b1c…e2f0", "akaneia": null}},
   "render": {"preset": "vod", "width": 1920, "height": 1080, "fps": 60, "video_codec": "h264",
              "video_kbps": 6000, "audio_codec": "aac", "audio_kbps": 160,
-             "container": "mp4-faststart", "hud": "game"},
+             "container": "mp4-faststart",
+             "overlay": {"tags": true, "score": true, "round": true, "clip_title": false, "fade": false}},
   "inputs": [
-    {"n": 0, "game_no": 1, "game_id": 12, "slot": 0, "sha256": "75b3…6a91c", "bytes": 1848211, "first_frame": -123, "last_frame": 9876},
-    {"n": 1, "game_no": 2, "game_id": 13, "slot": 0, "sha256": "0c2a…41d7", "bytes": 2010034, "first_frame": -123, "last_frame": 11240}
+    {"n": 0, "game_no": 1, "game_id": 12, "slot": 0, "disc": "vanilla", "sha256": "75b3…6a91c", "bytes": 1848211, "first_frame": -123, "last_frame": 9876, "ports": [1, 2]},
+    {"n": 1, "game_no": 2, "game_id": 13, "slot": 1, "disc": "vanilla", "sha256": "0c2a…41d7", "bytes": 2010034, "first_frame": -123, "last_frame": 11240, "ports": [1, 2]}
   ],
   "outputs": [
-    {"name": "game-1.mp4", "input": 0, "render_from": null, "render_to": null, "state": "stored",
-     "bytes": 74211998, "sha256": "ab12…", "report": {"engine_build": "melee (rust) 0.1.0 development build+0cd085d", "encoder": "h264_nvenc", "muxer": "ffmpeg 7.1", "frames": 10000, "duration_ms": 166667, "render_ms": 64400},
-     "url": "/media/1/3/game-1.mp4"},
-    {"name": "game-2.mp4", "input": 1, "render_from": null, "render_to": null, "state": "missing",
-     "bytes": null, "sha256": null, "report": null, "url": null}
+    {"name": "game-1.mp4", "input": 0, "render_from": null, "render_to": null, "expected_frames": 10000, "score": [0, 0], "state": "stored",
+     "bytes": 74211998, "sha256": "ab12…",
+     "report": {"engine_build": "melee (rust) 0.1.0 development build+0cd085d1234", "encoder": "h264_nvenc", "muxer": "ffmpeg version 7.1-full_build", "frames": 10000, "duration_ms": 166667, "render_ms": 64400, "schema": null},
+     "url": "/media/1/3/game-1.mp4", "content_type": "video/mp4"},
+    {"name": "game-2.mp4", "input": 1, "render_from": null, "render_to": null, "expected_frames": 11364, "score": [1, 0], "state": "missing",
+     "bytes": null, "sha256": null, "report": null, "url": null, "content_type": "video/mp4"}
   ],
   "clip": null,
   "analyse": null,
   "failure": null,
   "tags": ["Mango", "Armada"],
+  "round_name": "Winners semis",
   "created_at": 1763200000, "updated_at": 1763200600
 }
 ```
@@ -521,7 +624,7 @@ A clip's `clip` and `outputs`:
 ```json
 {
   "clip": {"game_no": 2, "moment_from": 4410, "moment_to": 4702, "pad_before_frames": 120, "pad_after_frames": 90, "label": "zero-to-death"},
-  "outputs": [{"name": "clip.mp4", "input": 0, "render_from": 4290, "render_to": 4792, "state": "missing",
+  "outputs": [{"name": "clip.mp4", "input": 0, "render_from": 4290, "render_to": 4792, "expected_frames": 503, "score": [1, 0], "state": "missing",
                "bytes": null, "sha256": null, "report": null, "url": null, "content_type": "video/mp4"}]
 }
 ```
@@ -552,16 +655,18 @@ whose bytes are a JSON object:
 | `tool_build` | string | the analysis tool's build string |
 | `game_no` | integer | |
 | `windows` | [[from, to]] | the windows analysed, echoed |
-| `data` | object | the tool's result, split so the server can apply per-player visibility (section 8): `data.common` (any JSON: facts about the game that belong to nobody, such as the windows and stage) and `data.halves`, an array of exactly two members, `halves[0]` about the slot 0 player and `halves[1]` about the slot 1 player (any JSON each, null allowed). The server never looks inside `common` or a half |
+| `ports` | [integer, integer] | the two human players' controller ports **in ascending port order**; `data.halves[i]` is about the player on `ports[i]`. The tool knows ports, not bracket slots, so the split is defined in the game's own terms and the server maps port to slot with `RenderInput.ports` when serving. Defining halves by `RenderInput.slot` would swap players whenever slot 1's file was served |
+| `data` | object | the tool's result, split so the server can apply per-player visibility (section 8): `data.common` (any JSON: facts about the game that belong to nobody, such as the windows and stage) and `data.halves`, an array of exactly two members in `ports` order (any JSON each, null allowed). The server never looks inside `common` or a half |
 
 ```json
 {"schema": "missed-punish/1", "tool_build": "melee-analyse 0.1.0+abc1234", "game_no": 2,
- "windows": [[1800, 2140], [4410, 4702]],
+ "windows": [[1800, 2140], [4410, 4702]], "ports": [1, 2],
  "data": {"common": {"stage": 31}, "halves": [{"missed": [{"window": 0, "frame": 1861, "note": "…"}]}, {"missed": []}]}}
 ```
 
-The server checks `schema`, `tool_build` and `data` are present, that `data.halves` is an array
-of two (400 at `finish` otherwise), and that the whole file is at most
+The server checks `schema`, `tool_build`, `ports` and `data` are present, that `ports` equals
+the input's two ports as a set, that `data.halves` is an array of two (400 at `finish`
+otherwise), and that the whole file is at most
 `render.max_analysis_output_bytes` (default 4 MiB). The page (or a later organiser tool)
 interprets the halves by `schema`. The `common`/`halves` split is the one piece of structure the
 server imposes, and it exists only so that one player's half can be shown without the other's.
@@ -573,16 +678,19 @@ server imposes, and it exists only so that one player's half can be shown withou
 | `builds` | [string], optional | engine builds this worker can run; the server offers only jobs whose `source.engine_build` is listed. Empty or missing: any |
 | `kinds` | [`"vod"`/`"clip"`/`"analyse"`], optional | default all |
 | `tools` | [string], optional | analysis tools this worker has (`"melee-analyse"`); `analyse` jobs are offered only when their `tool` is listed. Empty or missing: no `analyse` jobs |
+| `discs` | [`"vanilla"`/`"akaneia"`], optional | discs this worker has; a job is offered only if every input's `disc` is listed. Missing: `["vanilla"]` |
+| `encoders` | [string], optional | H.264 encoders found by `ffmpeg -encoders`, best first (e.g. `["h264_nvenc", "libx264"]`); informational, shown in the admin listing so the organiser can see what a given worker will produce with. The server never filters on it |
 | `worker` | string or null, optional | a label for the admin listing (at most 64 printable characters), e.g. the machine name |
 
 ```json
-{"builds": ["melee (rust) 0.1.0 development build+0cd085d"], "kinds": ["vod", "clip", "analyse"], "tools": ["melee-analyse"], "worker": "GD-PC"}
+{"builds": ["melee (rust) 0.1.0 development build+0cd085d1234"], "kinds": ["vod", "clip", "analyse"],
+ "tools": ["melee-analyse"], "discs": ["vanilla"], "encoders": ["h264_nvenc", "libx264"], "worker": "GD-PC"}
 ```
 
 ### Heartbeat and Lease
 
 ```json
-{"state": "running", "progress": {"output": "game-2.mp4", "frames_done": 3200, "frames_total": 11363}}
+{"state": "running", "progress": {"output": "game-2.mp4", "phase": "encode", "frame": 3200, "first": -123, "last": 11240}}
 ```
 
 ```json
@@ -614,9 +722,10 @@ What the worker actually used, recorded with the output.
 | Field | Type | |
 |---|---|---|
 | `engine_build` | string | must equal the job's `source.engine_build`, else 400 (the output would be mislabelled; release the job or fail it with `build-mismatch`) |
-| `encoder` | string | e.g. `"h264_nvenc"`, `"libx264"` |
-| `muxer` | string or null | e.g. `"ffmpeg 7.1"` |
-| `frames` | integer | frames encoded (0 for an analysis) |
+| `encoder` | string | the ffmpeg encoder actually used: `"h264_nvenc"`, `"h264_amf"`, `"h264_qsv"`, `"h264_vaapi"`, `"h264_videotoolbox"`, `"libx264"` |
+| `muxer` | string or null | ffmpeg's version banner's first line, e.g. `"ffmpeg version 7.1-full_build"`; since output bytes vary by ffmpeg, encoder and driver, this is the only record of what produced them |
+| `frames` | integer | frames encoded; must equal `expected_frames` (else 409 at `finish`); 0 for an analysis |
+| `engine_frames` | integer or null | the count from the engine's stderr `video-out: N frames` line, for the worker's own check; informational |
 | `duration_ms` | integer | media duration (0 for an analysis) |
 | `render_ms` | integer | wall time spent rendering or analysing (running, not paused) |
 | `schema` | string or null | for `analysis.json`, the schema produced; null for media |
@@ -802,7 +911,9 @@ view changes when a player toggles sharing.
 | Clip length | `to_frame - from_frame + padding` at most 3600 frames (60 s); longer is 400 |
 | Analysis windows | at most 200 per job; `params` at most 16 KiB |
 | Padding | at most 600 frames each |
-| Leases per worker key | `render.max_jobs_per_worker`, default 1 (one NVENC session, one GPU; see open question 5) |
+| Leases per worker key | `render.max_jobs_per_worker`, default 1 (one hardware encoder session per host; settled with the desktop). Several worker keys may each hold one |
+| Worker scratch | worker-side: the current desktop caps it at 2 GB; a long 1080p set plus its replays fits; the worker refuses to start an output that would exceed the cap and fails the job `io-error` (retryable) |
+| Idle poll | worker-side: 60 s on the current desktop (jobs arrive once per set); the server does not care |
 | Lease | `render.lease_secs` 600; heartbeat every ≤ 150 s recommended |
 | Pause | `render.max_pause_secs` 28800 (8 h) per attempt |
 | Running time per attempt | `render.max_running_secs` 7200 (vod), 1800 (clip, analyse) |
@@ -823,8 +934,9 @@ render_keys = ["<worker public key hex>"]
 
 [render]
 media_dir = "media"
-engine_build = "melee (rust) 0.1.0 development build+0cd085d"   # what new jobs ask for
-iso_sha256 = "9b1c…e2f0"                                        # optional; null when absent
+engine_build = "melee (rust) 0.1.0 development build+0cd085d1234"   # what new jobs ask for
+iso_sha256 = "9b1c…e2f0"              # the GALE01 disc; required for any job
+akaneia_iso_sha256 = ""               # optional; unset = Akaneia sets get no jobs
 auto_vod = true
 auto_clips = true
 auto_analyse = false        # until a server-side opening detector exists
@@ -852,110 +964,187 @@ rendered on a build the players did not play on, which is allowed but worth know
 
 ## 11. Worker loop
 
-What `autobracket render-worker --server … --key-file … --engine … --iso … --scratch …` does,
-in the style of `verify_worker.rs`:
+`autobracket render-worker --config render-worker.toml`, in the style of `verify_worker.rs`.
+Everything about the host lives in the worker's config; the protocol sees none of it.
 
-1. At start: read the key; compute the engine build string (`melee --version`) and, once, the
-   ISO's SHA-256 (cache it next to the ISO keyed by size and mtime); warn on plain `http://` to a
-   remote host as `verify-worker` does.
-2. **Claim** with `builds: [own build]`, `kinds` from flags, `tools` with `"melee-analyse"`
-   when that binary is found on the path (`--analyse-tool`), `worker` = host name. 204: sleep
-   `IDLE_SLEEP` (2 s; the desktop may prefer 10-30 s since jobs are hours apart, open
-   question 11). Error: sleep `ERROR_SLEEP` (5 s), retry.
-3. Start a heartbeat task at `lease_secs / 4` that reports `running`, or `paused` when the pause
-   predicate holds (the owner's game is running: open question 4). On 409 from a heartbeat,
-   cancel the render, discard scratch, go to 2.
-4. For each output whose `state` is not `stored`, in order: download its input
-   (`GET …/replays/{n}`, verify `sha256`, keep it in scratch for the next output of the same
-   input); if `source.iso_sha256` is set and differs from the local hash, `release` with
-   `no-build` and go to 2; run the engine for the output's frame range (for an `analyse` job:
-   run `melee analyse --slp F --frames …` with the job's `windows` and `params`, and write its
-   JSON output as `analysis.json`); `begin` the upload with
-   the file's size and hash (200 with ranges already received means resume); `PUT` the missing
-   chunks (2 in parallel); `finish` with the `RenderReport`. On a `sha256 mismatch` at finish,
-   `begin` again once; a second mismatch is `failed` with `other`, not retryable.
-5. When every output is stored, `result ok`. On an engine failure, `result failed` with a code
-   and `retryable` (true for crashes and timeouts, false for an unreadable replay or a
-   `build-mismatch`). On 409 from `result`, log and go to 2.
-6. On a stop request from Task Scheduler (`CTRL_SHUTDOWN_EVENT`/service stop), `release` the
-   current job with `shutdown` before exiting if the server answers within 5 s; otherwise the
-   lease simply expires.
+### Worker configuration
 
-The worker keeps no state between runs except its scratch directory, which it may empty at
-start. Everything it needs to resume is in the `RenderJob` and `UploadState` answers.
+| Key | Meaning | Current desktop (Windows) | A Linux host |
+|---|---|---|---|
+| `server`, `key_file` | the server and the worker's secret key (`autobracket keygen`) | `https://bracket.gsd.sh`, `%APPDATA%\autobracket\render-worker.key` | same URL, `~/.config/autobracket/render-worker.key` |
+| `engine` | the engine executable; its build string is computed exactly as `crates/client` `config::engine_build` does (first line of `version.txt` next to it, `+`, first 12 hex of the exe's SHA-256). That function moves to a shared crate and the worker **must** reuse it; there is no `melee --version` (it is `melee version`) and no second implementation | `E:\Projects\Melee Workspace\target\release\melee.exe` | `/opt/melee/melee` |
+| `disc.vanilla`, `disc.akaneia` | disc images; hashed once (SHA-256, cached by size and mtime beside the file); `akaneia` optional, exported to the engine as `GW_ISO_AKANEIA` | `E:\Games\melee.iso`, `E:\Games\akaneia.iso` | `/opt/melee/melee.iso`, unset |
+| `ffmpeg` | the ffmpeg executable; probed at start with `-encoders` | `C:\Tools\ffmpeg\bin\ffmpeg.exe` | `/usr/bin/ffmpeg` |
+| `encoder` | `"auto"` (first available of `h264_nvenc`, `h264_amf`, `h264_qsv`, `h264_vaapi`, `h264_videotoolbox`, then `libx264`), or a name to force; the per-encoder quality flags (`-preset p4 -tune ll` for NVENC, `-preset veryfast` for libx264, …) are a table in the worker | `auto` → `h264_nvenc` | `auto` → `h264_vaapi` or `libx264` |
+| `audio_pipe` | how raw audio reaches ffmpeg: `"named-pipe"` (`\\.\pipe\ab-render-<pid>`) or `"fifo"` (`mkfifo` in scratch) | `named-pipe` | `fifo` |
+| `scratch`, `scratch_max_bytes` | working directory and cap; a finished mp4 stays until its `finish` succeeds | `E:\Projects\Melee Workspace\scratch\render-worker\`, 2 GB | `/var/tmp/autobracket-render`, 2 GB |
+| `pause` | the pause predicate, pluggable: `{kind = "none"}`; `{kind = "lock-dirs", dirs = [...], file = "owner", contains = "owner-play"}`; `{kind = "command", run = [...]}` (exit 0 = pause); `{kind = "process", names = [...]}`. Checked between outputs only | `lock-dirs` over `E:\Projects\Melee Workspace\scratch\{.cargo-build.lock, .cargo-build.lock.2, .3, .4, .light-run.lock}`, pausing when a lock dir holds a file `owner` containing `owner-play`. Not bare process presence: agents run headless `melee`, and the worker's own children must be excluded | `none`, or `command` |
+| `idle_poll_secs` | sleep after a 204 | 60 | 60 |
+| `kinds`, `analyse_tool` | job kinds to claim; the analysis tool executable, if any | `["vod", "clip"]`, unset | |
+| `priority` | OS priority for the engine and ffmpeg children | below normal | `nice 10` |
+| `env` | extra environment for the engine; always includes `MELEE_WINDOW_HIDDEN=1`. `MELEE_VOLUME` is **not** set: its effect on `--audio-out` is untested and must be checked before production | | |
+
+### Scheduling
+
+The worker is a long-running process the host keeps alive; it needs no inbound port.
+
+- **Windows Task Scheduler** (the current desktop): a task running as the owner's user, trigger
+  "at log on", action `autobracket.exe render-worker --config ...`, "run with below normal
+  priority" (the task's priority field, 7), "if the task fails, restart every 1 minute", "stop
+  the task if it runs longer than" **off**, and "start only if on AC power" off. Scratch
+  survives restarts, so an interrupted upload resumes (section 6).
+- **Linux systemd user unit** (`~/.config/systemd/user/autobracket-render-worker.service`,
+  `systemctl --user enable --now`, with `loginctl enable-linger`):
+
+  ```ini
+  [Unit]
+  Description=autobracket render worker
+  After=network-online.target
+
+  [Service]
+  ExecStart=/usr/local/bin/autobracket render-worker --config %h/.config/autobracket/render-worker.toml
+  Nice=10
+  Restart=always
+  RestartSec=60
+  SupplementaryGroups=video render
+  KillSignal=SIGINT
+  TimeoutStopSec=15
+
+  [Install]
+  WantedBy=default.target
+  ```
+
+  (`video`/`render` for VAAPI device access; on a headless NVIDIA box, NVENC needs no display.)
+
+### The loop
+
+1. At start: read the key; compute the engine build (shared `engine_build`); hash the discs (or
+   load the cached hashes); `melee slpcheck --verify-disc` each disc (exit 4 → refuse to start);
+   probe ffmpeg's encoders and pick one; warn on plain `http://` to a remote host as
+   `verify-worker` does.
+2. **Claim** with `builds: [own build]`, `kinds`, `tools`, `discs` (those configured),
+   `encoders` (the probe's list), `worker` = host name. 204: sleep `idle_poll_secs`. Error:
+   sleep 5 s, retry.
+3. Start a heartbeat task at `lease_secs / 4`. It reports `running`, or `paused` while the
+   worker is waiting between outputs on the pause predicate; it carries `progress` parsed from
+   the engine's `progress <frame> <last>` lines. On 409 from a heartbeat, kill the render,
+   discard scratch for this job, go to 2.
+4. For each output whose `state` is not `stored`, in order: wait while the pause predicate holds
+   (heartbeating `paused`); check `source.discs[input.disc]` against the local hash, and
+   `release` with `no-build` if it differs or the disc is missing; download the input
+   (`GET …/replays/{n}`, verify `sha256`; keep it for the next output of the same input); run
+   the pipeline: engine (`--slp`, `--video-size`, `--from-frame`/`--to-frame` when set,
+   `--video-out -`, `--audio-out <pipe>`, `--progress`, `--csv <scratch>/status.csv`) piped into
+   ffmpeg (rawvideo rgba 60 fps + s16le 32000 Hz stereo from the pipe, the chosen encoder at
+   `video_kbps`, AAC at `audio_kbps`, `drawtext` filters for `render.overlay`, `+faststart`);
+   **check all three**: ffmpeg's exit status, the CSV `status` column, and the engine's
+   `video-out: N frames` against `expected_frames` (ffmpeg's own frame count too); any mismatch
+   is a failure per the table in section 2, never an upload. For an `analyse` job, run the tool
+   instead and write `analysis.json`. Then `begin` the upload with the file's size and hash (200
+   with ranges already received means resume); `PUT` the missing chunks (2 in parallel);
+   `finish` with the `RenderReport`. On `sha256 mismatch` at finish, `begin` again once; a second
+   mismatch is `failed` with `other`, not retryable. On `frame count mismatch` at finish, fail
+   `frame-count-mismatch`.
+5. When every output is stored, `result ok`. Otherwise `result failed` with the code and
+   `retryable` from the section 2 table. On 409 from `result`, log and go to 2.
+6. On a stop request (Task Scheduler stop or `CTRL_SHUTDOWN_EVENT`; `SIGINT`/`SIGTERM` from
+   systemd), kill the pipeline, `release` the current job with `shutdown` if the server answers
+   within 5 s, keep any finished mp4 in scratch, exit.
+
+The worker keeps no state between runs except its scratch directory. Everything it needs to
+resume is in the `RenderJob` and `UploadState` answers plus the finished files it kept.
 
 ## 12. Open questions for the desktop
 
-1. **Frame numbering: settled.** `--from-frame N --to-frame M` are `.slp` frame indices, replay
-   starts at -123, `N..=M` inclusive, `N <= 0` is "from the start", `M > last` or `N > M` exits 2
-   (a3778b5cf). The server clamps as section 2 says. Remaining detail: is `last_frame` as the
-   server reads it from the replay (the last frame with a post-frame update) the same `last`
-   that `slpcheck` checks `M` against, or is there an off-by-one at the game-end frame? If in
-   doubt the server clamps to `last_frame - 1`.
-2. **Render settings on the command line.** Does `slpcheck --video-out` take resolution, fps,
-   video/audio bitrate and encoder as arguments, or presets? Does `--audio-out` write a separate
-   file that the worker then muxes with ffmpeg (so ffmpeg is a worker dependency and `muxer` in
-   the report is meaningful), or does the engine mux? `RenderSpec`'s fields are a guess at the
-   knobs; tell me which exist and which are fixed, and anything else that changes output bytes.
-3. **ISO hash.** Is it acceptable for the worker to SHA-256 the disc once (1.4 GB, a few
-   seconds, cached by size and mtime), so the job's `iso_sha256` can be enforced? Or is the
-   engine build alone enough to reproduce output, with the ISO only needing to be *a* valid
-   image? If the latter, `iso_sha256` becomes informational.
-4. **Pause granularity.** Can the worker pause mid-render (suspend the engine process / stop
-   feeding frames) and resume, or does it only pause between outputs? If it aborts the current
-   game on pause and re-renders it later, `max_running_secs` should be counted per output, not
-   per attempt, and the desktop's render time per game is the number that matters. Also: is an
-   8-hour maximum pause per attempt acceptable, and what is the pause predicate (Dolphin/engine
-   process present? user session active? Task Scheduler condition)?
-5. **Concurrency.** Is one job at a time right (one NVENC session at below-normal priority)? If
-   two are fine, `max_jobs_per_worker = 2` and the worker runs two loops with one heartbeat
-   task each.
-6. **Progress.** Does `slpcheck` print frame progress on stdout/stderr in a parseable form, so
-   the heartbeat's `progress` can be filled? Optional; nice for the admin listing.
-7. **Which upload to render.** For a `Verified` game both slots' files are identical. For a
-   `VerifiedInexact` or `PeerOnly` game they are the two players' own recordings and may differ
-   in trivia (metadata, player names). Is slot 0 always fine, or should the server prefer the
-   file the verifier re-simulated? Does the rendered camera/HUD depend on which "local" player
-   the file was recorded by?
-8. **Clip detection location.** Confirm the server creates clip jobs (the replay crate's
-   detector runs server-side at set end); the worker never decides what to clip. Detection
-   thresholds and the `label` vocabulary (`combo`, `kill`, `edgeguard-kill`, `comeback`,
-   `zero-to-death`) are then the replay crate's, not this API's.
-9. **HUD and presentation.** Should the VOD render the in-game HUD only (`hud: "game"`), or does
-   the engine support overlays (tags, score, round name) that the job should carry? The job has
-   `tags`; if the engine can draw them, say what it wants. Clip fades or title cards: engine,
-   worker (ffmpeg), or not at all?
-10. **Windows account and disk.** Under which account does the Task Scheduler job run, where do
-    the key file and scratch live, and how much scratch may a job use? The design assumes up to
-    the job's total output size plus the replays (a long set at 1080p60: ~1-2 GB) in scratch, and
-    one job at a time.
-11. **Poll interval and bandwidth.** Is a 2 s idle poll fine, or would you rather 15-30 s (jobs
-    arrive once per set, minutes apart)? What is the desktop's upstream bandwidth? That sets
-    whether uploading game N while rendering game N+1 is worth doing (the API allows it: the
-    upload of one output and the render of the next are independent) and whether a 1 GiB VOD
-    cap is sensible (at 20 Mbps up, 1 GiB is ~7 minutes).
-12. **Resume across restarts.** Will the worker keep its rendered mp4 in scratch across a Task
-    Scheduler restart, so an interrupted upload resumes (the server keeps the received ranges
-    for a day and the hash must match)? If scratch is wiped at every start, resume costs a
-    re-render, which is fine but should be known.
-13. **Build string.** Is `melee --version` (or the equivalent) the exact string that the server's
-    verifier and the players' `SignupReq.engine_build` use, byte for byte? The claim filter and
-    `RenderReport.engine_build` compare strings exactly.
-14. **Failure codes.** Do the proposed `code` values (`engine-crash`, `engine-timeout`,
-    `replay-unreadable`, `encoder-unavailable`, `disk-full`, `output-too-large`,
-    `build-mismatch`, `bad-range`, `tool-missing`, `other`) cover what the engine actually
-    reports (exit 2 is `bad-range`; what are the other exit codes?), and which of them does the
-    desktop consider retryable?
-15. **`analyse` jobs.** (a) Is one game per job with a list of frame windows the right unit, or
-    will `melee analyse` want the whole set (both players' context across games)? (b) Does it
-    need the ISO and engine (a headless simulation, like a clip render) or only the `.slp`, so
-    `source` is irrelevant and a machine without a GPU could run it? (c) Is the output a single
-    JSON document per game, and what size should the cap allow (4 MiB proposed)? (d) How is
-    `--frames` spelled (a list of `from-to` pairs?) and how are `params` passed? (e) **Resolved
-    by the owner (2026-11-15):** private to the set's two players and organisers by default; a
-    per-player "share my analysis publicly" opt-in (both must opt in for the whole game's
-    analysis to be public, otherwise only each opted-in player's own half) and a per-event
-    organiser override forcing private; the route is gated and answers 404, never 403, to anyone
-    else. See section 8, "Analysis visibility". What this asks of the tool: the output's `data`
-    must be split into `common` and two `halves` (one per slot) so the server can serve one
-    player's half without the other's. Is that split natural for `melee analyse`?
+Resolved by the desktop's review of 2026-11-16 (kept for the record, one line each):
+
+1. **Frame numbering.** Settled: `.slp` indices, replay starts at -123, `N..=M` inclusive,
+   `N <= 0` from the start, `M = last_frame` accepted and outputs the final frame, no off-by-one;
+   expected frames `M - max(N, -123) + 1`. The `last_frame - 1` clamp is dropped.
+2. **Render settings.** The engine's only knob is `--video-size WxH` (even, 64..7680 ×
+   64..4320, default 1280x720; wider than 4:3 is 16:9), fixed 60 fps, no `--video-realtime`. It
+   outputs raw RGBA and raw s16le 32 kHz stereo; codec, bitrate, container and preset are
+   ffmpeg's. `hud` is dropped. Output bytes are not reproducible; `report.muxer` records ffmpeg.
+3. **ISO hash.** Keep the worker's one-time SHA-256 (cached by size and mtime) as the strict
+   check; `--verify-disc` is the cheap header check (exit 4). A mismatch is `release` with
+   `no-build`, not a failure. Akaneia replays need a second disc (`GW_ISO_AKANEIA`): second hash
+   in config, or those sets are excluded (section 2).
+4. **Pause.** Between outputs only. The current desktop's predicate is the owner-play lock
+   dirs; it is worker configuration (section 11), not protocol. Not bare process presence.
+5. **Concurrency.** One hardware-encoder job per host: `max_jobs_per_worker = 1`.
+6. **Progress.** `--progress` prints `progress <frame> <last>` on stderr every 60 replay frames,
+   seek included, `frame` possibly negative; percent is `(frame - first) / (last - first)`.
+7. **Which upload.** Nothing depends on the recorder; the server serves the verifier's
+   re-simulated copy when there is one.
+9. **Overlays.** None in the engine. Tags, score, round name, fades and clip title cards are
+   ffmpeg `drawtext` in the worker, driven by `RenderSpec.overlay`.
+10-12. **Host.** Current desktop: Task Scheduler as the owner's user, scratch
+   `E:\Projects\Melee Workspace\scratch\render-worker\` capped at 2 GB, scratch survives
+   restarts and keeps finished mp4s for resume, poll every 60 s, 1 GiB VOD cap is fine. All of it
+   is worker configuration now that the host may change (section 11).
+13. **Build string.** No `melee --version`; `engine_build` = first line of `version.txt` + `+` +
+    first 12 hex of the exe's SHA-256, from `crates/client` `config::engine_build`, which the
+    worker reuses from a shared crate.
+14. **Failure codes.** Exit codes and the `--csv` `status` column mapped in the section 2 table;
+    engine verdicts (parse-error, panic, diverged, early end, bad range, unsupported) are not
+    retryable; ffmpeg/NVENC, pipe, disk and timeout are; a native crash once. New codes
+    `engine-panic`, `replay-diverged`, `encoder-failed`, `frame-count-mismatch`, `io-error`,
+    `boot-error`, `unsupported`, `bad-disc`. The exit-0 truncation hole is closed by the frame
+    count check at `finish`.
+15e. **Analysis visibility.** Owner's decision, section 8. `halves[i]` is now defined by the
+    game's port order (`ports`, ascending), never by `RenderInput.slot`.
+
+Still open:
+
+8. **Clip detection location.** Confirm the server creates clip jobs (the replay crate's moment
+   detector runs server-side at set end) and the worker never decides what to clip; the label
+   vocabulary (`combo`, `kill`, `edgeguard-kill`, `comeback`, `zero-to-death`) is then the replay
+   crate's, not this API's.
+15. **`analyse` jobs**, after (c): (a) one game per job with a list of frame windows, or the
+    whole set? (b) does the tool need the engine and disc (headless simulation) or only the
+    `.slp`, so a GPU-less host could run it and `source` is irrelevant to it? (c) one JSON
+    document per game, 4 MiB cap? (d) how is `--frames` spelled and how are `params` passed?
+    The `common`/`halves` split in port order: confirm it is natural for the tool.
+16. **Telling Akaneia from vanilla server-side.** The engine auto-chooses the disc from the
+    replay's gecko codes and fighters. Which exact signal should the server's `replay` crate use
+    to set `RenderInput.disc` (a gecko list hash in the ruleset's `allowed_gecko` style? a
+    fighter id outside the vanilla range?), so that the server and the engine never disagree
+    about which disc a replay needs? If they could disagree, the worker should also report the
+    disc the engine chose (`report.disc`) and the server reject a mismatch.
+17. **`--csv` status vocabulary.** The full list of `status` values (`ok`, `parse-error`,
+    `boot-error`, `panic@frame`, `diverged`, `match-ended-early`, …?) and whether `panic@frame`
+    carries the frame number in the same column, so the worker's mapping to failure codes is
+    exact rather than string-matching stderr.
+18. **`boot-error` retry.** The table treats it as retryable once (environmental). Is it ever
+    deterministic for a given replay or disc, in which case it should not be retried?
+19. **Audio level.** `MELEE_VOLUME`'s effect on `--audio-out` is untested: confirm the raw
+    audio's level is right without it, or tell the worker what to set, before production.
+20. **Upstream bandwidth.** Measure it on the current desktop; it decides whether uploading
+    output N while rendering N+1 is worth implementing in the worker (the API allows it).
+21. **Non-NVIDIA encoders.** When the host changes, which encoder flags table entries (AMF,
+    QSV, VAAPI, VideoToolbox, libx264) has the desktop actually run the pipeline with, and at what
+    fps? `encoders` in the claim is informational until someone has.
+22. **Linux pipeline.** Confirm the FIFO variant (`mkfifo` + `--audio-out <fifo>`) works with the
+    engine's audio writer (blocking open order: the engine opens the FIFO for writing before
+    ffmpeg opens it for reading, or vice versa; one side must not time out).
+
+## 13. Broadcast (later)
+
+Non-binding; recorded so the render worker is not designed into a corner.
+
+The desktop runs OBS for live broadcasts. The intended shape is: a local **producer script**
+drives OBS over **obs-websocket** (scene switches, source visibility, text), reading the
+tournament state from the server's **public API** (`GET /v1/events/{id}`, the bracket, the
+scores, and later `GET /v1/events/{id}/media`), and OBS **browser sources** show overlay pages
+(scoreboard, bracket, "up next", player cards) that the **server serves** as plain public HTML,
+the way it serves the bracket page today. Nothing in that needs a new signed route: the producer
+reads public state, and the organiser's actions stay in the admin CLI.
+
+Where the render worker may meet it: the same pipeline that writes an mp4 can write an SRT or
+RTMP stream (`ffmpeg … -f mpegts srt://…` to the MediaMTX relay the server already runs, or
+straight to OBS as a media source), so a rendered replay of a just-finished set, or a clip, can
+be an OBS source during a break. That would be a fourth job kind (`stream`, with a destination
+and a start time instead of an upload) or a worker-local feature with no server involvement; it
+is not decided, and the queue, lease and `RenderSpec` as designed do not prevent either. The
+stream relay's address, the overlay pages' URLs and the producer's protocol are out of scope
+here and will get their own design when the broadcast work starts.
