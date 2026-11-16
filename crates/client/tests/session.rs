@@ -536,3 +536,74 @@ async fn an_adopted_host_game_whose_code_was_not_sent_sends_it() {
     assert_eq!(rooms[0].json()["code"], "K7QX");
     assert_eq!(runs(work.path()).len(), 1);
 }
+
+/// A host run whose game ends at the worst moment: `running()` is true exactly once after
+/// the room code is handed over, then false.
+struct EndsBetweenChecks {
+    hosts: usize,
+    trues_left: u32,
+    dir: TempDir,
+    replay_taken: bool,
+}
+
+impl autobracket_client::engine::Engine for EndsBetweenChecks {
+    fn host(&mut self, _p: &autobracket_client::engine::GameParams) -> anyhow::Result<()> {
+        self.hosts += 1;
+        self.trues_left = 1;
+        self.replay_taken = false;
+        Ok(())
+    }
+    fn join(
+        &mut self,
+        _p: &autobracket_client::engine::GameParams,
+        _c: &str,
+    ) -> anyhow::Result<()> {
+        unreachable!("only hosts")
+    }
+    fn room_code(&mut self, _wait: Duration) -> anyhow::Result<Option<String>> {
+        Ok(Some("K7QX".into()))
+    }
+    fn running(&mut self) -> bool {
+        if self.trues_left > 0 {
+            self.trues_left -= 1;
+            return true;
+        }
+        false
+    }
+    fn take_replays(&mut self) -> anyhow::Result<Vec<PathBuf>> {
+        if std::mem::replace(&mut self.replay_taken, true) {
+            return Ok(Vec::new());
+        }
+        let path = self.dir.path().join(format!("run-{}.slp", self.hosts));
+        std::fs::write(&path, b"replay")?;
+        Ok(vec![path])
+    }
+    fn stop(&mut self) {}
+}
+
+#[tokio::test]
+async fn a_game_that_ends_mid_poll_is_collected_not_followed_by_another() {
+    let stub = host_server(&[204], 202).await;
+    let mut engine = EndsBetweenChecks {
+        hosts: 0,
+        trues_left: 0,
+        dir: TempDir::new().unwrap(),
+        replay_taken: false,
+    };
+    let api = api(&stub);
+    let opts = opts();
+
+    tokio::time::timeout(Duration::from_secs(10), async {
+        tokio::select! {
+            () = until(|| stub.count(REPLAY) == 1 && stub.polls_after(REPLAY) > 3) => {}
+            r = play_event_with(&api, &mut engine, 1, &opts) => panic!("play returned {r:?}"),
+        }
+    })
+    .await
+    .expect("timed out");
+
+    assert_eq!(
+        engine.hosts, 1,
+        "a second game started before the first was collected"
+    );
+}

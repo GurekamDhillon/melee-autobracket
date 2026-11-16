@@ -854,13 +854,11 @@ async fn play(
     };
     let hold = Instant::now() + opts.launch_backoff;
 
-    if engine.running() {
-        // Playing. A game taken over from an earlier `play` may not have had its room code
-        // sent yet.
-        let Some(launch) = s.launched.clone() else {
-            return Ok(());
-        };
-        if launch.host && launch.is(set_id, game_no) && !s.code_posted() {
+    if let Some(launch) = s.launched.clone() {
+        // Playing, or the run ended after `finish_run` looked: it is collected on the next
+        // poll, and nothing new starts before then. A game taken over from an earlier
+        // `play` may not have had its room code sent yet.
+        if engine.running() && launch.host && launch.is(set_id, game_no) && !s.code_posted() {
             if let Some(code) = engine.room_code(Duration::ZERO)? {
                 if !send_code(api, &mut l.net, s, &launch, &code).await? {
                     stop_run(engine, s);

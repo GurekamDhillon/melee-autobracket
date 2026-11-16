@@ -429,7 +429,10 @@ async fn a_no_show_refused_for_a_fresh_room_code_is_tried_again_without_hosting(
         ..opts()
     };
 
-    play_until_with(&stub, &mut engine, &opts, |s| s.polls_after("/no-show") > 5).await;
+    play_until_with(&stub, &mut engine, &opts, |s| {
+        s.requests("POST", "/no-show").len() == 3 && s.polls_after("/no-show") > 5
+    })
+    .await;
 
     assert_eq!(no_shows(&stub).len(), 3);
     assert_eq!(
