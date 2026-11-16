@@ -7,13 +7,19 @@
   </div>
   <div class="tv-screen">
     <iframe id="player" class="player" title="Live stream" allow="autoplay; fullscreen" referrerpolicy="no-referrer" hidden></iframe>
+    <div class="tv-cover" id="cover" hidden>
+      <svg class="cover-mark" viewBox="0 0 112 112" aria-hidden="true" focusable="false"><use href="#i-mark"/></svg>
+      <p class="cover-text"><span class="live-dot" aria-hidden="true"></span>Connecting to the stream</p>
+    </div>
     <div class="offair" id="offair">
       <svg class="offair-scene" viewBox="0 0 160 90" preserveAspectRatio="xMidYMax slice" aria-hidden="true" focusable="false">
         <circle class="sun" cx="134" cy="24" r="11"/>
         <ellipse class="hill-far" cx="40" cy="98" rx="78" ry="40"/>
         <ellipse class="hill-near" cx="130" cy="104" rx="70" ry="34"/>
       </svg>
+      <svg class="offair-mark" viewBox="0 0 112 112" aria-hidden="true" focusable="false"><use href="#i-mark"/></svg>
       <div class="offair-text">
+        <p class="offair-kicker"><span class="live-dot" aria-hidden="true"></span>Waiting for the stream</p>
         <h2 class="offair-title">Nothing on air right now</h2>
         <p class="notice" id="no-stream" hidden></p>
         <p class="offair-next" id="offair-next" hidden></p>
@@ -22,9 +28,26 @@
     </div>
   </div>
 </div>
+<div class="tv-caption" id="caption" hidden></div>
 </section>
-<section class="now-col">
-<h2 class="section-title">Now playing</h2>
-<div id="now"></div>
+<section class="now-col" id="side" data-tab="now">
+<div class="side-tabs" role="tablist" aria-label="Playing now or up next" id="side-tabs">
+  <button type="button" role="tab" class="side-tab" id="tab-now" aria-controls="panel-now" aria-selected="true">Now playing</button>
+  <button type="button" role="tab" class="side-tab" id="tab-next" aria-controls="panel-next" aria-selected="false" tabindex="-1">Up next</button>
+</div>
+<div class="side-panel" id="panel-now" role="tabpanel" aria-labelledby="tab-now">
+  <h2 class="section-title">Now playing</h2>
+  <div id="now" class="now-panel"></div>
+</div>
+<div class="side-panel" id="panel-next" role="tabpanel" aria-labelledby="tab-next">
+  <h2 class="section-title">Up next</h2>
+  <div class="now-panel up-next" id="up-next" hidden>
+    <ol class="boards queue" id="queue"></ol>
+  </div>
+  <p class="notice" id="queue-empty" hidden></p>
+</div>
+<div class="side-foot">
+  <a class="pill sunny bracket-link" id="bracket-link" hidden>Open bracket</a>
+</div>
 </section>
 </main>

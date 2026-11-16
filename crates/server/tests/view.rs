@@ -478,7 +478,11 @@ async fn wide_layouts_use_the_width() {
     let css = fetch(&app, "/").await.text().await.unwrap();
     let wide = css.split("@media (min-width: 75rem)").nth(1).unwrap();
     assert!(wide.contains(
-        r#".home { grid-template-columns: minmax(0, 1fr) 20rem; grid-template-areas: "lead side" "run side"; }"#
+        r#".home { grid-template-columns: minmax(0, 1fr) 20rem; grid-template-areas: "lead side" "tally side" "run side"; }"#
+    ));
+    // With no tally to show its row goes, leaving the main column over the side column.
+    assert!(wide.contains(
+        r#".home:has(> .tally-ribbon[hidden]) { grid-template-areas: "lead side" "run side"; grid-template-rows: auto 1fr; }"#
     ));
     assert!(css.contains(".wrap { width: 100%; max-width: 76rem; margin-inline: auto;"));
     assert!(css.contains(".rows { display: grid; gap: var(--sp-2); max-width: 100%;"));
@@ -715,8 +719,8 @@ async fn final_review_page_fixes() {
     assert!(bracket.contains("a.href = AB.playerHref(tag);"));
     assert_eq!(
         bracket.matches("tagLink(").count(),
-        4,
-        "defined once; set rows, entrants, champion"
+        5,
+        "defined once; set rows, entrants, champion banner, hero champion"
     );
     assert!(bracket.contains(r#"/^\/events\/(\d+)$/.exec(location.pathname)"#));
 

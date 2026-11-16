@@ -2,13 +2,18 @@
 <main id="schedule" class="schedule">
   <div class="sched-list">
     <ol class="sched" id="loading" aria-busy="true"><li class="skeleton"></li><li class="skeleton"></li></ol>
+    <p class="notice" id="none" hidden>Nothing matches this filter yet.</p>
     <section id="now" hidden>
       <h2 class="section-title">Happening now</h2>
       <ol class="sched" id="now-list"></ol>
     </section>
     <section id="soon" hidden>
       <h2 class="section-title">Coming up</h2>
-      <div id="soon-list"></div>
+      <ol class="sched" id="soon-list"></ol>
+    </section>
+    <section id="past" hidden>
+      <h2 class="section-title">Done</h2>
+      <ol class="sched" id="past-list"></ol>
     </section>
   </div>
   <div id="howto" class="sched-side"></div>

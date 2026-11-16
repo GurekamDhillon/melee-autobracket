@@ -15,7 +15,7 @@ const AB = (function () {
 
   // One of the shell's own drawings, copied from its <template> (a fixed name, never data).
   function icon(name) {
-    const from = $(name === "burst" ? "t-burst" : "t-star");
+    const from = $({ burst: "t-burst", chev: "t-chev", crown: "t-crown", bolt: "t-bolt", door: "t-door", trophy: "t-trophy" }[name] || "t-star");
     return from.content.firstElementChild.cloneNode(true);
   }
 
@@ -309,7 +309,7 @@ const AB = (function () {
   // a profile under Players); an event page has none.
   function markNav() {
     const here = location.pathname;
-    for (const a of document.querySelectorAll(".nav a")) {
+    for (const a of document.querySelectorAll(".nav a, .foot-nav a")) {
       const href = a.getAttribute("href");
       if (href === here) a.setAttribute("aria-current", "page");
       else if (href !== "/" && here.startsWith(href + "/")) a.setAttribute("aria-current", "true");
