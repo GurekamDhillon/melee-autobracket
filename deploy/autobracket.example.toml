@@ -47,7 +47,8 @@ rate_per_sec = 20
 rate_burst = 40
 # Most connections served at once; more wait to be accepted (every connection is closed after 30 s idle).
 max_connections = 512
-# Reverse proxies whose X-Forwarded-For names the client, as CIDRs (nginx in Docker: ["172.16.0.0/12"]).
+# Reverse proxies whose X-Forwarded-For names the client, as CIDRs: only the proxy's own
+# address, e.g. ["127.0.0.1/32"], never a range holding any client's address (README).
 trusted_proxies = []
 # Seconds after a room code is posted during which a "no-show" report is refused (the guest may still be joining).
 no_show_grace_secs = 90

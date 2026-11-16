@@ -69,14 +69,17 @@ binary, runs as uid 10001, and keeps everything in the volume mounted on `/data`
 ```sh
 docker compose -f deploy/docker-compose.yml build
 docker compose -f deploy/docker-compose.yml run --rm autobracket init --dir /data \
-  --bind 0.0.0.0:8080 --proxy-cidr 172.16.0.0/12 --proxy-cidr 192.168.0.0/16
+  --bind 0.0.0.0:8080 --proxy-cidr 10.203.47.1/32
 docker compose -f deploy/docker-compose.yml up -d
 ```
 
-The server is then published on the host's `127.0.0.1:8080` only. The comments in
-`deploy/docker-compose.yml` show how to run the admin CLI with `docker compose exec`, how to
-edit the config, why `--proxy-cidr` names Docker's address ranges here, and how to mount your own engine
-and disc image read-only for the `in_process` verifier.
+Skip step 1 of what `init` prints (`autobracket serve ...`): `docker compose up -d` runs the
+server. It is then published on the host's `127.0.0.1:8080` only, with a read-only root file
+system, no capabilities and no privilege escalation. The Compose network is pinned to
+`10.203.47.0/28`, so a proxy on the host reaches the server from the gateway `10.203.47.1`,
+the one address `--proxy-cidr` trusts. The comments in `deploy/docker-compose.yml` show how to
+run the admin CLI with `docker compose exec`, how to edit the config, and how to mount your
+own engine and disc image read-only for the `in_process` verifier.
 
 ### C. Build from source
 
@@ -398,7 +401,11 @@ sudo systemctl enable --now autobracket
 ```
 
 With `init` instead of the example config (the server never reads the organiser key, so move
-it to wherever you run admin commands; the config holds no secret):
+it to wherever you run admin commands; the config holds no secret). The project has not run
+this exact sequence (`init` as root into `/var/lib/autobracket`, then starting the
+`DynamicUser` unit, which relies on systemd re-owning that directory for the dynamic user);
+the unit itself has run in production with a config installed by hand as above, in-process
+verification included.
 
 ```sh
 sudo autobracket init --dir /var/lib/autobracket --proxy-cidr 127.0.0.1/32
@@ -438,12 +445,14 @@ The server rate-limits per client address (`rate_per_sec`, `rate_burst`). Behind
 request comes from the proxy's address, so list the proxy in `trusted_proxies` (CIDRs, empty by
 default): for requests from a trusted address the client is the right-most `X-Forwarded-For`
 entry that is not itself trusted. With the proxy on the same host that is
-`trusted_proxies = ["127.0.0.1/32"]`; with nginx in Docker the requests arrive from the Docker
-bridge, e.g. `trusted_proxies = ["172.16.0.0/12"]`. Never trust a range that untrusted clients
-can send from. When `trusted_proxies` contains the Docker bridge range, bind the server only
-where the proxy can reach it, not on a public address: otherwise a visitor connecting directly
-(through a port Docker publishes, say) arrives from the bridge, is taken for the trusted proxy,
-and its `X-Forwarded-For` is believed. IPv6 clients are limited per /64. Players behind one NAT (a venue) share one
+`trusted_proxies = ["127.0.0.1/32"]`; with the server under `deploy/docker-compose.yml` and
+the proxy on the host it is the pinned network's gateway, `["10.203.47.1/32"]`; with the proxy
+itself in Docker, give its container a fixed address and trust that. **Never put a range in
+`trusted_proxies` that contains any client's address**, LAN players and direct visitors
+included: trust only the proxy's own addresses, as narrowly as possible (a /32). Every
+trusted entry is skipped when the server walks `X-Forwarded-For` from the right, so a client
+whose own address is trusted gets the entry to its left believed, which is one it wrote
+itself. IPv6 clients are limited per /64. Players behind one NAT (a venue) share one
 address: a client polls every 2 s, so raise `rate_per_sec` and `rate_burst` for a venue
 event. `max_connections` (default 512) caps connections handled at once.
 
@@ -482,11 +491,14 @@ With Docker Compose everything (database, replays, key, config) is in the volume
 image has no `sqlite3`; stop the server and archive the volume:
 
 ```sh
+umask 077    # the archive holds organiser.key, the secret key
 docker compose -f deploy/docker-compose.yml stop
 docker compose -f deploy/docker-compose.yml run --rm -T --entrypoint tar autobracket \
   -czf - -C /data . > autobracket-$(date +%F).tar.gz
 docker compose -f deploy/docker-compose.yml start
 ```
+
+The archive contains the organiser's secret key: keep it as private as the key itself.
 
 ## Limits
 

@@ -35,8 +35,9 @@ pub struct InitArgs {
     /// https://bracket.example.org. Only used in the printed next steps.
     #[arg(long, value_name = "URL")]
     public_url: Option<String>,
-    /// Address range (CIDR) of a reverse proxy whose X-Forwarded-For names the client
-    /// (`trusted_proxies`). Repeat for several.
+    /// Your reverse proxy's own address as the server sees it, as a CIDR (e.g.
+    /// 127.0.0.1/32), whose X-Forwarded-For names the client (`trusted_proxies`). Never a
+    /// range that holds any client's address. Repeat for several.
     #[arg(long = "proxy-cidr", value_name = "CIDR")]
     proxy_cidrs: Vec<String>,
     /// Replace an existing autobracket.toml and organiser.key (the old key stops working).
