@@ -60,3 +60,62 @@ fn example_config_parses() {
     assert_eq!(cfg.no_show_grace_secs, defaults.no_show_grace_secs);
     assert_eq!(cfg.allow_direct_connect, defaults.allow_direct_connect);
 }
+
+/// Standard base64 (with padding), as CSP hash sources use.
+fn base64(bytes: &[u8]) -> String {
+    const ALPHABET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::new();
+    for chunk in bytes.chunks(3) {
+        let b = [
+            chunk[0],
+            *chunk.get(1).unwrap_or(&0),
+            *chunk.get(2).unwrap_or(&0),
+        ];
+        let n = (u32::from(b[0]) << 16) | (u32::from(b[1]) << 8) | u32::from(b[2]);
+        for i in 0..4 {
+            if i <= chunk.len() {
+                out.push(char::from(ALPHABET[((n >> (18 - 6 * i)) & 63) as usize]));
+            } else {
+                out.push('=');
+            }
+        }
+    }
+    out
+}
+
+/// The text between the page's `<tag>` and `</tag>`.
+fn inline_block<'a>(page: &'a str, tag: &str) -> &'a str {
+    let open = format!("<{tag}>");
+    let start = page.find(&open).unwrap() + open.len();
+    let end = page[start..].find(&format!("</{tag}>")).unwrap() + start;
+    assert_eq!(page.matches(&open).count(), 1, "one inline <{tag}>");
+    &page[start..end]
+}
+
+#[tokio::test]
+async fn page_has_security_headers() {
+    use sha2::{Digest, Sha256};
+    let app = TestApp::spawn(|_| {}).await;
+    let res = fetch_root(&app).await;
+    let header = |name: &str| res.headers()[name].to_str().unwrap().to_owned();
+    assert_eq!(header("x-content-type-options"), "nosniff");
+    let csp = header("content-security-policy");
+    for directive in [
+        "default-src 'none'",
+        "connect-src 'self'",
+        "img-src data:",
+        "base-uri 'none'",
+        "form-action 'none'",
+        "frame-ancestors 'none'",
+    ] {
+        assert!(csp.contains(directive), "{directive} in {csp}");
+    }
+    assert!(!csp.contains("unsafe"), "{csp}");
+    assert!(!csp.contains("http"), "no external origins: {csp}");
+    let page = res.text().await.unwrap();
+    for (tag, directive) in [("script", "script-src"), ("style", "style-src")] {
+        let hash = base64(&Sha256::digest(inline_block(&page, tag).as_bytes()));
+        let expected = format!("{directive} 'sha256-{hash}'");
+        assert!(csp.contains(&expected), "{expected} in {csp}");
+    }
+}

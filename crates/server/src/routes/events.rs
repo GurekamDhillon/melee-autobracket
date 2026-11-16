@@ -10,7 +10,7 @@ use sqlx::SqlitePool;
 use super::{check_text, parse_body, ApiError, MAX_BUILD_CHARS};
 use crate::auth::Player;
 use crate::db::begin_write;
-use crate::lifecycle::{load_bracket, LifecycleError, MAX_ENTRANTS};
+use crate::lifecycle::{load_bracket_on, LifecycleError, MAX_ENTRANTS};
 use crate::logging::label;
 use crate::state::AppState;
 
@@ -108,12 +108,15 @@ pub async fn signup(
     Ok(StatusCode::CREATED)
 }
 
-/// The full view of one event; 404 if it does not exist.
+/// The full view of one event; 404 if it does not exist. Read in one transaction, so the
+/// bracket, the scores and `decided_by` are of one moment.
 pub(super) async fn event_view(db: &SqlitePool, id: i64) -> Result<EventView, ApiError> {
+    // Read-only, so a deferred transaction: one consistent snapshot.
+    let mut tx = db.begin().await?;
     let row: Option<(String, String, String)> =
         sqlx::query_as("SELECT name, state, ruleset_json FROM events WHERE id = ?")
             .bind(id)
-            .fetch_optional(db)
+            .fetch_optional(&mut *tx)
             .await?;
     let (name, state, ruleset_json) = row.ok_or(LifecycleError::NoSuchEvent)?;
     let ruleset: Ruleset = serde_json::from_str(&ruleset_json)
@@ -124,10 +127,10 @@ pub(super) async fn event_view(db: &SqlitePool, id: i64) -> Result<EventView, Ap
          WHERE n.event_id = ? ORDER BY n.seed",
     )
     .bind(id)
-    .fetch_all(db)
+    .fetch_all(&mut *tx)
     .await?;
 
-    let bracket = match load_bracket(db, id).await {
+    let bracket = match load_bracket_on(&mut tx, id).await {
         Ok(b) => Some(b),
         Err(LifecycleError::NotStarted) => None,
         Err(e) => return Err(e.into()),
@@ -136,7 +139,7 @@ pub(super) async fn event_view(db: &SqlitePool, id: i64) -> Result<EventView, Ap
     let rows: Vec<(i64, i64, i64)> =
         sqlx::query_as("SELECT set_id, wins0, wins1 FROM sets WHERE event_id = ? ORDER BY set_id")
             .bind(id)
-            .fetch_all(db)
+            .fetch_all(&mut *tx)
             .await?;
     let scores = rows
         .into_iter()
@@ -148,8 +151,9 @@ pub(super) async fn event_view(db: &SqlitePool, id: i64) -> Result<EventView, Ap
          WHERE event_id = ? AND decided_by IS NOT NULL ORDER BY set_id",
     )
     .bind(id)
-    .fetch_all(db)
+    .fetch_all(&mut *tx)
     .await?;
+    tx.commit().await?;
     let decided_by = decided
         .into_iter()
         .map(|(set_id, how)| Ok((to_int(set_id)?, how)))
