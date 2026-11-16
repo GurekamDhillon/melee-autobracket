@@ -148,3 +148,14 @@ test("tech-chase combo (1285c0cd frame 933) is kept by the hitstun-gap filter", 
   assert.ok(maxHitstunGap(model, c) <= 45);
   assert.ok(detect(model).clips.some((x) => x.kind === "combo" && x.details.core_start_frame === 933));
 });
+
+// Round 2: contiguous-run gap. The longest real free stretch in this combo is 2
+// frames (it used to report 54).
+test("edge/lras_20476_14664b32 combo at 3841 has a gap of 2 and is kept", { skip }, () => {
+  const { loadReplay } = require("../lib/load");
+  const { detect, maxHitstunGap } = require("../lib/detect");
+  const { model } = loadReplay(path.join(FIXTURES, "edge", fs.readdirSync(path.join(FIXTURES, "edge")).find((f) => f.startsWith("lras_20476_14664b32"))));
+  const c = model.stats.combos.find((x) => x.startFrame === 3841);
+  assert.equal(maxHitstunGap(model, c), 2);
+  assert.ok(detect(model).clips.some((x) => x.kind === "combo" && x.details.core_start_frame === 3841));
+});

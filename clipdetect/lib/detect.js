@@ -16,8 +16,9 @@ const KIND_ORDER = Object.fromEntries(KINDS.map((k, i) => [k, i]));
 // --config JSON file; unknown keys are rejected so typos do not pass silently.
 const DEFAULT_CONFIG = Object.freeze({
   // combo: >= comboMinHits landed moves OR >= comboMinPercent damage, and no
-  // gap longer than comboMaxHitstunGapFrames between the victim leaving
-  // hitstun/grab after one hit and the next hit landing.
+  // stretch longer than comboMaxHitstunGapFrames in which the victim is
+  // continuously actionable between two hits (reset by any hit, grab, throw,
+  // knockdown or tech).
   comboMinHits: 5,
   comboMinPercent: 40,
   comboMaxHitstunGapFrames: 45,
@@ -96,38 +97,52 @@ function attackerIndex(c) {
   return c.moves.length ? c.moves[0].playerIndex : null;
 }
 
-// A victim is not actionable while damaged, grabbed, command-grabbed, down
-// (knockdown/missed tech/getup, 0xB7-0xC6), teching (0xC7-0xCC) or dying
-// (0x00-0x0A). Ranges are slippi-js 9.1.3's State.DOWN_START/END,
-// TECH_START/END and DYING_START/END in common/stats/common.cjs; its
-// ComboComputer (combos.cjs) uses the same set to keep a combo alive, so a
-// tech chase is one continuous combo, not a gap.
+// A victim is not actionable while damaged (any hit, including later hits of
+// a multi-hit move), grabbed, command-grabbed, thrown (ThrownF..ThrownLwWomen,
+// 0xEF-0xF3 in the Melee action-state table; slippi-js's isGrabbed stops at
+// CAPTURE_END 0xE8), down (0xB7-0xC6), teching (0xC7-0xCC) or dying
+// (0x00-0x0A). Down/tech/dying ranges are slippi-js 9.1.3's State.DOWN_START/
+// END, TECH_START/END and DYING_START/END (common/stats/common.cjs); its
+// ComboComputer (combos.cjs) uses the same reset rule.
+const THROWN_START = 0xef;
+const THROWN_END = 0xf3;
 function notActionable(s) {
-  return isDamaged(s) || isGrabbed(s) || isCommandGrabbed(s) || isDown(s) || isTeching(s) || isDead(s);
+  return (
+    isDamaged(s) ||
+    isGrabbed(s) ||
+    isCommandGrabbed(s) ||
+    (s >= THROWN_START && s <= THROWN_END) ||
+    isDown(s) ||
+    isTeching(s) ||
+    isDead(s)
+  );
 }
 
-// First frame strictly after `fromFrame` at which the victim is no longer in a
-// damaged/grabbed state. If the frame data runs out first, returns the last
-// frame examined + 1 (that is, the victim is treated as stuck in hitstun).
-function victimFreeFrame(model, victimIndex, fromFrame, untilFrame) {
-  for (let f = fromFrame + 1; f <= untilFrame; f++) {
+// Longest continuous run of frames strictly between two consecutive hits in
+// which the victim is actionable. Any damage, grab, throw, knockdown, tech or
+// death state resets the run (slippi-js's reset rule). Frames with no data
+// are skipped without breaking a run.
+function longestActionableRun(model, victimIndex, fromFrame, untilFrame) {
+  let run = 0;
+  let best = 0;
+  for (let f = fromFrame + 1; f < untilFrame; f++) {
     const post = model.getPost(f, victimIndex);
     if (!post) continue;
-    const s = post.actionStateId;
-    if (!notActionable(s)) return f;
+    if (notActionable(post.actionStateId)) {
+      run = 0;
+    } else {
+      run += 1;
+      if (run > best) best = run;
+    }
   }
-  return untilFrame + 1;
+  return best;
 }
 
-// Longest gap between the victim becoming actionable after one hit and the
-// next hit landing. 0 when the victim never got out.
+// Longest actionable stretch between any two consecutive hits of the combo.
 function maxHitstunGap(model, combo) {
   let worst = 0;
   for (let i = 0; i + 1 < combo.moves.length; i++) {
-    const a = combo.moves[i].frame;
-    const b = combo.moves[i + 1].frame;
-    const free = victimFreeFrame(model, combo.playerIndex, a, b);
-    const gap = Math.max(0, b - free);
+    const gap = longestActionableRun(model, combo.playerIndex, combo.moves[i].frame, combo.moves[i + 1].frame);
     if (gap > worst) worst = gap;
   }
   return worst;

@@ -65,7 +65,7 @@ holds the defaults.
 
 | kind | rule (defaults) | config keys |
 |---|---|---|
-| `combo` | a slippi-js combo with ≥ 5 landed moves **or** ≥ 40% damage, no gap > 45 frames between the victim leaving hitstun/grab after one hit and the next hit landing, and no single hit carrying ≥ 80% of the damage | `comboMinHits`, `comboMinPercent`, `comboMaxHitstunGapFrames`, `comboLargeHitFraction` (null disables) |
+| `combo` | a slippi-js combo with ≥ 5 landed moves **or** ≥ 40% damage, no stretch > 45 frames in which the victim is continuously actionable between two hits (any new hit, grab, throw, knockdown or tech resets the count, as in slippi-js's combo reset rule; at the default 45 it only rejects what slippi-js would already have split, so it is a knob for stricter values), and no single hit carrying ≥ 80% of the damage | `comboMinHits`, `comboMinPercent`, `comboMaxHitstunGapFrames`, `comboLargeHitFraction` (null disables) |
 | `low_kill` | a stock lost at ≤ 60% to an opponent's hit (deaths with no killing conversion, i.e. self-destructs, are ignored) | `lowKillMaxPercent` |
 | `edgeguard` | a kill whose last hit landed with **both** the victim and the killer beyond the stage's ledge x (post-frame positions on the last-hit frame). Ledge x per stage id is in `lib/stages.js`; only the six tournament stages are known, other stages never produce edgeguards | `edgeguardEnabled` |
 | `comeback` | 1v1, game ended by stocks or time, and the winner was ≥ 2 stocks behind at some point. The clip is the final kill; the deficit moment is in `details.deficit_frame` | `comebackMinStockDeficit` |

@@ -278,3 +278,32 @@ test("config: range checks reject bad values", () => {
   assert.throws(() => mergeConfig({ lowKillMaxPercent: -1 }), /negative/);
   assert.throws(() => mergeConfig({ comboMinHits: 2.5 }), /integer/);
 });
+
+// Round 2: the gap is the longest continuous actionable stretch between two hits.
+function runModel(c, stateAt) {
+  const m = model({ combos: [c] });
+  m.getPost = (frame) => ({ actionStateId: stateAt(frame), positionX: 0, positionY: 0, percent: 0 });
+  return m;
+}
+
+test("gap: a multi-hit re-entry into hitstun resets the run", () => {
+  const moves = [100, 200].map((f) => move(f, 0, 20));
+  const c = combo({ victim: 1, moves });
+  // free 101..139 (39), re-damaged 140 (same move's later hit), free 141..199 (59)
+  const one = runModel(c, (f) => (f === 140 ? HITSTUN : f > 100 && f < 200 ? WAIT : HITSTUN));
+  assert.equal(maxHitstunGap(one, c), 59);
+  // re-damaged every 30 frames: longest run 29
+  const many = runModel(c, (f) => (f > 100 && f < 200 && f % 30 !== 0 ? WAIT : HITSTUN));
+  assert.equal(maxHitstunGap(many, c), 29);
+});
+
+test("gap: a grab or throw between hits resets the run", () => {
+  const moves = [100, 300].map((f) => move(f, 0, 20));
+  const c = combo({ victim: 1, moves });
+  const grab = runModel(c, (f) => (f > 100 && f < 300 ? (f >= 150 && f < 190 ? 0xe2 : WAIT) : HITSTUN));
+  assert.equal(maxHitstunGap(grab, c), 110); // 101..149 = 49, 190..299 = 110
+  const thrown = runModel(c, (f) => (f > 100 && f < 300 ? (f >= 150 && f < 190 ? 0xf2 : WAIT) : HITSTUN));
+  assert.equal(maxHitstunGap(thrown, c), 110);
+  const allThrown = runModel(c, (f) => (f > 100 && f < 300 ? 0xf2 : HITSTUN));
+  assert.equal(maxHitstunGap(allThrown, c), 0);
+});
