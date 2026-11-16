@@ -3,6 +3,8 @@
 #   fake_slpcheck.sh version
 #   fake_slpcheck.sh slpcheck --slp FILE --iso ISO --csv OUT
 # The behaviour of `slpcheck` is chosen by the replay's file name (without extension).
+# Like the real engine, a disc it cannot boot is a CSV row `boot-error: ...` with exit 1
+# (`nodisc`); exit 2 is kept for usage errors and an unreadable `.slp` (`usage`).
 
 case "$1" in
 version)
@@ -66,7 +68,12 @@ panic)
     exit 134
     ;;
 nodisc)
-    echo "error: disc image not found" >&2
+    row "boot-error: <disc>: No such file or directory (os error 2)" "" "" "" "" "" ""
+    echo "SLPCHECK $name.slp boot-error: <disc>: No such file or directory (os error 2)"
+    exit 1
+    ;;
+usage)
+    echo "error: cannot read the replay" >&2
     exit 2
     ;;
 hang)
@@ -75,6 +82,14 @@ hang)
 envcheck)
     if [ "$SLPCHECK_VANILLA_SPAWN" != "1" ]; then
         echo "SLPCHECK_VANILLA_SPAWN is not set" >&2
+        exit 2
+    fi
+    row match 5000 "" "" "" "" ""
+    exit 0
+    ;;
+noenvcheck)
+    if [ -n "${SLPCHECK_VANILLA_SPAWN+set}" ]; then
+        echo "SLPCHECK_VANILLA_SPAWN is set" >&2
         exit 2
     fi
     row match 5000 "" "" "" "" ""

@@ -16,8 +16,9 @@ than the fake engine script and fabricated replays. Measured on 2026-11-15 on th
 - Disc: `Super Smash Bros. Melee (USA) (En,Ja) (v1.02).iso`.
 - Corpus: `~/autobracket-fixtures/autobracket-fixtures/`, 56 files listed in its `MANIFEST.txt`.
   None of these files is in this repository.
-- What the server runs: `melee slpcheck --slp FILE --iso ISO --csv OUT.csv` with
-  `SLPCHECK_VANILLA_SPAWN=1` (`crates/server/src/resim.rs:128-142`).
+- What the server runs: `melee slpcheck --slp FILE --iso ISO --csv OUT.csv`. Until commit
+  `361152e` it always set `SLPCHECK_VANILLA_SPAWN=1`. Since then it sets the variable only for
+  replays without a Gecko list and removes it for every other file (F1).
 
 ## Commands run
 
@@ -30,7 +31,8 @@ AB_FIXTURES=$HOME/autobracket-fixtures/autobracket-fixtures \
   cargo test -p autobracket-server --test real_engine -- --ignored --nocapture --test-threads=2
 ```
 
-This took 355 s in total and ended `6 passed; 2 failed`.
+The first run (before the fixes) took 355 s in total and ended `6 passed; 2 failed`. After
+commit `361152e` (F1 and F2 fixed) the same command took 328 s and ended `8 passed; 0 failed`.
 
 These commands were run outside the tests to support the findings:
 
@@ -51,65 +53,68 @@ SLPCHECK_VANILLA_SPAWN=1 melee slpcheck --slp netplay_host.slp --iso /no/such.is
 | `slpcheck_says_match_on_own_build_exports` | pass | All 5 own-netplay files come back `Match` (1.2-3.7 s each). |
 | `pre_judge_then_finish_is_verified` | pass | For both pairs, `pre_judge` gives `NeedsResim { winner_port: 1, .. }`. The real `Slpcheck` gives `Match`, and `finish(.., false)` gives `Verified`. |
 | `disconnect_host_only_is_single` | pass | One upload gives `Single`. The file itself: Game End method **7** with **no LRAS initiator**, `last_frame` 1220, both players on 3 stocks and 0 %. `winner_port` is `None`. If both peers had uploaded it, `pre_judge` would give `Undecided`. `slpcheck` gives `Match`. |
-| `corpus_sweep_never_panics_and_agrees_with_manifest` | **FAIL** | Nothing panics, neither our reader nor the engine. But 31 of the 42 files the manifest lists as `match` come back `Diverged@-123` from `Slpcheck::check` (finding F1). |
-| `missing_disc_is_unavailable` (added) | **FAIL** | A missing disc image gives `Crashed("boot-error: ...")`, and `finish` turns that into `VerifiedInexact` (finding F2). |
+| `corpus_sweep_never_panics_and_agrees_with_manifest` | pass (failed before `361152e`) | Nothing panics, neither our reader nor the engine. All 42 files the manifest lists as `match` come back `Match` from `Slpcheck::check`. Before the fix, 31 of them came back `Diverged@-123` (finding F1). |
+| `missing_disc_is_unavailable` (added) | pass (failed before `361152e`) | `Slpcheck::new` refuses a missing disc up front, naming the path. A disc that disappears after start-up (a symlink to the image, removed after `new`) gives `Unavailable("boot-error: <disc>: No such file or directory (os error 2)")`, which `finish` turns into `PeerOnly`. Before the fix it gave `Crashed(..)` and so `VerifiedInexact` (finding F2). |
 | `early_end_slack_is_calibrated` | pass | The gap is 0 for every run (see "Early end" below). |
 
 ## Sweep
 
-How to read the table. "Slpcheck::check" is the server's own code path, timed. "Engine without
-SLPCHECK_VANILLA_SPAWN" is a direct engine run of the same file with that variable removed. The
-manifest's measurements were taken without it. A file that `replay::parse` rejects is never
-re-simulated by the server; for those files the third column shows, in parentheses, what the
-engine says when it runs the file directly the way the server would.
+How to read the table. The table is from the run after commit `361152e`; the first run's
+`Slpcheck::check` column, with the variable always set, is described under F1.
+"Slpcheck::check" is the server's own code path, timed: the variable is set only for files
+without a Gecko list. "Engine without SLPCHECK_VANILLA_SPAWN" is a direct engine run of the same
+file with that variable removed. The manifest's measurements were taken without it. A file that
+`replay::parse` rejects is never re-simulated by the server; for those files the third column
+shows, in parentheses, what the engine says when it runs the file directly the way the server
+would (without the variable).
 `Diverged@F:pN:field` means the first divergence was at frame F, port N, in that field.
 
-| file | replay::parse | Slpcheck::check (server: SLPCHECK_VANILLA_SPAWN=1) | engine without SLPCHECK_VANILLA_SPAWN | manifest status |
+| file | replay::parse | Slpcheck::check (server: SLPCHECK_VANILLA_SPAWN=1 only without a Gecko list) | engine without SLPCHECK_VANILLA_SPAWN | manifest status |
 |---|---|---|---|---|
-| own-netplay/netplay_host.slp | Ok(2974) | Match (3.43s) | match (3.12s) | match (--full, 6196 fighter-frames) |
-| own-netplay/netplay_guest.slp | Ok(2974) | Match (3.71s) | match (3.63s) | match (--full) |
-| own-netplay/falcon_fox_fd_lag40ms_loss5_host.slp | Ok(3156) | Match (2.97s) | match (3.15s) | match |
-| own-netplay/falcon_fox_fd_lag40ms_loss5_guest.slp | Ok(3156) | Match (3.89s) | match (3.67s) | match |
-| own-netplay/falcon_fox_fd_guest_quit_25s_host.slp | Ok(1220) | Match (1.56s) | match (1.44s) | match |
-| own-offline/pairs_falcon9-fox9_bf.slp | Ok(3600) | Diverged@-123:p1:x (0.27s) | match (3.44s) | match |
-| own-offline/pairs_marth9-fox9_bf.slp | Ok(3241) | Diverged@-123:p1:x (0.11s) | match (2.87s) | match |
-| own-offline/pairs_sheik9-marth9_bf.slp | Ok(3600) | Diverged@-123:p1:x (0.14s) | match (2.87s) | match |
-| own-offline/levels_fox3-falco3_fd.slp | Ok(3600) | Match (3.79s) | match (3.75s) | match |
-| own-offline/c_build_pad_falcon_fox_fd.slp | Err(Truncated) | (engine: diverged@-123:p1:state_frame) (0.23s) | diverged@-123:p1:state_frame (0.14s) | diverged (frame -123, state_frame) |
-| dolphin/20476_1a66cc9f-d363-4ee5-a1ac-c6b77d5e2c7c.slp | Ok(10443) | Diverged@-123:p4:x (0.28s) | match (11.34s) | match |
-| dolphin/20476_03c52089-9e8e-4425-885c-e32af62c14b2.slp | Ok(6297) | Diverged@-123:p1:x (0.13s) | match (5.17s) | match |
-| dolphin/20476_0b318d95-f3c1-4884-8a99-67f92c0d8796.slp | Ok(14291) | Diverged@-123:p4:x (0.14s) | match (11.70s) | match |
-| dolphin/20476_1b5afde1-cc91-4f82-b5a7-543a8cbfa25d.slp | Ok(13964) | Diverged@-123:p1:x (0.16s) | match (11.00s) | match |
-| dolphin/20476_01c6d260-8e33-4031-ab2c-b12e46a7aa8d.slp | Ok(11169) | Diverged@-123:p1:x (0.14s) | match (8.44s) | match |
-| dolphin/20476_18e83ec4-c553-48d5-98b5-8e75d6d01919.slp | Ok(8594) | Diverged@-123:p4:x (0.14s) | match (6.38s) | match |
-| tournament/20476_08f9e70f-2f7e-418b-8121-699ef271aacd.slp | Ok(8709) | Diverged@-123:p3:x (0.13s) | match (9.85s) | match |
-| tournament/20476_147832a2-24d4-4dad-bdad-d0608f83f579.slp | Ok(5843) | Diverged@-123:p1:x (0.12s) | match (5.04s) | match |
-| tournament/20476_23b2b24b-715e-43a7-be16-f8817af0c695.slp | Ok(11153) | Match (8.95s) | match (8.94s) | match |
-| tournament/20476_10909063-82b4-42b2-8ba7-08d1be1e1526.slp | Ok(14531) | Diverged@-123:p1:x (0.13s) | match (10.47s) | match |
-| tournament/20476_12ea3f66-3b37-4e18-ac46-7142c1eee126.slp | Ok(7871) | Diverged@-123:p1:x (0.11s) | match (6.42s) | match |
-| tournament/20476_1c57c3ef-c2ab-4548-b7ab-fb9aba553293.slp | Ok(6381) | Diverged@-123:p3:x (0.14s) | match (5.12s) | match |
-| tournament/20476_1285c0cd-acb2-4512-b141-ffdc938d5f23.slp | Ok(10883) | Diverged@-123:p4:x (0.14s) | match (11.23s) | match |
-| tournament/20476_28bf8e4c-5126-40bc-aca3-9b6f5fc6f695.slp | Ok(9026) | Diverged@-123:p1:x (0.14s) | match (8.52s) | match |
-| tournament/20476_265b95dd-355b-4519-9726-1688e7e6e383.slp | Ok(5342) | Diverged@-123:p2:x (0.14s) | match (4.98s) | match |
-| tournament/20476_1c7b2d10-8872-4f13-8cee-b8a349e14d51.slp | Ok(6272) | Diverged@-123:p2:y (0.12s) | match (5.59s) | match |
-| tournament/20476_2619fcd0-bbb3-4f8c-8865-0a53b4f1ca5f.slp | Ok(8814) | Diverged@-123:p2:x (0.16s) | match (6.88s) | match |
-| tournament/20476_20a1f939-1e39-4aff-ae98-1939d76999ff.slp | Ok(15186) | Diverged@-123:p2:x (0.17s) | match (12.03s) | match |
-| tournament/20476_1a2af8a2-e21d-40d4-97ae-8e095d1a075a.slp | Ok(11895) | Diverged@-123:p4:x (0.14s) | match (14.01s) | match |
-| tournament/20476_2df0f989-fee1-4e0d-aa1f-f6c5cffdd9a3.slp | Ok(7391) | Diverged@-123:p1:x (0.13s) | match (5.85s) | match |
-| tournament/20476_325cee5d-46aa-475d-8f5b-fee967e2cc4a.slp | Ok(8596) | Diverged@-123:p4:x (0.12s) | match (7.81s) | match |
-| tournament/20476_0a7cb485-47b1-4ecb-8d02-079c219272cc.slp | Ok(21515) | Diverged@-123:p1:x (0.15s) | match (15.70s) | match |
-| tournament/20476_0ecf0448-1368-408b-ba44-951349a79c42.slp | Ok(12688) | Diverged@-123:p1:x (0.15s) | match (9.97s) | match |
-| tournament/20476_19fd3cbb-54cc-4805-b479-f7b01d1c32e5.slp | Ok(12613) | Diverged@-123:p4:x (0.12s) | match (12.49s) | match |
-| tournament/20476_03b84423-9e9d-43c1-b4e6-b591a7a3fbaa.slp | Ok(8421) | Diverged@-123:p4:x (0.14s) | match (9.18s) | match |
-| tournament/20476_06200225-6243-4da9-a90d-6e40cb611d3a.slp | Ok(9947) | Diverged@-123:p4:x (0.13s) | match (7.48s) | match |
-| edge/lras_20476_14664b32_p1_initiator.slp | Ok(7212) | Match (5.70s) | match (5.60s) | match |
-| edge/lras_20689_fa028fa2_p4_initiator.slp | Ok(9069) | Diverged@-123:p2:x (0.16s) | match (7.41s) | match |
-| edge/timeout_end_cpu_bf.slp | Ok(3600) | Diverged@-123:p1:x (0.12s) | match (2.87s) | match |
-| edge/doubles_4p_teams_cpu_fd.slp | Ok(3600) | Diverged@-123:p2:x (0.15s) | match (5.21s) | match |
-| edge/illegal_stage_castle_cpu.slp | Ok(3600) | Match (3.57s) | match (3.43s) | match |
-| edge/illegal_stage_yoshis_story_cpu.slp | Ok(2380) | Match (2.14s) | match (2.22s) | match |
-| edge/mex_check_luigi_replay.slp | Ok(98) | Match (0.33s) | match (0.32s) | match |
-| edge/truncated_cut60pct_own_items_bf.slp | Err(Truncated) | (engine: diverged@-123:p1:x) (0.09s) | diverged@-123:p1:percent (0.10s) | diverged (frame -123, percent) |
+| own-netplay/netplay_host.slp | Ok(2974) | Match (2.48s) | match (2.27s) | match (--full, 6196 fighter-frames) |
+| own-netplay/netplay_guest.slp | Ok(2974) | Match (2.54s) | match (2.40s) | match (--full) |
+| own-netplay/falcon_fox_fd_lag40ms_loss5_host.slp | Ok(3156) | Match (2.59s) | match (2.47s) | match |
+| own-netplay/falcon_fox_fd_lag40ms_loss5_guest.slp | Ok(3156) | Match (2.53s) | match (2.40s) | match |
+| own-netplay/falcon_fox_fd_guest_quit_25s_host.slp | Ok(1220) | Match (1.15s) | match (1.06s) | match |
+| own-offline/pairs_falcon9-fox9_bf.slp | Ok(3600) | Match (2.78s) | match (2.91s) | match |
+| own-offline/pairs_marth9-fox9_bf.slp | Ok(3241) | Match (2.61s) | match (2.65s) | match |
+| own-offline/pairs_sheik9-marth9_bf.slp | Ok(3600) | Match (3.18s) | match (3.07s) | match |
+| own-offline/levels_fox3-falco3_fd.slp | Ok(3600) | Match (3.09s) | match (2.98s) | match |
+| own-offline/c_build_pad_falcon_fox_fd.slp | Err(Truncated) | (engine: diverged@-123:p1:state_frame) (0.15s) | diverged@-123:p1:state_frame (0.15s) | diverged (frame -123, state_frame) |
+| dolphin/20476_1a66cc9f-d363-4ee5-a1ac-c6b77d5e2c7c.slp | Ok(10443) | Match (14.22s) | match (13.46s) | match |
+| dolphin/20476_03c52089-9e8e-4425-885c-e32af62c14b2.slp | Ok(6297) | Match (7.97s) | match (8.46s) | match |
+| dolphin/20476_0b318d95-f3c1-4884-8a99-67f92c0d8796.slp | Ok(14291) | Match (12.43s) | match (12.27s) | match |
+| dolphin/20476_1b5afde1-cc91-4f82-b5a7-543a8cbfa25d.slp | Ok(13964) | Match (10.79s) | match (10.82s) | match |
+| dolphin/20476_01c6d260-8e33-4031-ab2c-b12e46a7aa8d.slp | Ok(11169) | Match (8.15s) | match (8.09s) | match |
+| dolphin/20476_18e83ec4-c553-48d5-98b5-8e75d6d01919.slp | Ok(8594) | Match (7.36s) | match (7.48s) | match |
+| tournament/20476_08f9e70f-2f7e-418b-8121-699ef271aacd.slp | Ok(8709) | Match (9.75s) | match (9.86s) | match |
+| tournament/20476_147832a2-24d4-4dad-bdad-d0608f83f579.slp | Ok(5843) | Match (5.11s) | match (5.01s) | match |
+| tournament/20476_23b2b24b-715e-43a7-be16-f8817af0c695.slp | Ok(11153) | Match (8.78s) | match (8.82s) | match |
+| tournament/20476_10909063-82b4-42b2-8ba7-08d1be1e1526.slp | Ok(14531) | Match (10.65s) | match (10.85s) | match |
+| tournament/20476_12ea3f66-3b37-4e18-ac46-7142c1eee126.slp | Ok(7871) | Match (6.37s) | match (6.44s) | match |
+| tournament/20476_1c57c3ef-c2ab-4548-b7ab-fb9aba553293.slp | Ok(6381) | Match (5.51s) | match (5.45s) | match |
+| tournament/20476_1285c0cd-acb2-4512-b141-ffdc938d5f23.slp | Ok(10883) | Match (11.69s) | match (11.79s) | match |
+| tournament/20476_28bf8e4c-5126-40bc-aca3-9b6f5fc6f695.slp | Ok(9026) | Match (8.35s) | match (8.64s) | match |
+| tournament/20476_265b95dd-355b-4519-9726-1688e7e6e383.slp | Ok(5342) | Match (4.95s) | match (4.80s) | match |
+| tournament/20476_1c7b2d10-8872-4f13-8cee-b8a349e14d51.slp | Ok(6272) | Match (5.18s) | match (4.97s) | match |
+| tournament/20476_2619fcd0-bbb3-4f8c-8865-0a53b4f1ca5f.slp | Ok(8814) | Match (6.55s) | match (6.49s) | match |
+| tournament/20476_20a1f939-1e39-4aff-ae98-1939d76999ff.slp | Ok(15186) | Match (11.80s) | match (11.56s) | match |
+| tournament/20476_1a2af8a2-e21d-40d4-97ae-8e095d1a075a.slp | Ok(11895) | Match (14.91s) | match (14.72s) | match |
+| tournament/20476_2df0f989-fee1-4e0d-aa1f-f6c5cffdd9a3.slp | Ok(7391) | Match (5.67s) | match (6.01s) | match |
+| tournament/20476_325cee5d-46aa-475d-8f5b-fee967e2cc4a.slp | Ok(8596) | Match (7.49s) | match (8.02s) | match |
+| tournament/20476_0a7cb485-47b1-4ecb-8d02-079c219272cc.slp | Ok(21515) | Match (15.79s) | match (15.55s) | match |
+| tournament/20476_0ecf0448-1368-408b-ba44-951349a79c42.slp | Ok(12688) | Match (9.66s) | match (10.25s) | match |
+| tournament/20476_19fd3cbb-54cc-4805-b479-f7b01d1c32e5.slp | Ok(12613) | Match (12.56s) | match (12.50s) | match |
+| tournament/20476_03b84423-9e9d-43c1-b4e6-b591a7a3fbaa.slp | Ok(8421) | Match (9.46s) | match (9.69s) | match |
+| tournament/20476_06200225-6243-4da9-a90d-6e40cb611d3a.slp | Ok(9947) | Match (8.11s) | match (7.75s) | match |
+| edge/lras_20476_14664b32_p1_initiator.slp | Ok(7212) | Match (5.58s) | match (5.38s) | match |
+| edge/lras_20689_fa028fa2_p4_initiator.slp | Ok(9069) | Match (7.64s) | match (7.47s) | match |
+| edge/timeout_end_cpu_bf.slp | Ok(3600) | Match (3.09s) | match (2.91s) | match |
+| edge/doubles_4p_teams_cpu_fd.slp | Ok(3600) | Match (5.24s) | match (4.74s) | match |
+| edge/illegal_stage_castle_cpu.slp | Ok(3600) | Match (3.62s) | match (3.44s) | match |
+| edge/illegal_stage_yoshis_story_cpu.slp | Ok(2380) | Match (2.24s) | match (2.19s) | match |
+| edge/mex_check_luigi_replay.slp | Ok(98) | Match (0.32s) | match (0.31s) | match |
+| edge/truncated_cut60pct_own_items_bf.slp | Err(Truncated) | (engine: diverged@-123:p1:percent) (0.09s) | diverged@-123:p1:percent (0.09s) | diverged (frame -123, percent) |
 | synthetic/ok00_modern.slp | Ok(-84) | Crashed(refused: p1: team 161 is outside 0..=2) (0.01s) | refused: p1: team 161 is outside 0..=2 (0.01s) | refused: p1: team 161 is outside 0..=2 |
 | synthetic/ok03_old.slp | Ok(-100) | Crashed(refused: p1: team 123 is outside 0..=2) (0.01s) | refused: p1: team 123 is outside 0..=2 (0.01s) | refused: p1: team 123 is outside 0..=2 |
 | synthetic/oneframe.slp | Ok(-123) | Crashed(refused: p1: team 34 is outside 0..=2) (0.01s) | refused: p1: team 34 is outside 0..=2 (0.01s) | refused: p1: team 34 is outside 0..=2 |
@@ -185,9 +190,9 @@ A Gecko list is present in 37 of the 50 files our reader can read.
 
 ## Timing
 
-- `Slpcheck::check`, the server's path, over 50 runs: min 0.01 s, median 0.14 s, max 8.95 s.
-  The median is so low because, with the server's settings, most files stop at their first
-  divergence at frame -123 (F1). Do not use it for planning.
+- `Slpcheck::check`, the server's path, over 50 runs, after `361152e`: min 0.01 s, median
+  5.51 s, max 15.79 s. (Before the fix the median was 0.14 s, because most files stopped at their
+  first divergence at frame -123, F1.) The minimum is the synthetic files the engine refuses.
 - Full-length runs (engine status `match`, so the whole replay was simulated), 42 runs: min
   0.32 s, median 6.38 s, max 15.70 s. Throughput is 715-1400 frames/s, about 1150 frames/s
   overall, which is roughly **19x real time on one core**. The longest corpus game (21639 frames,
@@ -195,26 +200,30 @@ A Gecko list is present in 37 of the 50 files our reader can read.
   own-netplay games (about 3100 frames) take 2.4-3.7 s, of which about 0.3 s is start-up. The
   design's planning figure was 40x; the measured figure here is about half that.
 - Whole sweep test: 331.5 s, sequential. That is the 50 server runs plus 56 runs without the
-  variable. The whole test binary took 355 s at `--test-threads=2`.
+  variable. The whole test binary took 355 s at `--test-threads=2`. After `361152e`, with the
+  server's runs now full length too: sweep 302.1 s, whole binary 328 s. (Full-length runs
+  without the variable in that run: 42 runs, min 0.31 s, median 6.49 s, max 15.55 s.)
 
 ## Early end
 
 `replay_last_frame - csv_last_frame`:
 
-- Server settings (`SLPCHECK_VANILLA_SPAWN=1`), every file the server would read as `Match` or
-  `EarlyEnd`: 11 files. Min 0, median 0, max 0.
+- Server settings, every file the server would read as `Match` or `EarlyEnd`: after `361152e`
+  (variable only without a Gecko list) 42 files, min 0, median 0, max 0. Before the fix
+  (variable always set) only 11 files reached `Match`, also min 0, median 0, max 0.
 - Without the variable, every complete `match` run: 42 files, including all 28 Slippi console
   recordings and the two LRAS quit-outs. Min 0, median 0, max 0.
 
 On a complete run the engine's CSV `last_frame` equals `replay::parse`'s `last_frame` exactly.
-`EARLY_END_SLACK_FRAMES = 0` (`resim.rs:59`) is consistent with every honest game in the corpus,
+`EARLY_END_SLACK_FRAMES = 0` (`resim.rs:68`) is consistent with every honest game in the corpus,
 so the constant is unchanged. The corpus has no game in which the engine's match ended early.
 
 ## Findings
 
-**F1. The verifier sets `SLPCHECK_VANILLA_SPAWN=1` for every file. Every replay that carries
-Slippi's Neutral Spawn codes then diverges at frame -123.**
-`crates/server/src/resim.rs:62` and `:136` (`.env(SPAWN_ENV, "1")`, unconditional).
+**F1 (fixed in `361152e`). The verifier sets `SLPCHECK_VANILLA_SPAWN=1` for every file. Every
+replay that carries Slippi's Neutral Spawn codes then diverges at frame -123.**
+Before the fix, in commit `1cd6121` (the fix's parent): `crates/server/src/resim.rs:67` and
+`:141` (`.env(SPAWN_ENV, "1")`, unconditional).
 The engine only applies Slippi's replay rules, Neutral Spawn included, when the variable is unset
 (`~/melee-engine/rust/melee/src/slpcheck.rs:505-508`). The engine documents the variable as being
 for "the port's own .slp exports, played without it".
@@ -233,37 +242,57 @@ The engine's own notes (`docs/rust-port/notes/net.md:226-228`) say own exports n
 on stages whose vanilla spawns differ from neutral ones: "FD matched ... with Neutral Spawn on,
 Battlefield did not". Every own-netplay fixture is on FD, so the corpus cannot show that case.
 
-A likely correct rule is to set the variable only when the replay has no Gecko list, which is
-exactly the own-build exports. This is not fixed here. Today the effect is masked, because
-`legality` rejects any Gecko list (F3) and those replays never reach resim. It becomes a real
-fault the moment Slippi replays are admitted: in non-strict mode every such game would come out
-`VerifiedInexact` and never `Verified`; in strict mode it would come out `Inexact`.
+Fix (`361152e`): `Slpcheck::check` reads the file and sets the variable only when
+`replay::parse` succeeds and reports no Gecko list, which is exactly the own-build exports.
+Otherwise it removes the variable (the engine reacts to its presence, so an inherited value must
+not leak through). A file that cannot be read or parsed runs without it, the engine's own
+default. After the fix all 42 manifest-`match` files come back `Match` from `Slpcheck::check`,
+including the three `own-offline/pairs_*_bf.slp` files (Battlefield, with a Gecko list), and all
+five own-netplay exports still match. Before the fix the effect was masked in production,
+because `legality` rejects any Gecko list (F3) and those replays never reach resim; it would
+have become a real fault the moment Slippi replays were admitted.
 Missing fixture: an own-netplay export on Battlefield or another non-FD stage, to confirm that
 own exports need the variable there.
 
-**F2. A missing or unreadable disc image is reported as `Crashed`, so the game counts as
-`VerifiedInexact`.**
-`crates/server/src/resim.rs:164` treats only exit code 2 as `Unavailable`. The engine exits 2
-only for usage errors: no `--slp`, no `--iso`, or an unreadable `.slp`
+Known limit of the rule: "no Gecko list" also describes Slippi replays recorded before Slippi
+started writing the Gecko list into replay files. Such a replay would run with the variable set
+and would likely come back `Diverged` on a stage whose vanilla and neutral spawns differ. That
+errs in the safe direction (a real game reads as not matching, never the reverse), and the
+corpus has no such file.
+
+**F2 (fixed in `361152e`). A missing or unreadable disc image is reported as `Crashed`, so the
+game counts as `VerifiedInexact`.**
+Before the fix, in commit `1cd6121`, `crates/server/src/resim.rs:169` treated only exit code 2
+as `Unavailable`.
+The engine exits 2 only for usage errors: no `--slp`, no `--iso`, or an unreadable `.slp`
 (`slpcheck.rs:373/378/385`). A disc that cannot be opened makes it write a CSV row
 `boot-error: <disc>: No such file or directory` and exit 1 (`slpcheck.rs:528`, `:762-766`).
-`outcome_from_csv` then maps any non-`match`/`diverged` status to `Crashed`
-(`resim.rs:388`), and `finish` maps `Crashed` to `VerifiedInexact`
+`outcome_from_csv` then mapped any non-`match`/`diverged` status to `Crashed`
+(`resim.rs:387` in `1cd6121`), and `finish` maps `Crashed` to `VerifiedInexact`
 (`crates/server/src/judge.rs:98-104`).
 
 - Shown by: `missing_disc_is_unavailable`, using `own-netplay/netplay_host.slp`.
-- Expected: `Unavailable(..)`, which becomes `PeerOnly`. Actual:
+- Expected: `Unavailable(..)`, which becomes `PeerOnly`. Actual (before the fix):
   `Crashed("boot-error: <disc>: No such file or directory (os error 2)")`, which becomes
   `VerifiedInexact`.
-- The existing test `resim.rs::run_missing_disc_is_unavailable` passes only because the fake
-  engine script exits 2.
-- Suggested fix: treat a `boot-error:` status as `Unavailable`.
+- The test `resim.rs::run_missing_disc_is_unavailable` passed before the fix only because the
+  fake engine script exited 2.
+- Fix (`361152e`): a status whose first word is `boot-error` becomes `Unavailable(<status>)`.
+  `Slpcheck::new` also refuses, naming the path, an engine that cannot be executed and a disc
+  image that is not a readable regular file of at least 1 GiB (`MIN_DISC_BYTES`; it checks the
+  size, opens the image and reads a few bytes, and the error gives the size), so both
+  `serve` in `in_process` mode and `verify-worker` fail at start-up. A disc that disappears after
+  start-up still comes back `Unavailable` through the `boot-error` row. The fake engine's
+  `nodisc` mode now imitates the real engine (CSV row `boot-error: ...`, exit 1); a separate
+  `usage` mode keeps the exit-2 case, and both give `Unavailable`.
 
-The same mapping raises a question (not a defect claim): the engine's `refused: ...` (it will
-not simulate the file) and `parse-error: ...` statuses also become `Crashed`, and so
-`VerifiedInexact` in non-strict mode. In the corpus only synthetic files reach those statuses,
-and `legality` stops all of them first. Should "the engine refuses this file" count the same as
-"the engine crashed"?
+The same mapping raised a question: the engine's `refused: ...` (it will not simulate the file)
+and `parse-error: ...` statuses also become `Crashed`, and so `VerifiedInexact` in non-strict
+mode. In the corpus only synthetic files reach those statuses, and `legality` stops all of them
+first. **Ruling:** they describe the replay (the engine will not or cannot simulate this file),
+not the verifier, so they stay `Crashed`. That is now an explicit, commented arm in
+`outcome_from_csv` with its own tests, and any status the server does not know is also `Crashed`
+with the engine's status text kept.
 
 **F3 (question). The Gecko rule and the ports rule reject every real console recording.**
 `judge.rs:48` (`has_gecko` gives `Illegal("gecko")`) and `judge.rs:22-28` (exactly ports 1 and 2).
@@ -330,7 +359,8 @@ initiator-loses rule correctly in both:
 - `edge/lras_20689_fa028fa2_p4_initiator.slp`: players on p2 and p4, initiator p4,
   `winner_port == Some(2)`.
 
-Both re-simulate to `match` without the variable. With it, the second diverges (F1). Neither
+Both re-simulate to `match` without the variable, and both come back `Match` from
+`Slpcheck::check` since `361152e`. Before that fix the second diverged (F1). Neither
 gets a verdict today: the first fails `gecko`, the second fails `players`.
 `edge/mex_check_luigi_replay.slp` is also an LRAS ending (p1 quit 98 frames in), and its winner
 is `Some(2)`.
@@ -347,16 +377,20 @@ this folder". Both files are present, and they match the listed sha256.
 - **What gets verified today:** games played with this project's own netplay client. Both
   players' exports are identical, the reader reads them correctly, and the engine re-runs them
   frame for frame. Such a game comes out **Verified**, with the winner taken from the replay.
-  This was checked end to end on two real games: a clean one and one with 40 ms lag and 5 %
-  packet loss.
+  Here that was checked on the replay files of two real games (a clean one and one with 40 ms
+  lag and 5 % packet loss): `pre_judge`, then the real `Slpcheck`, then `finish`, called
+  directly by `pre_judge_then_finish_is_verified`. That is not the full loop through a running
+  server and clients; `docs/real-engine-e2e.md` on the main branch covers that.
 - **What goes to the organiser:** a game where only one player uploaded (`Single`). Also a game
   that ended by disconnect or by both players quitting without a winner (`Undecided`), a game
   with the wrong rules, stage, ports or a Gecko list (`Illegal`), and a file the reader cannot
   read (`Undecided`). Replays recorded on Slippi Dolphin or a console are all refused today (F3).
-  Admitting them needs the Gecko rule, the ports rule and the spawn setting (F1) changed together.
-- **A misconfigured verifier is not caught (F2):** if the disc image path is wrong, every game is
-  silently marked `VerifiedInexact` and counts, instead of being reported as unverified. Until
-  that is fixed, check the verifier's first result of the night by hand.
+  Admitting them needs the Gecko rule and the ports rule changed; the spawn setting (F1) is
+  already per replay.
+- **A misconfigured verifier is caught (F2, fixed):** a missing, unreadable or too-small disc
+  image, or an engine that cannot run, stops the server (`in_process`) or `verify-worker` at start-up with the
+  path in the error. A disc that disappears later makes games `PeerOnly`, not
+  `VerifiedInexact`.
 - **How long verification takes:** about 1 s of one core per 20 s of game time (about 19x real
   time). A typical 3-minute game is checked in about 10 s. A full 8-minute timeout game takes
   about 25 s. A 32-player double-elimination night of about 150 games is about 25 minutes of one

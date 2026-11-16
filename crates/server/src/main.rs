@@ -77,7 +77,7 @@ async fn main() -> anyhow::Result<()> {
             let key = verify_worker::read_key_file(&key_file)?;
             let engine = Slpcheck::new(engine, iso, Duration::from_secs(timeout_secs))
                 .await
-                .context("the engine cannot be run")?;
+                .context("the verifier cannot start")?;
             verify_worker::run(server, key, engine).await
         }
     }
@@ -96,8 +96,9 @@ async fn resim_for(cfg: &Config) -> anyhow::Result<Arc<dyn Resim>> {
             .await
             .with_context(|| {
                 format!(
-                    "verifier.mode = \"in_process\" but the engine {} cannot be run",
-                    v.engine.display()
+                    "verifier.mode = \"in_process\" but the verifier cannot start (engine {}, disc image {})",
+                    v.engine.display(),
+                    v.iso.display()
                 )
             })?,
         ),

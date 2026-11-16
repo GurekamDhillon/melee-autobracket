@@ -26,7 +26,7 @@ use replay::{GameEnd, PlayerKind, ReplayFacts};
 
 /// Generous: the longest corpus game (21639 frames) takes well under a minute.
 const SLPCHECK_TIMEOUT: Duration = Duration::from_secs(300);
-/// The variable the server sets for every `slpcheck` run (`resim.rs`).
+/// The variable the server sets for `slpcheck` runs of replays without a Gecko list (`resim.rs`).
 const SPAWN_ENV: &str = "SLPCHECK_VANILLA_SPAWN";
 
 // ---------------------------------------------------------------------------------------------
@@ -163,6 +163,12 @@ impl EngineRun {
         self.col("last_frame")?.parse().ok()
     }
 
+    /// Whether the engine wrote no CSV row: it aborted (a panic outside its own catch, a signal)
+    /// before reporting anything.
+    fn aborted(&self) -> bool {
+        self.col("status").is_none()
+    }
+
     /// `diverged@frame:pN:field`, or the plain status.
     fn summary(&self) -> String {
         let status = self.status();
@@ -181,8 +187,9 @@ impl EngineRun {
 
 type RunCell = Arc<OnceLock<Arc<EngineRun>>>;
 
-/// Runs `slpcheck` on `file` exactly as the server does (`vanilla_spawn = true`) or without the
-/// spawn variable. Runs are cached for the life of the test binary, so tests can share them.
+/// Runs `slpcheck` on `file` with the spawn variable set (`vanilla_spawn = true`, what the server
+/// does for a replay without a Gecko list) or removed (what it does for every other file). Runs
+/// are cached for the life of the test binary, so tests can share them.
 fn engine_run(env: &Env, file: &Path, vanilla_spawn: bool) -> Arc<EngineRun> {
     static CACHE: OnceLock<Mutex<HashMap<(PathBuf, bool), RunCell>>> = OnceLock::new();
     let cell = {
@@ -494,11 +501,27 @@ async fn corpus_sweep_never_panics_and_agrees_with_manifest() {
         let (parse_word, ours, secs) = match parsed {
             Err(_) => {
                 panics.push(format!("{}: replay::parse panicked", e.relpath));
+                if e.is_match() {
+                    disagreements.push(format!(
+                        "{}: manifest `{}`, replay::parse panicked",
+                        e.relpath, e.status
+                    ));
+                }
                 ("PANIC".to_string(), "-".to_string(), 0.0)
             }
             Ok(Err(err)) => {
-                // The server never re-simulates a file it cannot read; ask the engine anyway.
-                let run = engine_run(&env, &path, true);
+                // The server would call this game Undecided: a disagreement if the engine
+                // authors measured it as a good replay.
+                if e.is_match() {
+                    disagreements.push(format!(
+                        "{}: manifest `{}`, replay::parse gave Err({err:?})",
+                        e.relpath, e.status
+                    ));
+                }
+                // The server never re-simulates a file it cannot read; ask the engine anyway, the
+                // way `Slpcheck` would run it (without the spawn variable).
+                // (An abort here is caught by the run without the variable below: the same run.)
+                let run = engine_run(&env, &path, false);
                 (
                     format!("Err({err:?})"),
                     format!("(engine: {})", run.summary()),
@@ -511,10 +534,13 @@ async fn corpus_sweep_never_panics_and_agrees_with_manifest() {
                 let secs = start.elapsed().as_secs_f64();
                 check_secs.push(secs);
                 if let ResimOutcome::Crashed(s) = &outcome {
-                    if s.starts_with("panic") {
+                    // `panic@F` is the engine's own report; "no result row" is an abort that
+                    // wrote no CSV row at all.
+                    if s.starts_with("panic") || s.contains("no result row") {
                         panics.push(format!("{}: engine {s}", e.relpath));
                     }
                 }
+                // Any other outcome, an abort ("no result row") included, is a disagreement.
                 if e.is_match() && outcome != ResimOutcome::Match {
                     disagreements.push(format!(
                         "{}: manifest `{}`, Slpcheck::check gave {}",
@@ -546,6 +572,12 @@ async fn corpus_sweep_never_panics_and_agrees_with_manifest() {
         };
         // The same file without the spawn variable, as the engine authors measured the corpus.
         let plain = engine_run(&env, &path, false);
+        if plain.aborted() {
+            panics.push(format!(
+                "{}: engine without {SPAWN_ENV} wrote no CSV row (exit {:?})",
+                e.relpath, plain.exit
+            ));
+        }
         if plain.status() == "match" {
             full_secs.push(plain.secs);
         }
@@ -563,7 +595,7 @@ async fn corpus_sweep_never_panics_and_agrees_with_manifest() {
     }
 
     println!("\n## Sweep ({} files)\n", entries.len());
-    println!("| file | replay::parse | Slpcheck::check (server: {SPAWN_ENV}=1) | engine without {SPAWN_ENV} | manifest status |");
+    println!("| file | replay::parse | Slpcheck::check (server: {SPAWN_ENV}=1 only without a Gecko list) | engine without {SPAWN_ENV} | manifest status |");
     println!("|---|---|---|---|---|");
     for r in &rows {
         println!("{r}");
@@ -596,7 +628,7 @@ async fn corpus_sweep_never_panics_and_agrees_with_manifest() {
     }
     println!("whole sweep: {:.1}s", sweep_start.elapsed().as_secs_f64());
 
-    assert!(panics.is_empty(), "panics: {panics:#?}");
+    assert!(panics.is_empty(), "panics or engine aborts: {panics:#?}");
     assert!(
         disagreements.is_empty(),
         "{} file(s) the manifest lists as `match` did not come back Match:\n{}",
@@ -605,32 +637,48 @@ async fn corpus_sweep_never_panics_and_agrees_with_manifest() {
     );
 }
 
-/// A disc image that cannot be read is the verifier's problem, not the replay's: the game must
-/// fall back to `PeerOnly` (via `Unavailable`), not count as `VerifiedInexact` (via `Crashed`).
+/// A disc image that cannot be read is the verifier's problem, not the replay's. `Slpcheck::new`
+/// refuses a missing disc up front; a disc that disappears after start-up makes the engine report
+/// `boot-error`, which must fall back to `PeerOnly` (via `Unavailable`), not count as
+/// `VerifiedInexact` (via `Crashed`).
 #[tokio::test]
 #[ignore = "needs AB_ENGINE, AB_ISO and AB_FIXTURES"]
 async fn missing_disc_is_unavailable() {
     let env = env();
     let dir = tempfile::tempdir().expect("temp dir");
-    let checker = Slpcheck::new(
-        env.engine.clone(),
-        dir.path().join("no-such-disc.iso"),
-        SLPCHECK_TIMEOUT,
-    )
-    .await
-    .expect("the engine runs `version`");
+
+    // Up front: no verifier at all.
+    let missing = dir.path().join("no-such-disc.iso");
+    let refused = Slpcheck::new(env.engine.clone(), missing.clone(), SLPCHECK_TIMEOUT).await;
+    let err = format!(
+        "{:#}",
+        refused.err().expect("Slpcheck::new refuses a missing disc")
+    );
+    println!("missing disc at start-up: {err}");
+    assert!(err.contains(&missing.display().to_string()), "{err}");
+
+    // After start-up: a symlink to the real image passes the check, then disappears.
+    let link = dir.path().join("disc.iso");
+    std::os::unix::fs::symlink(&env.iso, &link).expect("symlink to the disc image");
+    let checker = Slpcheck::new(env.engine.clone(), link.clone(), SLPCHECK_TIMEOUT)
+        .await
+        .expect("the engine runs and the linked disc is readable");
+    std::fs::remove_file(&link).expect("remove the symlink");
     let path = env.fixtures.join("own-netplay/netplay_host.slp");
     let outcome = checker.check(&path, 2974).await;
     println!(
-        "missing disc: {} -> {:?}",
+        "disc gone after start-up: {} -> {:?}",
         outcome_word(&outcome),
         finish(&outcome, false)
     );
-    assert!(
-        matches!(outcome, ResimOutcome::Unavailable(_)),
-        "a missing disc image gave {outcome:?}, which `finish` turns into {:?}",
-        finish(&outcome, false)
-    );
+    match &outcome {
+        ResimOutcome::Unavailable(why) => assert!(why.starts_with("boot-error"), "{why}"),
+        other => panic!(
+            "a missing disc image gave {other:?}, which `finish` turns into {:?}",
+            finish(other, false)
+        ),
+    }
+    assert_eq!(finish(&outcome, false), Verdict::PeerOnly);
 }
 
 #[test]
@@ -638,7 +686,8 @@ async fn missing_disc_is_unavailable() {
 fn early_end_slack_is_calibrated() {
     let env = env();
     // (file, replay last frame, engine last frame) for runs the server would read as Match or
-    // EarlyEnd, and separately for every complete `match` run without the spawn variable.
+    // EarlyEnd (spawn variable set only without a Gecko list), and separately for every complete
+    // `match` run without the spawn variable.
     let mut server = Vec::new();
     let mut plain = Vec::new();
     for e in manifest(&env) {
@@ -646,7 +695,7 @@ fn early_end_slack_is_calibrated() {
         let Ok(f) = replay::parse(&read(&path)) else {
             continue;
         };
-        let run = engine_run(&env, &path, true);
+        let run = engine_run(&env, &path, !f.has_gecko);
         if matches!(
             outcome_from_csv(&run.csv, f.last_frame),
             ResimOutcome::Match | ResimOutcome::EarlyEnd { .. }
@@ -663,7 +712,10 @@ fn early_end_slack_is_calibrated() {
 
     let mut bad = Vec::new();
     for (label, set) in [
-        (format!("server runs ({SPAWN_ENV}=1)"), &server),
+        (
+            format!("server runs ({SPAWN_ENV}=1 only without a Gecko list)"),
+            &server,
+        ),
         (format!("runs without {SPAWN_ENV}"), &plain),
     ] {
         assert!(
