@@ -1681,6 +1681,7 @@ dependencies = [
 name = "replay"
 version = "0.1.0"
 dependencies = [
+ "replay",
  "thiserror 2.0.21",
 ]
 
