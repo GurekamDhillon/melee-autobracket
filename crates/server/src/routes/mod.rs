@@ -15,6 +15,7 @@ mod events;
 mod players;
 mod quarantine;
 mod sets;
+mod verify_jobs;
 mod view;
 
 pub fn router() -> Router<AppState> {
@@ -38,6 +39,9 @@ pub fn router() -> Router<AppState> {
         .route("/v1/admin/players/{old_key}/rekey", post(admin::rekey))
         .route("/v1/quarantine", get(quarantine::list))
         .route("/v1/quarantine/{id}/replay/{slot}", get(quarantine::replay))
+        .route("/v1/verify/claim", post(verify_jobs::claim))
+        .route("/v1/verify/jobs/{id}/replay", get(verify_jobs::replay))
+        .route("/v1/verify/jobs/{id}/result", post(verify_jobs::result))
 }
 
 /// An error response: a status code and a JSON body of the form `{"error": "...", ...}`.

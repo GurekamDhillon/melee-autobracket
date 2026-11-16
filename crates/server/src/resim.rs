@@ -3,19 +3,24 @@
 //! [`Slpcheck`] runs the engine's `slpcheck` command as a subprocess and reads its verdict from
 //! the CSV the engine writes; the CSV, not the exit code or the log lines, is the contract.
 
+use std::collections::HashMap;
 use std::io;
 use std::os::unix::fs::DirBuilderExt;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 
 use anyhow::{bail, Context};
 use async_trait::async_trait;
-use proto::ResimOutcome;
+use proto::{ResimOutcome, VerifyResult};
 use sha2::{Digest, Sha256};
+use sqlx::SqlitePool;
 use tokio::io::{AsyncRead, AsyncReadExt};
 use tokio::process::Command;
+use tokio::sync::Notify;
+use tokio::task::Id as TaskId;
 
 #[async_trait]
 pub trait Resim: Send + Sync {
@@ -23,6 +28,16 @@ pub trait Resim: Send + Sync {
     async fn check(&self, slp: &Path, replay_last_frame: i32) -> ResimOutcome;
     /// Identifies the engine build doing the checking.
     fn build(&self) -> String;
+
+    /// Hands the verifier the opened store; `build_app` calls it once at start-up, before
+    /// the judging worker starts. Only verifiers that keep state in the store
+    /// ([`ExternalResim`]) need it.
+    async fn attach(&self, _db: &SqlitePool) -> anyhow::Result<()> {
+        Ok(())
+    }
+
+    /// Tells the verifier an external result was just recorded (by the result route).
+    fn result_posted(&self) {}
 }
 
 /// A verifier that checks nothing.
@@ -164,6 +179,170 @@ impl Resim for Slpcheck {
     }
 }
 
+/// How long [`ExternalResim::check`] waits for a verifier by default.
+pub const EXTERNAL_RESULT_TIMEOUT: Duration = Duration::from_secs(600);
+/// How often a waiting check re-reads its job, in case a wake-up was missed.
+const EXTERNAL_RECHECK: Duration = Duration::from_secs(1);
+
+/// Re-simulates on another machine: `check` queues a `resim_jobs` row, a `verify-worker`
+/// claims it over the API and posts the result, and `check` returns that result.
+///
+/// `build()` is `"external"`, except that right after a `check` that got a result it returns
+/// the build the verifier posted, once, to the same task. The judging path calls `check` and
+/// then `build` from one task, so concurrent judging in other tasks cannot mix the builds up.
+pub struct ExternalResim {
+    db: OnceLock<SqlitePool>,
+    posted: Notify,
+    timeout: Duration,
+    /// The build of the last result `check` returned, per calling task.
+    builds: Mutex<HashMap<TaskId, String>>,
+}
+
+impl ExternalResim {
+    /// `timeout` is how long `check` waits for a result before giving up
+    /// (normally [`EXTERNAL_RESULT_TIMEOUT`]).
+    pub fn new(timeout: Duration) -> Self {
+        ExternalResim {
+            db: OnceLock::new(),
+            posted: Notify::new(),
+            timeout,
+            builds: Mutex::default(),
+        }
+    }
+
+    fn builds(&self) -> std::sync::MutexGuard<'_, HashMap<TaskId, String>> {
+        self.builds.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// Queues a job and waits for its result; `None` when the wait timed out.
+    async fn run_job(
+        &self,
+        db: &SqlitePool,
+        slp: &Path,
+        replay_last_frame: i32,
+    ) -> anyhow::Result<Option<VerifyResult>> {
+        let path = slp
+            .to_str()
+            .with_context(|| format!("non-UTF-8 replay path {slp:?}"))?;
+        let game_id: Option<i64> = sqlx::query_scalar("SELECT game_id FROM uploads WHERE path = ?")
+            .bind(path)
+            .fetch_optional(db)
+            .await?;
+        let id: i64 = sqlx::query_scalar(
+            "INSERT INTO resim_jobs (game_id, path, replay_last_frame, state)
+             VALUES (?, ?, ?, 'queued') RETURNING id",
+        )
+        .bind(game_id.unwrap_or(0))
+        .bind(path)
+        .bind(replay_last_frame)
+        .fetch_one(db)
+        .await?;
+
+        let deadline = tokio::time::Instant::now() + self.timeout;
+        loop {
+            // Register for the wake-up before reading, so a result posted in between still wakes us.
+            let posted = self.posted.notified();
+            tokio::pin!(posted);
+            posted.as_mut().enable();
+            if let Some(result) = finished(db, id).await? {
+                return Ok(Some(result));
+            }
+            tokio::select! {
+                () = posted => {}
+                () = tokio::time::sleep(EXTERNAL_RECHECK) => {}
+                () = tokio::time::sleep_until(deadline) => break,
+            }
+        }
+
+        // Give up, unless the result landed just now. Retiring the job stops it being offered.
+        let mut tx = crate::db::begin_write(db).await?;
+        let retired =
+            sqlx::query("UPDATE resim_jobs SET state = 'done' WHERE id = ? AND state != 'done'")
+                .bind(id)
+                .execute(&mut *tx)
+                .await?;
+        let result = if retired.rows_affected() == 0 {
+            finished(&mut *tx, id).await?
+        } else {
+            None
+        };
+        tx.commit().await?;
+        Ok(result)
+    }
+}
+
+/// The posted result of job `id`, once it is `done`.
+async fn finished<'e, E>(db: E, id: i64) -> anyhow::Result<Option<VerifyResult>>
+where
+    E: sqlx::Executor<'e, Database = sqlx::Sqlite>,
+{
+    let row: Option<(String, Option<String>)> =
+        sqlx::query_as("SELECT state, result_json FROM resim_jobs WHERE id = ?")
+            .bind(id)
+            .fetch_optional(db)
+            .await?;
+    match row {
+        None => bail!("resim job {id} disappeared"),
+        Some((state, Some(json))) if state == "done" => Ok(Some(
+            serde_json::from_str(&json).with_context(|| format!("resim job {id} result_json"))?,
+        )),
+        Some(_) => Ok(None),
+    }
+}
+
+#[async_trait]
+impl Resim for ExternalResim {
+    async fn check(&self, slp: &Path, replay_last_frame: i32) -> ResimOutcome {
+        let task = tokio::task::try_id();
+        if let Some(task) = task {
+            self.builds().remove(&task);
+        }
+        let Some(db) = self.db.get() else {
+            return ResimOutcome::Unavailable("external verifier not attached to a store".into());
+        };
+        match self.run_job(db, slp, replay_last_frame).await {
+            Ok(Some(VerifyResult { outcome, build })) => {
+                if let Some(task) = task {
+                    self.builds().insert(task, build);
+                }
+                outcome
+            }
+            Ok(None) => ResimOutcome::Unavailable("no verifier".into()),
+            Err(e) => ResimOutcome::Unavailable(format!("external verifier: {e:#}")),
+        }
+    }
+
+    fn build(&self) -> String {
+        tokio::task::try_id()
+            .and_then(|task| self.builds().remove(&task))
+            .unwrap_or_else(|| "external".into())
+    }
+
+    /// Also retires every job a previous run left unfinished. Nothing waits for them any
+    /// more (the waiting `check` died with that run, and `worker::recover` re-queues the game,
+    /// which queues a fresh job), so a verifier would only waste a run on them. They are
+    /// marked `done` without a result rather than deleted, like a job whose wait timed out:
+    /// the row stays as a record, and a late result for it is refused with 409.
+    async fn attach(&self, db: &SqlitePool) -> anyhow::Result<()> {
+        let retired = sqlx::query("UPDATE resim_jobs SET state = 'done' WHERE state != 'done'")
+            .execute(db)
+            .await
+            .context("retiring unfinished verifier jobs")?;
+        if retired.rows_affected() > 0 {
+            eprintln!(
+                "external verifier: retired {} job(s) left unfinished by a previous run",
+                retired.rows_affected()
+            );
+        }
+        let _ = self.db.set(db.clone());
+        Ok(())
+    }
+
+    fn result_posted(&self) {
+        self.posted.notify_waiters();
+    }
+}
+
 /// Reads the verdict from the last data row of an `slpcheck` CSV, locating columns by header name.
 pub fn outcome_from_csv(csv: &str, replay_last_frame: i32) -> ResimOutcome {
     let Some((header, row)) = last_row(csv) else {
@@ -285,10 +464,10 @@ async fn read_tail<R: AsyncRead + Unpin>(reader: Option<R>, cap: usize) -> Strin
 }
 
 /// A private directory under the system temp dir, removed on drop.
-struct ScratchDir(PathBuf);
+pub(crate) struct ScratchDir(PathBuf);
 
 impl ScratchDir {
-    fn create() -> io::Result<Self> {
+    pub(crate) fn create() -> io::Result<Self> {
         static COUNTER: AtomicU64 = AtomicU64::new(0);
         let n = COUNTER.fetch_add(1, Ordering::Relaxed);
         let path = std::env::temp_dir().join(format!(
@@ -300,7 +479,7 @@ impl ScratchDir {
         Ok(Self(path))
     }
 
-    fn path(&self) -> &Path {
+    pub(crate) fn path(&self) -> &Path {
         &self.0
     }
 }

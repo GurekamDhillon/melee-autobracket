@@ -4,9 +4,14 @@ use std::net::SocketAddr;
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::Context;
-use autobracket_server::{build_app, Config, NoResim};
+use autobracket_server::config::VerifierMode;
+use autobracket_server::resim::EXTERNAL_RESULT_TIMEOUT;
+use autobracket_server::{
+    build_app, verify_worker, Config, ExternalResim, NoResim, Resim, Slpcheck,
+};
 use clap::{Parser, Subcommand};
 use proto::SigningKey;
 
@@ -37,6 +42,23 @@ enum Cmd {
     },
     /// Organiser commands against a running server.
     Admin(admin_cli::AdminArgs),
+    /// Re-simulate replays for a server in external verifier mode: claim jobs, run the
+    /// engine locally, and post the results.
+    VerifyWorker {
+        /// Server base URL. Use `https://` in production: with plain `http://` the server's
+        /// answers (the jobs and their replays) can be tampered with on the way.
+        #[arg(long, value_name = "URL")]
+        server: String,
+        /// Secret key file written by `autobracket keygen`.
+        #[arg(long, value_name = "FILE")]
+        key_file: PathBuf,
+        #[arg(long, value_name = "PATH")]
+        engine: PathBuf,
+        #[arg(long, value_name = "PATH")]
+        iso: PathBuf,
+        #[arg(long, default_value_t = 120)]
+        timeout_secs: u64,
+    },
 }
 
 #[tokio::main]
@@ -45,12 +67,49 @@ async fn main() -> anyhow::Result<()> {
         Cmd::Serve { config } => serve(Config::load(&config)?).await,
         Cmd::Keygen { out } => keygen(&out),
         Cmd::Admin(args) => admin_cli::run(args).await,
+        Cmd::VerifyWorker {
+            server,
+            key_file,
+            engine,
+            iso,
+            timeout_secs,
+        } => {
+            let key = verify_worker::read_key_file(&key_file)?;
+            let engine = Slpcheck::new(engine, iso, Duration::from_secs(timeout_secs))
+                .await
+                .context("the engine cannot be run")?;
+            verify_worker::run(server, key, engine).await
+        }
     }
+}
+
+/// The verifier `cfg.verifier.mode` asks for.
+async fn resim_for(cfg: &Config) -> anyhow::Result<Arc<dyn Resim>> {
+    let v = &cfg.verifier;
+    Ok(match v.mode {
+        VerifierMode::InProcess => Arc::new(
+            Slpcheck::new(
+                v.engine.clone(),
+                v.iso.clone(),
+                Duration::from_secs(v.timeout_secs),
+            )
+            .await
+            .with_context(|| {
+                format!(
+                    "verifier.mode = \"in_process\" but the engine {} cannot be run",
+                    v.engine.display()
+                )
+            })?,
+        ),
+        VerifierMode::External => Arc::new(ExternalResim::new(EXTERNAL_RESULT_TIMEOUT)),
+        VerifierMode::Off => Arc::new(NoResim),
+    })
 }
 
 async fn serve(cfg: Config) -> anyhow::Result<()> {
     let bind = cfg.bind.clone();
-    let (app, _state) = build_app(cfg, Arc::new(NoResim)).await?;
+    let resim = resim_for(&cfg).await?;
+    let (app, _state) = build_app(cfg, resim).await?;
     let listener = tokio::net::TcpListener::bind(&bind)
         .await
         .with_context(|| format!("binding {bind}"))?;
