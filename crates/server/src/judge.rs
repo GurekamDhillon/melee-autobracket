@@ -15,7 +15,8 @@ pub enum Pre {
 
 /// Checks a replay against the ruleset. The first failing rule wins and is
 /// returned as its word: `players`, `teams`, `stage`, `stocks`, `timer`,
-/// `character`, `gecko`.
+/// `character`, `gecko` (a Gecko code list whose SHA-256 is not in
+/// `rules.allowed_gecko`).
 pub fn legality(f: &ReplayFacts, rules: &Ruleset) -> Result<(), &'static str> {
     // Exactly two players, both human, on ports 1 and 2. `players` lists every
     // non-Empty port, so any CPU, Demo or third human makes this fail.
@@ -45,8 +46,12 @@ pub fn legality(f: &ReplayFacts, rules: &Ruleset) -> Result<(), &'static str> {
     {
         return Err("character");
     }
-    if f.has_gecko {
-        return Err("gecko");
+    // No list (this project's own exports) is legal; a list must be on the
+    // allow-list, compared exactly (lowercase hex SHA-256).
+    if let Some(sha) = &f.gecko_sha256 {
+        if !rules.allowed_gecko.contains(sha) {
+            return Err("gecko");
+        }
     }
     Ok(())
 }

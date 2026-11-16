@@ -41,7 +41,14 @@ impl<'a> Events<'a> {
         let mut sizes = [None; 256];
         let (pairs, _) = table[1..].as_chunks::<3>();
         for &[code, hi, lo] in pairs {
-            sizes[usize::from(code)] = Some(u16::from_be_bytes([hi, lo]));
+            let size = u16::from_be_bytes([hi, lo]);
+            // The engine treats a size of 0 as "not listed" and stops walking there, so
+            // a 1-byte event would let us read events it never sees. Real files never
+            // list one.
+            if size == 0 {
+                return Err(ReplayError::BadEventSizes);
+            }
+            sizes[usize::from(code)] = Some(size);
         }
         Ok(Self {
             rest,
@@ -170,21 +177,37 @@ pub(crate) fn game_end(ev: &[u8]) -> Option<(u8, Option<u8>)> {
     Some((method, lras))
 }
 
-/// Whether this event carries a non-empty part of the Gecko List, either as a
-/// whole Gecko List event or as a Message Splitter chunk of one.
-pub(crate) fn carries_gecko(code: u8, ev: &[u8]) -> bool {
-    match code {
-        GECKO_LIST => ev.len() > 1,
-        MESSAGE_SPLITTER => {
-            u8_at(ev, 0x203) == Some(GECKO_LIST) && u16_at(ev, 0x201).is_some_and(|n| n > 0)
-        }
-        _ => false,
+/// Size of the fixed data block of a Message Splitter event (at 0x1).
+const SPLITTER_BLOCK: usize = 512;
+
+/// The part of the Gecko List this event carries, if it is a Message Splitter
+/// chunk of one: at least 0x205 bytes long, internal command (0x203) Gecko
+/// List, and the first `min(actual size at 0x201, 512)` bytes of its block.
+/// The list is these chunks concatenated in file order. This is exactly the
+/// engine's selection (`melee_data::slp`): a bare Gecko List event is ignored.
+pub(crate) fn gecko_chunk(code: u8, ev: &[u8]) -> Option<&[u8]> {
+    if code != MESSAGE_SPLITTER || ev.len() < 0x205 || ev[0x203] != GECKO_LIST {
+        return None;
     }
+    let n = usize::from(u16_at(ev, 0x201)?).min(SPLITTER_BLOCK);
+    ev.get(1..1 + n)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn size_table_rejects_zero_sizes() {
+        // Event Payloads listing 0x36 with size 2, then 0x42 with size 0.
+        let ok = [EVENT_PAYLOADS, 4, 0x36, 0, 2];
+        assert!(Events::new(&ok).is_ok());
+        let zero = [EVENT_PAYLOADS, 7, 0x36, 0, 2, 0x42, 0, 0, 0x42];
+        assert!(matches!(
+            Events::new(&zero),
+            Err(ReplayError::BadEventSizes)
+        ));
+    }
 
     #[test]
     fn pre_2_0_game_end_has_no_lras() {
@@ -206,16 +229,23 @@ mod tests {
     }
 
     #[test]
-    fn splitter_gecko_detection() {
+    fn splitter_gecko_chunk() {
         let mut ev = [0u8; 0x205];
         ev[0] = MESSAGE_SPLITTER;
-        assert!(!carries_gecko(MESSAGE_SPLITTER, &ev));
+        ev[1..9].copy_from_slice(b"ABCDEFGH");
+        assert_eq!(gecko_chunk(MESSAGE_SPLITTER, &ev), None); // another internal command
         ev[0x203] = GECKO_LIST;
-        assert!(!carries_gecko(MESSAGE_SPLITTER, &ev)); // actual size 0
+        assert_eq!(gecko_chunk(MESSAGE_SPLITTER, &ev), Some(&[][..])); // actual size 0
         ev[0x202] = 8;
-        assert!(carries_gecko(MESSAGE_SPLITTER, &ev));
-        assert!(!carries_gecko(MESSAGE_SPLITTER, &ev[..0x203]));
-        assert!(!carries_gecko(GECKO_LIST, &[GECKO_LIST]));
-        assert!(carries_gecko(GECKO_LIST, &[GECKO_LIST, 0]));
+        assert_eq!(gecko_chunk(MESSAGE_SPLITTER, &ev), Some(&b"ABCDEFGH"[..]));
+        // Shorter than the 0x205 bytes the spec requires (size table says so).
+        assert_eq!(gecko_chunk(MESSAGE_SPLITTER, &ev[..0x204]), None);
+        assert_eq!(gecko_chunk(MESSAGE_SPLITTER, &ev[..0x203]), None);
+        // An actual size beyond the 512-byte block is capped, never read past.
+        ev[0x201..0x203].copy_from_slice(&0xFFFFu16.to_be_bytes());
+        assert_eq!(gecko_chunk(MESSAGE_SPLITTER, &ev), Some(&ev[1..513]));
+        // A bare Gecko List event is not part of the list (neither is it for the engine).
+        assert_eq!(gecko_chunk(GECKO_LIST, &[GECKO_LIST, 0, 1, 2]), None);
+        assert_eq!(gecko_chunk(GAME_END, &ev), None);
     }
 }

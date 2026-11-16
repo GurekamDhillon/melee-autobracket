@@ -12,6 +12,7 @@ pub mod testkit;
 pub use raw::raw_element;
 
 use events::{Events, GAME_END, GAME_START, POST_FRAME};
+use sha2::{Digest, Sha256};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PlayerKind {
@@ -55,7 +56,12 @@ pub struct ReplayFacts {
     pub is_teams: bool,
     /// Non-Empty ports only, in port order.
     pub players: Vec<PlayerStart>,
+    /// Whether the replay carries a non-empty Gecko code list; always
+    /// `gecko_sha256.is_some()`.
     pub has_gecko: bool,
+    /// SHA-256 of the Gecko code list bytes (see [`gecko_fnv32`] for which
+    /// bytes), lowercase hex; `None` when there is no list. The legality identity.
+    pub gecko_sha256: Option<String>,
     /// Highest Post-Frame Update frame number (-123 is the first frame); `i32::MIN` if none.
     pub last_frame: i32,
     pub end: Option<GameEnd>,
@@ -87,7 +93,7 @@ pub fn parse(file: &[u8]) -> Result<ReplayFacts, ReplayError> {
         _ => return Err(ReplayError::MissingGameStart),
     };
 
-    let mut has_gecko = false;
+    let mut gecko = Vec::new();
     let mut last_frame = i32::MIN;
     let mut end = None;
     // Latest leader update per player index: (frame, stocks, percent).
@@ -115,7 +121,11 @@ pub fn parse(file: &[u8]) -> Result<ReplayFacts, ReplayError> {
                     });
                 }
             }
-            _ => has_gecko |= events::carries_gecko(code, ev),
+            _ => {
+                if let Some(chunk) = events::gecko_chunk(code, ev) {
+                    gecko.extend_from_slice(chunk);
+                }
+            }
         }
     }
 
@@ -137,11 +147,40 @@ pub fn parse(file: &[u8]) -> Result<ReplayFacts, ReplayError> {
         timer_secs: start.timer_secs,
         is_teams: start.is_teams,
         players: start.players,
-        has_gecko,
+        has_gecko: !gecko.is_empty(),
+        gecko_sha256: (!gecko.is_empty()).then(|| hex(&Sha256::digest(&gecko))),
         last_frame,
         end,
         finals,
     })
+}
+
+/// The engine's display hash of the replay's Gecko code list, as `slpcheck`
+/// prints it in its `gecko_hash` CSV column: FNV-1a 64-bit over the list bytes,
+/// truncated to the low 32 bits, 8 lowercase hex digits. `None` when there is
+/// no list. For display and cross-checking only, never for legality (use
+/// [`ReplayFacts::gecko_sha256`]).
+///
+/// The list bytes: walking the `raw` element's events in file order, every
+/// Message Splitter event (0x10) of at least 0x205 bytes whose internal command
+/// (0x203) is Gecko List (0x3D) contributes bytes `1..1 + min(size at 0x201, 512)`.
+/// Errors when the event stream cannot be walked to its end; unlike [`parse`]
+/// it needs no Game Start.
+pub fn gecko_fnv32(file: &[u8]) -> Result<Option<String>, ReplayError> {
+    let mut hash = 0xcbf2_9ce4_8422_2325u64;
+    let mut any = false;
+    for event in Events::new(raw_element(file)?)? {
+        let (code, ev) = event?;
+        for &b in events::gecko_chunk(code, ev).unwrap_or_default() {
+            hash = (hash ^ u64::from(b)).wrapping_mul(0x0100_0000_01b3);
+            any = true;
+        }
+    }
+    Ok(any.then(|| format!("{:08x}", hash as u32)))
+}
+
+fn hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
 /// The winning port of a 1v1 between two humans, or `None` when the replay

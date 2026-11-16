@@ -37,7 +37,7 @@ pub struct SlpBuilder {
     timer_secs: u32,
     stocks: u8,
     teams: bool,
-    gecko: bool,
+    gecko: Vec<u8>,
     players: Vec<(u8, u8, PlayerKind)>,
     extra: Vec<(u8, Vec<u8>)>,
     frames: Vec<Frame>,
@@ -64,7 +64,7 @@ impl SlpBuilder {
             timer_secs: 480,
             stocks: 4,
             teams: false,
-            gecko: false,
+            gecko: Vec::new(),
             players: Vec::new(),
             extra: Vec::new(),
             frames: Vec::new(),
@@ -89,9 +89,15 @@ impl SlpBuilder {
         self.teams = teams;
         self
     }
-    /// Emit a non-empty Gecko List (as Message Splitter chunks, like real files).
-    pub fn gecko(mut self, gecko: bool) -> Self {
-        self.gecko = gecko;
+    /// Emit a small non-empty Gecko List (`true`) or none (`false`).
+    pub fn gecko(self, gecko: bool) -> Self {
+        self.gecko_bytes(if gecko { GECKO_CODES } else { &[] })
+    }
+    /// Emit exactly these Gecko List bytes, as Message Splitter chunks of up to
+    /// 512 bytes each like real files (so a longer list spans several events).
+    /// Empty means no list.
+    pub fn gecko_bytes(mut self, list: &[u8]) -> Self {
+        self.gecko = list.to_vec();
         self
     }
     /// Occupy a 1-based port. Unset ports are Empty.
@@ -174,16 +180,14 @@ impl SlpBuilder {
         }
 
         s.extend(self.game_start());
-        if self.gecko {
-            for (i, chunk) in GECKO_CODES.chunks(SPLITTER_BLOCK).enumerate() {
-                let mut ev = vec![0u8; 1 + SPLITTER_SIZE];
-                ev[0] = MESSAGE_SPLITTER;
-                ev[1..1 + chunk.len()].copy_from_slice(chunk);
-                ev[0x201..0x203].copy_from_slice(&(chunk.len() as u16).to_be_bytes());
-                ev[0x203] = GECKO_LIST;
-                ev[0x204] = u8::from((i + 1) * SPLITTER_BLOCK >= GECKO_CODES.len());
-                s.extend(ev);
-            }
+        for (i, chunk) in self.gecko.chunks(SPLITTER_BLOCK).enumerate() {
+            let mut ev = vec![0u8; 1 + SPLITTER_SIZE];
+            ev[0] = MESSAGE_SPLITTER;
+            ev[1..1 + chunk.len()].copy_from_slice(chunk);
+            ev[0x201..0x203].copy_from_slice(&(chunk.len() as u16).to_be_bytes());
+            ev[0x203] = GECKO_LIST;
+            ev[0x204] = u8::from((i + 1) * SPLITTER_BLOCK >= self.gecko.len());
+            s.extend(ev);
         }
         for (code, payload) in &self.extra {
             s.push(*code);
