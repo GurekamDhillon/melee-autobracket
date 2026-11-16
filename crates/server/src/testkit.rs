@@ -115,6 +115,7 @@ impl TestApp {
             name: "Weekly".into(),
             format,
             ruleset: None,
+            best_of: None,
         };
         let res = self.as_to().post_json("/v1/admin/events", &req).await;
         assert_eq!(res.status(), reqwest::StatusCode::CREATED, "creating event");

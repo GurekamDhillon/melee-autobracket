@@ -228,11 +228,22 @@ async fn replay_voids_game_and_reopens_set() {
     conflict(&app, event, 0, 1, &ps[0], &ps[1]).await;
     assert_eq!(next(&ps[0], event).await, Next::Review { set_id: 0 });
     let item = queue(&app).await[0].id;
+    // A second open item on the same set is closed by the same replay.
+    sqlx::query(
+        "INSERT INTO queue (event_id, set_id, game_id, reason, state, created_at)
+         VALUES (?, 0, NULL, 'extra', 'open', 0)",
+    )
+    .bind(event)
+    .execute(&app.state.db)
+    .await
+    .unwrap();
+    assert_eq!(queue(&app).await.len(), 2);
 
     assert_eq!(
         resolve(&app, item, &Resolve::Replay).await,
         StatusCode::NO_CONTENT
     );
+    assert!(queue(&app).await.is_empty());
     assert_eq!(game_states(&app, event, 0).await, vec!["void"]);
     assert_eq!(set_row(&app, event, 0).await, ("ready".into(), 0, 0));
     match next(&ps[0], event).await {
@@ -690,9 +701,91 @@ async fn late_noncounting_verdict_does_not_reopen_set() {
     assert_eq!(judge_due(&app.state).await.unwrap(), 0);
 }
 
+/// A server ruleset that differs from the protocol default.
+fn configured_ruleset(c: &mut autobracket_server::Config) {
+    c.ruleset.legal_stages = vec![32];
+    c.ruleset.stocks = 3;
+    c.ruleset.best_of_finals = 7;
+}
+
+async fn create(app: &TestApp, body: Value) -> (StatusCode, Value) {
+    let res = app.as_to().post_json("/v1/admin/events", &body).await;
+    let status = res.status();
+    let body: Value = res.json().await.unwrap();
+    if status != StatusCode::CREATED {
+        return (status, body);
+    }
+    let view: Value = app
+        .as_to()
+        .get(&format!("/v1/events/{}", body["id"]))
+        .await
+        .json()
+        .await
+        .unwrap();
+    (status, view["ruleset"].clone())
+}
+
+#[tokio::test]
+async fn best_of_overrides_configured_ruleset() {
+    let app = TestApp::spawn(configured_ruleset).await;
+    let base = json!({ "name": "W", "format": "SingleElim", "ruleset": null });
+
+    let mut req = base.clone();
+    req["best_of"] = json!(5);
+    let (status, ruleset) = create(&app, req).await;
+    assert_eq!(status, StatusCode::CREATED);
+    assert_eq!(ruleset["best_of"], 5);
+    assert_eq!(ruleset["best_of_finals"], 7);
+    assert_eq!(ruleset["legal_stages"], json!([32]));
+    assert_eq!(ruleset["stocks"], 3);
+
+    // Without `best_of` the configured ruleset is used as is.
+    let (status, ruleset) = create(&app, base.clone()).await;
+    assert_eq!(status, StatusCode::CREATED);
+    assert_eq!(ruleset["best_of"], 3);
+    assert_eq!(ruleset["legal_stages"], json!([32]));
+
+    // A supplied ruleset is the base `best_of` overrides.
+    let mut req = base.clone();
+    req["ruleset"] = json!({ "stocks": 2, "best_of": 3 });
+    req["best_of"] = json!(1);
+    let (status, ruleset) = create(&app, req).await;
+    assert_eq!(status, StatusCode::CREATED);
+    assert_eq!(ruleset["best_of"], 1);
+    assert_eq!(ruleset["stocks"], 2);
+
+    for n in [0, 4] {
+        let mut req = base.clone();
+        req["best_of"] = json!(n);
+        assert_eq!(
+            create(&app, req).await,
+            (
+                StatusCode::BAD_REQUEST,
+                json!({ "error": "best_of must be odd" })
+            )
+        );
+    }
+    for (field, n) in [("best_of", 2), ("best_of_finals", 0), ("best_of_finals", 6)] {
+        let mut req = base.clone();
+        req["ruleset"] = json!({ field: n });
+        assert_eq!(
+            create(&app, req).await,
+            (
+                StatusCode::BAD_REQUEST,
+                json!({ "error": format!("{field} must be odd") })
+            )
+        );
+    }
+    let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM events")
+        .fetch_one(&app.state.db)
+        .await
+        .unwrap();
+    assert_eq!(count, 3);
+}
+
 #[tokio::test]
 async fn cli_creates_event() {
-    let app = TestApp::spawn(|_| {}).await;
+    let app = TestApp::spawn(configured_ruleset).await;
     let key_file = app.dir.path().join("to.key");
     std::fs::write(&key_file, format!("{}\n", hex::encode(app.to.to_bytes()))).unwrap();
     let out = tokio::process::Command::new(env!("CARGO_BIN_EXE_autobracket"))
@@ -706,7 +799,7 @@ async fn cli_creates_event() {
             "--format",
             "double",
             "--best-of",
-            "1",
+            "5",
         ])
         .output()
         .await
@@ -728,8 +821,10 @@ async fn cli_creates_event() {
         .json()
         .await
         .unwrap();
-    assert_eq!(view["ruleset"]["best_of"], 1);
-    assert_eq!(view["ruleset"]["best_of_finals"], 5);
+    assert_eq!(view["ruleset"]["best_of"], 5);
+    assert_eq!(view["ruleset"]["best_of_finals"], 7);
+    assert_eq!(view["ruleset"]["legal_stages"], json!([32]));
+    assert_eq!(view["ruleset"]["stocks"], 3);
 
     // A refused call prints the error body to stderr and exits 1.
     let out = tokio::process::Command::new(env!("CARGO_BIN_EXE_autobracket"))

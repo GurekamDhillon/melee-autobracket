@@ -498,8 +498,9 @@ impl From<ResolveError> for ApiError {
 /// - `Award { slot }`: the set's games in review become `void`, its open items are resolved,
 ///   and the set is awarded to `slot`. On a set already decided for `slot` this only
 ///   acknowledges the item; one decided the other way is a conflict.
-/// - `Replay`: the item's game becomes `void` and the set goes back to `ready` with no room
-///   code, so the same game number is played again. Wins are unchanged.
+/// - `Replay`: the set's games in review become `void`, its open items are resolved, and the
+///   set goes back to `ready` with no room code, so the same game number is played again.
+///   Wins are unchanged.
 /// - `Dq { slot }`: the entrant in `slot` is disqualified, and every Ready set holding a
 ///   disqualified entrant (this one included) is awarded to the opponent, which also
 ///   decides sets that become Ready later.
@@ -521,12 +522,12 @@ pub async fn resolve_queue_item(
     }))?;
 
     let mut tx = begin_write(&st.db).await?;
-    let row: Option<(i64, i64, Option<i64>, String)> =
-        sqlx::query_as("SELECT event_id, set_id, game_id, state FROM queue WHERE id = ?")
+    let row: Option<(i64, i64, String)> =
+        sqlx::query_as("SELECT event_id, set_id, state FROM queue WHERE id = ?")
             .bind(item_id)
             .fetch_optional(&mut *tx)
             .await?;
-    let (event_id, set_id, game_id, state) = row.ok_or(ResolveError::NoSuchItem)?;
+    let (event_id, set_id, state) = row.ok_or(ResolveError::NoSuchItem)?;
     if state != "open" {
         return Err(ResolveError::AlreadyResolved);
     }
@@ -553,12 +554,7 @@ pub async fn resolve_queue_item(
             if set.state != SetState::Ready {
                 return Err(ResolveError::Conflict("set is already decided"));
             }
-            if let Some(game_id) = game_id {
-                sqlx::query("UPDATE games SET state = 'void' WHERE id = ? AND state = 'review'")
-                    .bind(game_id)
-                    .execute(&mut *tx)
-                    .await?;
-            }
+            close_set_items(&mut tx, event_id, set_id, &resolution).await?;
             sqlx::query(
                 "UPDATE sets SET state = 'ready', room_code = NULL
                  WHERE event_id = ? AND set_id = ?",

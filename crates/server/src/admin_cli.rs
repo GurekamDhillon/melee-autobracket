@@ -8,7 +8,7 @@ use anyhow::Context;
 use autobracket_server::db::now_unix;
 use bracket::Format;
 use clap::{Args, Subcommand, ValueEnum};
-use proto::{sign_request, EventCreateReq, RekeyReq, Resolve, Ruleset, SigningKey};
+use proto::{sign_request, EventCreateReq, RekeyReq, Resolve, SigningKey};
 use reqwest::Method;
 use serde::Serialize;
 
@@ -51,7 +51,7 @@ enum EventCmd {
         name: String,
         #[arg(long, value_enum)]
         format: FormatArg,
-        /// Games per set outside the grand final (other rules keep their defaults).
+        /// Games per set outside the grand final (odd); the rest of the server's ruleset applies.
         #[arg(long, value_name = "N")]
         best_of: Option<u8>,
     },
@@ -165,10 +165,9 @@ fn request(cmd: AdminCmd) -> anyhow::Result<(Method, String, Vec<u8>)> {
                     FormatArg::Single => Format::SingleElim,
                     FormatArg::Double => Format::DoubleElim,
                 },
-                ruleset: best_of.map(|best_of| Ruleset {
-                    best_of,
-                    ..Ruleset::default()
-                }),
+                // The server applies `best_of` to its own configured ruleset.
+                ruleset: None,
+                best_of,
             };
             (Method::POST, "/v1/admin/events".into(), json(&req)?)
         }
