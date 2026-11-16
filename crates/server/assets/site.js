@@ -243,6 +243,7 @@ const AB = (function () {
     box.append(el("p", null, "Sign-ups are open. Joining from inside the game is coming soon."));
     const testers = el("details");
     testers.append(el("summary", null, "For testers: join from the command line"));
+    testers.append(el("p", null, "The tester build is not public yet. Ask an organiser for it, then run:"));
     testers.append(el("code", null, "autobracket-client register --server " + location.origin + " --tag YOURTAG"));
     testers.append(el("code", null, "autobracket-client signup " + eventId));
     box.append(testers);

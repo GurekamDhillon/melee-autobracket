@@ -504,6 +504,7 @@ async fn how_to_enter_is_plain_with_commands_for_testers() {
             "Sign-ups are open. Joining from inside the game is coming soon.",
             r#"el("details")"#,
             r#"el("summary", null, "For testers: join from the command line")"#,
+            "Ask an organiser for it",
             "autobracket-client register --server \" + location.origin + \" --tag YOURTAG",
             "autobracket-client signup \" + eventId",
         ] {
