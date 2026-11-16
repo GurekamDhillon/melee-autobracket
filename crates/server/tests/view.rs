@@ -378,6 +378,149 @@ async fn home_page_has_its_sections() {
     }
 }
 
+/// The "A vs B · round · score" line comes from one shared helper: both pages that list live
+/// sets call `AB.liveSetLines`, and the line's format appears once per page (in the shared
+/// script), never again in the page's own.
+#[tokio::test]
+async fn live_set_lines_are_built_once() {
+    let app = TestApp::spawn(|_| {}).await;
+    for path in ["/", "/stream"] {
+        let body = fetch(&app, path).await.text().await.unwrap();
+        assert!(body.contains("liveSetLines(view)"), "{path}");
+        assert_eq!(
+            body.matches(r#"" vs ""#).count(),
+            1,
+            "{path}: one line builder"
+        );
+        assert_eq!(body.matches("function liveSetLines").count(), 1, "{path}");
+    }
+}
+
+/// A `/#N` visit leaves the page before it polls anything.
+#[tokio::test]
+async fn home_hash_redirect_returns_early() {
+    let app = TestApp::spawn(|_| {}).await;
+    let body = fetch(&app, "/").await.text().await.unwrap();
+    assert!(body.contains("location.replace(\"/events/\" + m[1]);\n    return;\n  }"));
+}
+
+/// Every hover lift added by the public pages is neutralised under reduced motion.
+#[tokio::test]
+async fn reduced_motion_removes_every_hover_lift() {
+    let app = TestApp::spawn(|_| {}).await;
+    let css = fetch(&app, "/").await.text().await.unwrap();
+    let reduced = css.split("prefers-reduced-motion: reduce").nth(1).unwrap();
+    for selector in [
+        ".set:hover",
+        ".nav a:hover",
+        "a.card:hover",
+        ".layout button:hover",
+        ".jump:hover",
+        "option:hover",
+        ".pill:hover, .pill:focus-visible { translate: none; }",
+    ] {
+        assert!(
+            reduced.contains(selector),
+            "{selector} under reduced motion"
+        );
+    }
+}
+
+/// A start time of 0 is "not set", like a `created_at` of 0: every page that shows an
+/// event's time goes through the shared `knownTime` / `eventDate` helpers and never
+/// tests `starts_at` for null or number alone.
+#[tokio::test]
+async fn zero_start_time_is_unknown_everywhere() {
+    let app = TestApp::spawn(|_| {}).await;
+    let event = app.create_event(Format::SingleElim).await;
+    app.player("Mango").await;
+    let site = fetch(&app, "/").await.text().await.unwrap();
+    assert!(
+        site.contains("function knownTime(t) {\n    return typeof t === \"number\" && t > 0;\n  }")
+    );
+    assert!(site.contains("function eventDate(sum) {"));
+    for path in [
+        "/".to_owned(),
+        "/schedule".to_owned(),
+        "/history".to_owned(),
+        "/players/Mango".to_owned(),
+        format!("/events/{event}"),
+    ] {
+        let body = fetch(&app, &path).await.text().await.unwrap();
+        for bad in [
+            "starts_at ??",
+            "starts_at === null",
+            "typeof ev.starts_at",
+            "typeof sum.starts_at",
+            "typeof summary.starts_at",
+            "typeof a.starts_at",
+        ] {
+            assert!(!body.contains(bad), "{path} has {bad:?}");
+        }
+        assert!(
+            body.contains("knownTime(") || body.contains("eventDate("),
+            "{path} uses the shared helpers"
+        );
+    }
+}
+
+/// Wide screens: the landing's three sections sit side by side (two when nothing is live),
+/// and row lists stop at a readable width.
+#[tokio::test]
+async fn wide_layouts_use_the_width() {
+    let app = TestApp::spawn(|_| {}).await;
+    let css = fetch(&app, "/").await.text().await.unwrap();
+    let wide = css.split("@media (min-width: 75rem)").nth(1).unwrap();
+    assert!(wide.contains(".home { grid-template-columns: repeat(3, minmax(0, 1fr)); }"));
+    assert!(wide.contains(
+        ".home:has(#live[hidden]) { grid-template-columns: repeat(2, minmax(0, 1fr)); }"
+    ));
+    assert!(wide.contains("#live { grid-column: auto; }"));
+    assert!(css.contains(".rows { display: grid; gap: var(--sp-2); max-width: 48rem;"));
+}
+
+/// A description that ends in a full stop is not followed by a second one before "Champion".
+#[tokio::test]
+async fn event_meta_joins_sentences_once() {
+    let app = TestApp::spawn(|_| {}).await;
+    let event = app.create_event(Format::SingleElim).await;
+    let body = fetch(&app, &format!("/events/{event}"))
+        .await
+        .text()
+        .await
+        .unwrap();
+    assert!(body.contains("if (sum.description) text += \". \" + sum.description;"));
+    assert!(body.contains("meta.append((/[.!?]$/.test(text) ? \" \" : \". \") + \"Champion: \");"));
+    assert!(!body.contains("meta.append(\". Champion: \")"));
+}
+
+/// Players read plain words; the client commands sit in a collapsed block for testers.
+#[tokio::test]
+async fn how_to_enter_is_plain_with_commands_for_testers() {
+    let app = TestApp::spawn(|_| {}).await;
+    for path in ["/", "/schedule"] {
+        let body = fetch(&app, path).await.text().await.unwrap();
+        for needle in [
+            "Sign-ups are open. Joining from inside the game is coming soon.",
+            r#"el("details")"#,
+            r#"el("summary", null, "For testers: join from the command line")"#,
+            "autobracket-client register --server \" + location.origin + \" --tag YOURTAG",
+            "autobracket-client signup \" + eventId",
+        ] {
+            assert!(body.contains(needle), "{path} has {needle:?}");
+        }
+        // The commands are appended to the details element, not the sticker itself.
+        let howto = body.split("function howToEnter").nth(1).unwrap();
+        let howto = howto.split("return box;").next().unwrap();
+        assert_eq!(
+            howto.matches("testers.append(el(\"code\"").count(),
+            2,
+            "{path}"
+        );
+        assert!(!howto.contains("box.append(el(\"code\""), "{path}");
+    }
+}
+
 /// The font files the page's stylesheet asks for, as paths.
 fn font_paths(page: &str) -> Vec<&str> {
     const PREFIX: &str = "/assets/fonts/";

@@ -1,7 +1,7 @@
 // A player's profile: /players/{tag}. The tag in the path is matched in any case; the page
 // shows the canonical spelling the server answers with.
 (function () {
-  const { el, getJson, setNotice, ordinal, fmtDate } = AB;
+  const { el, getJson, setNotice, ordinal } = AB;
   const $ = (id) => document.getElementById(id);
 
   // The tag as typed in the address bar; a malformed escape is just an unknown player.
@@ -46,8 +46,7 @@
     const a = el("a", null, ev.name);
     a.href = AB.eventHref(ev.id);
     li.append(a);
-    const when = typeof ev.starts_at === "number" ? ev.starts_at : ev.created_at;
-    li.append(el("span", "num quiet", typeof when === "number" ? fmtDate(when) : ""));
+    li.append(el("span", "num quiet", AB.eventDate(ev) || ""));
     li.append(el("span", "num quiet", "seed " + (entry.seed + 1)));
     li.append(el("span", "num", outcome(entry)));
     li.append(el("span", "num", record(entry.sets)));

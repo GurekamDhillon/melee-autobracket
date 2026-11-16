@@ -513,7 +513,8 @@ a.card:hover, a.card:focus-visible { background: var(--accent); rotate: 0deg; tr
 .card .rows { margin: var(--sp-3) 0 var(--sp-2); }
 
 /* ---- rows: list rows for tables (players, placings, head to head) ---- */
-.rows { display: grid; gap: var(--sp-2); margin: 0 0 var(--sp-5); padding: 0; list-style: none; }
+/* Rows stop at a readable width; a wide screen does not stretch "Player … 2 1 2–1" across it. */
+.rows { display: grid; gap: var(--sp-2); max-width: 48rem; margin: 0 0 var(--sp-5); padding: 0; list-style: none; }
 .row-line {
   display: grid;
   grid-template-columns: minmax(0, 1fr) repeat(var(--cols, 3), auto);
@@ -566,6 +567,10 @@ a.card:hover, a.card:focus-visible { background: var(--accent); rotate: 0deg; tr
   rotate: 0.6deg;
 }
 .howto h2 { white-space: normal; margin-bottom: var(--sp-2); }
+.howto p { margin: 0; }
+/* The client commands, folded away for testers. */
+.howto details { margin-top: var(--sp-3); }
+.howto summary { cursor: pointer; color: var(--on-surface-quiet); font-size: 0.875rem; }
 .howto code {
   display: block;
   margin: var(--sp-2) 0 0;
@@ -619,6 +624,12 @@ a.card:hover, a.card:focus-visible { background: var(--accent); rotate: 0deg; tr
 }
 .home > section { min-width: 0; max-width: 44rem; }
 #live { grid-column: 1 / -1; max-width: none; }
+/* Wide: the three sections side by side; two when nothing is live, so no column stays empty. */
+@media (min-width: 75rem) {
+  .home { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+  .home:has(#live[hidden]) { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  #live { grid-column: auto; }
+}
 .home h2 { white-space: normal; }
 h3 { margin: 0 0 var(--sp-1); font-family: var(--font-display); font-weight: 800; letter-spacing: -0.02em; font-size: 1.375rem; line-height: 1.15; }
 .home-card a:not(.pill) { color: inherit; }
@@ -713,4 +724,5 @@ h3 { margin: 0 0 var(--sp-1); font-family: var(--font-display); font-weight: 800
   .set:hover, .nav a:hover, .nav a:focus-visible, a.card:hover, a.card:focus-visible { translate: none; }
   .layout button:hover, .jump:hover, .layout button:focus-visible, .jump:focus-visible { translate: none; }
   option:hover, option:focus-visible { translate: none; }
+  .pill:hover, .pill:focus-visible { translate: none; }
 }
