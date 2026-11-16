@@ -151,7 +151,8 @@ The server refuses to start without an organiser key in `to_keys`, unless you se
 `allow_no_organiser = true` (then nobody can administer it). Unknown keys and bad values in
 the config, `[ruleset]` included, are start-up errors.
 
-Spectators open `http://YOUR-SERVER/` for the live bracket. For a public instance set
+Spectators open `http://YOUR-SERVER/` for the landing page, which lists the events, and the
+bracket page at `/events/{id}` for one of them. For a public instance set
 `require_invite = true` and hand each player a code from `autobracket admin ... invite new`;
 otherwise anyone can register keys and fill your events. Tags are unique regardless of case.
 
