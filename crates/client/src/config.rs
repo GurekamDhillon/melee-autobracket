@@ -1,5 +1,9 @@
 //! The client config file, `~/.config/autobracket/client.toml` unless `--config` names
 //! another. It holds the player's secret key, so it is only ever written with mode 0600.
+//!
+//! Relative `melee`, `iso` and `work_dir` paths in the file are relative to the directory
+//! the file is in; they are made absolute when it is loaded. A `melee` that is a bare name
+//! (no `/`) is looked up on `PATH` instead.
 
 use std::fmt;
 use std::fs::OpenOptions;
@@ -12,6 +16,34 @@ use anyhow::{bail, Context};
 use proto::SigningKey;
 use rand::rngs::OsRng;
 use serde::{Deserialize, Serialize};
+
+/// The comment block at the top of every config file written.
+const HEADER: &str = "\
+# autobracket-client config. It holds your secret key: keep it private.
+#
+# Paths: a relative `melee`, `iso` or `work_dir` is relative to the directory this file is
+# in. A `melee` with no `/` in it is looked up on PATH.
+#
+# No display (a server, or a machine without a desktop)? Create the config with
+# `autobracket-client init --headless`, which adds \"--headless\", \"--no-audio\" to
+# both host_args and join_args, or add those two arguments to both by hand.
+#
+# Opponent no-show: a newer engine can stop hosting when nobody joins within SECS seconds;
+# it then prints \"play: netplay: no opponent joined\" and exits 5. After two such runs
+# the client reports a no-show to the organiser. An engine without the flag refuses to
+# start (exit 2, and `play` stops with an error). To use it, add to host_args:
+#   \"--np-join-wait\", \"120\",
+#
+# Preset fighters and stage instead of netplay character select. Use it while character
+# select can crash both games (an engine bug in name entry): replace
+# \"--np-css\", \"--quit-after-matches\", \"1\" with
+#   host_args: \"--match\", \"<fighter>,<stage>\",   e.g. \"--match\", \"falcon,32\",
+#   join_args: \"--match\", \"<fighter>\",           e.g. \"--match\", \"fox\",
+
+";
+
+/// The arguments `init --headless` adds, for machines with no display or sound.
+pub const HEADLESS_ARGS: [&str; 2] = ["--headless", "--no-audio"];
 
 /// Picks the room code out of the host's stderr line
 /// `play: netplay host: MATCH CODE K7QX (give it to the other player)`.
@@ -118,15 +150,29 @@ impl ClientConfig {
     }
 
     /// Reads the config without checking `server`, for `register --server` to replace it.
+    /// Relative paths are resolved against the config file's directory.
     pub fn load_unchecked(path: &Path) -> anyhow::Result<Self> {
         let text = std::fs::read_to_string(path)
             .with_context(|| format!("reading {} (run `init` first?)", path.display()))?;
-        toml::from_str(&text).with_context(|| format!("parsing {}", path.display()))
+        let mut cfg: Self =
+            toml::from_str(&text).with_context(|| format!("parsing {}", path.display()))?;
+        let dir = path
+            .parent()
+            .filter(|d| !d.as_os_str().is_empty())
+            .unwrap_or(Path::new("."));
+        let dir = std::path::absolute(dir)
+            .with_context(|| format!("resolving the directory of {}", path.display()))?;
+        if cfg.melee.components().count() > 1 {
+            cfg.melee = dir.join(&cfg.melee);
+        }
+        cfg.iso = dir.join(&cfg.iso);
+        cfg.work_dir = dir.join(&cfg.work_dir);
+        Ok(cfg)
     }
 
     /// Writes the config with mode 0600, replacing any file already at `path`.
     pub fn save(&self, path: &Path) -> anyhow::Result<()> {
-        let text = toml::to_string(self).context("serialising config")?;
+        let text = HEADER.to_string() + &toml::to_string(self).context("serialising config")?;
         let dir = path
             .parent()
             .filter(|d| !d.as_os_str().is_empty())
@@ -182,15 +228,17 @@ fn xdg_dir(var: &str, under_home: &str) -> anyhow::Result<PathBuf> {
     Ok(PathBuf::from(home).join(under_home))
 }
 
-/// Writes a new config at `path` with a fresh key and the default engine arguments.
-/// `engine_build` is the first line of `{melee} version`. Refuses to replace an existing
-/// config (and its key) unless `force`.
+/// Writes a new config at `path` with a fresh key and the default engine arguments, plus
+/// [`HEADLESS_ARGS`] in both templates when `headless`. Relative paths are made absolute
+/// against the current directory. `engine_build` is the first line of `{melee} version`.
+/// Refuses to replace an existing config (and its key) unless `force`.
 pub fn init(
     path: &Path,
     melee: &Path,
     iso: &Path,
     work_dir: &Path,
     force: bool,
+    headless: bool,
 ) -> anyhow::Result<ClientConfig> {
     if !force && path.exists() {
         bail!(
@@ -199,16 +247,32 @@ pub fn init(
         );
     }
     let engine_build = engine_build(melee)?;
+    let melee = if melee.components().count() > 1 {
+        absolute(melee)?
+    } else {
+        melee.to_path_buf()
+    };
     let key = SigningKey::generate(&mut OsRng);
-    let cfg = ClientConfig::with_defaults(
+    let mut cfg = ClientConfig::with_defaults(
         hex::encode(key.to_bytes()),
         engine_build,
-        melee.to_path_buf(),
-        iso.to_path_buf(),
-        work_dir.to_path_buf(),
+        melee,
+        absolute(iso)?,
+        absolute(work_dir)?,
     );
+    if headless {
+        for args in [&mut cfg.host_args, &mut cfg.join_args] {
+            // After the `play` subcommand.
+            let at = 1.min(args.len());
+            args.splice(at..at, HEADLESS_ARGS.map(String::from));
+        }
+    }
     cfg.save(path)?;
     Ok(cfg)
+}
+
+fn absolute(path: &Path) -> anyhow::Result<PathBuf> {
+    std::path::absolute(path).with_context(|| format!("resolving {}", path.display()))
 }
 
 /// The first line of `{melee} version`.

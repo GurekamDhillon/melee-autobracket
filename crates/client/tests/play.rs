@@ -408,7 +408,22 @@ fn game_survives_the_engine_being_dropped() {
     let run = work.path().join("run-1");
 
     engine.host(&PARAMS).unwrap();
-    assert!(wait_for_file(&run.join("pgid"), Duration::from_secs(5)));
+    // The fake writes its pid files before this line, so once it is forwarded they are
+    // complete. Output is forwarded only while the engine exists, so dropping the engine
+    // any earlier could also miss the line.
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !output
+        .lock()
+        .unwrap()
+        .iter()
+        .any(|l| l == "fake: first line")
+    {
+        assert!(
+            Instant::now() < deadline,
+            "the first line was never forwarded"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
     assert_stderr_is_log(&run);
     // Its own process group, so Ctrl-C in the client's terminal does not reach it.
     assert_eq!(
@@ -548,7 +563,7 @@ fn init_writes_0600_config() {
     let iso = PathBuf::from("/isos/melee.iso");
     let work = dir.path().join("runs");
 
-    let cfg = config::init(&path, &fake_melee(), &iso, &work, false).unwrap();
+    let cfg = config::init(&path, &fake_melee(), &iso, &work, false, false).unwrap();
 
     let mode = std::fs::metadata(&path).unwrap().permissions().mode();
     assert_eq!(mode & 0o777, 0o600);
@@ -560,10 +575,10 @@ fn init_writes_0600_config() {
     cfg.signing_key().unwrap();
 
     let before = std::fs::read(&path).unwrap();
-    assert!(config::init(&path, &fake_melee(), &iso, &work, false).is_err());
+    assert!(config::init(&path, &fake_melee(), &iso, &work, false, false).is_err());
     assert_eq!(std::fs::read(&path).unwrap(), before, "not overwritten");
 
-    let forced = config::init(&path, &fake_melee(), &iso, &work, true).unwrap();
+    let forced = config::init(&path, &fake_melee(), &iso, &work, true, false).unwrap();
     assert_ne!(forced.secret_key_hex, cfg.secret_key_hex);
     let mode = std::fs::metadata(&path).unwrap().permissions().mode();
     assert_eq!(mode & 0o777, 0o600);

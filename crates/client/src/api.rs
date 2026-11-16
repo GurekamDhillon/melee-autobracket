@@ -136,6 +136,28 @@ impl Api {
             .map(drop)
     }
 
+    /// `POST /v1/sets/{event}/{set}/no-show`: the opponent never turned up. On success the
+    /// set goes to the organiser's review. The server answers `409` when the set is already
+    /// in review, not ready, or has a game in progress; a server without the route, `404`.
+    pub async fn report_no_show(
+        &self,
+        event: i64,
+        set: u32,
+        detail: Option<&str>,
+    ) -> anyhow::Result<()> {
+        #[derive(Serialize)]
+        struct NoShowReq<'a> {
+            #[serde(skip_serializing_if = "Option::is_none")]
+            detail: Option<&'a str>,
+        }
+        self.post_json(
+            &format!("/v1/sets/{event}/{set}/no-show"),
+            &NoShowReq { detail },
+        )
+        .await
+        .map(drop)
+    }
+
     /// `POST /v1/sets/{event}/{set}/games/{n}/replay`: uploads a raw `.slp`. Returns `202`
     /// when stored, `200` when the identical file was already stored.
     pub async fn upload_replay(

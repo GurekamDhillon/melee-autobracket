@@ -5,8 +5,9 @@ use anyhow::{bail, Context};
 use autobracket_client::api::{check_server_url, Api};
 use autobracket_client::config::{self, ClientConfig};
 use autobracket_client::engine::CommandEngine;
-use autobracket_client::play::{describe, play_event};
+use autobracket_client::play::{describe, play_event_until, PlayOptions};
 use clap::{Parser, Subcommand};
+use tokio::signal::unix::{signal, SignalKind};
 
 #[derive(Parser)]
 #[command(
@@ -24,6 +25,11 @@ struct Cli {
 #[derive(Subcommand)]
 enum Cmd {
     /// Write a new config with a fresh signing key; prints the public key.
+    ///
+    /// Relative paths given here are made absolute. Paths edited into the config by hand
+    /// may be relative to the config file's directory. The config's opening comments show
+    /// optional engine arguments: `--np-join-wait` (no-show detection) and a preset
+    /// `--match` start instead of netplay character select.
     Init {
         /// The `melee` engine binary.
         #[arg(long)]
@@ -36,6 +42,10 @@ enum Cmd {
         /// Replace an existing config, and its key.
         #[arg(long)]
         force: bool,
+        /// For a machine with no display: add `--headless --no-audio` to both engine
+        /// argument templates (`host_args` and `join_args`).
+        #[arg(long)]
+        headless: bool,
     },
     /// Register your key under a tag on a server, and remember the server.
     Register {
@@ -53,6 +63,22 @@ enum Cmd {
     /// Show an event and what you should do next in it.
     Status { event: i64 },
     /// Play your sets in an event until you are out of it.
+    ///
+    /// Each game runs in its own `{work_dir}/run-{n}/` directory. Ctrl-C or SIGTERM stops
+    /// `play` but not a game in progress: `play` prints where its replay goes and the
+    /// `upload` command for it, then exits with status 130 (SIGINT) or 143 (SIGTERM).
+    ///
+    /// If your opponent never joins: with an engine that supports it, add
+    /// `"--np-join-wait", "SECS"` to `host_args` in the config. The game then stops hosting
+    /// after SECS seconds with nobody joined (printing `play: netplay: no opponent joined`
+    /// and exiting 5), and after two such runs in a row `play` reports a no-show to the
+    /// organiser and waits for their decision. An engine too old for the flag exits 2.
+    ///
+    /// `play` stops at once, reporting nothing, when the engine's exit says your own setup
+    /// is broken: 4 (its disc check failed: check `iso`) or 2 (it refused its arguments:
+    /// check `host_args` / `join_args`). A game that keeps ending without a replay for
+    /// other reasons is reported to the organiser as this client failing, before `play`
+    /// gives up.
     Play {
         event: i64,
         /// Seconds between checks with the server.
@@ -81,12 +107,13 @@ async fn main() -> anyhow::Result<()> {
             iso,
             work_dir,
             force,
+            headless,
         } => {
             let work_dir = match work_dir {
                 Some(d) => d,
                 None => config::default_work_dir()?,
             };
-            let cfg = config::init(&path, &melee, &iso, &work_dir, force)?;
+            let cfg = config::init(&path, &melee, &iso, &work_dir, force, headless)?;
             let key = cfg.signing_key()?;
             println!("Wrote {}", path.display());
             println!("Engine build: {}", cfg.engine_build);
@@ -137,7 +164,23 @@ async fn main() -> anyhow::Result<()> {
             let cfg = load(&path)?;
             let api = api(&cfg)?;
             let mut engine = CommandEngine::new(&cfg)?;
-            play_event(&api, &mut engine, event, Duration::from_secs(poll_secs)).await?;
+            // Registered before playing, so an early signal is not missed.
+            let mut sigint = signal(SignalKind::interrupt()).context("catching SIGINT")?;
+            let mut sigterm = signal(SignalKind::terminate()).context("catching SIGTERM")?;
+            let mut exit_status = 0;
+            let stop = async {
+                exit_status = tokio::select! {
+                    _ = sigint.recv() => 130,
+                    _ = sigterm.recv() => 143,
+                };
+                eprintln!("Interrupted: stopping `play` (a running game is left running)");
+            };
+            let opts = PlayOptions::new(Duration::from_secs(poll_secs));
+            let ended = play_event_until(&api, &mut engine, event, &opts, stop).await?;
+            if ended.is_none() {
+                drop(engine);
+                std::process::exit(exit_status);
+            }
         }
         Cmd::Upload {
             event,

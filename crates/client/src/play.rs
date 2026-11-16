@@ -5,12 +5,12 @@ use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-use anyhow::{bail, Context};
+use anyhow::Context;
 use proto::{Next, Role};
 use reqwest::StatusCode;
 
 use crate::api::{is_retryable, Api, ApiError};
-use crate::engine::{Engine, GameParams};
+use crate::engine::{Engine, GameParams, RunExit, DISC_CHECK_EXIT_CODE, USAGE_EXIT_CODE};
 
 /// How long the host waits for the game to print its room code.
 const ROOM_CODE_WAIT: Duration = Duration::from_secs(60);
@@ -18,6 +18,9 @@ const ROOM_CODE_WAIT: Duration = Duration::from_secs(60);
 const ROOM_CODE_SLICE: Duration = Duration::from_millis(50);
 /// Consecutive runs of one game that may end without a replay before `play` gives up.
 pub const MAX_FAILED_RUNS: u32 = 4;
+/// Consecutive host runs of one game that may end with nobody joining before `play`
+/// reports a no-show.
+pub const NO_SHOW_STRIKES: u32 = 2;
 
 /// Timing of the play loop.
 #[derive(Clone, Debug)]
@@ -46,6 +49,7 @@ impl PlayOptions {
 struct Launch {
     set_id: u32,
     game_no: u8,
+    host: bool,
 }
 
 /// A replay collected from a finished run and not yet accepted or refused by the server.
@@ -123,39 +127,106 @@ impl Net {
     }
 }
 
-/// Counts consecutive runs of one game that ended without a replay, and spaces out
-/// relaunches after them.
+/// How a finished run ended, as far as relaunching is concerned.
+enum Outcome {
+    Replay,
+    /// A host run that ended because nobody joined.
+    NoOpponent,
+    /// Ended without a replay for any other reason; how it exited, if known.
+    Failed(Option<RunExit>),
+}
+
+impl Outcome {
+    fn of(launch: Launch, produced_replay: bool, exit: Option<RunExit>) -> Self {
+        if produced_replay {
+            Outcome::Replay
+        } else if launch.host && exit.is_some_and(|e| e.no_opponent) {
+            Outcome::NoOpponent
+        } else {
+            Outcome::Failed(exit)
+        }
+    }
+}
+
+/// What to do about the set after a run.
+enum After {
+    Continue,
+    /// Report a no-show with this detail, then keep going.
+    ReportNoShow(String),
+    /// Report the stuck set with `detail`, then end `play` with `error`.
+    GiveUp {
+        error: anyhow::Error,
+        detail: String,
+    },
+}
+
+/// Counts consecutive runs of one game that ended without a replay (and, separately, host
+/// runs that nobody joined), and spaces out relaunches after them.
 struct Failures {
     base: Duration,
     game: Option<(u32, u8)>,
     count: u32,
+    no_shows: u32,
     retry_at: Option<Instant>,
 }
 
 impl Failures {
-    /// Records how a run of `launch` ended. Errors after [`MAX_FAILED_RUNS`] in a row.
-    fn record(&mut self, launch: Launch, produced_replay: bool, relay: &str) -> anyhow::Result<()> {
+    /// Records how a run of `launch` ended: a no-show to report after [`NO_SHOW_STRIKES`]
+    /// runs nobody joined, and giving up after [`MAX_FAILED_RUNS`] other failed runs in a row.
+    fn record(&mut self, launch: Launch, outcome: Outcome, relay: &str) -> After {
         let game = (launch.set_id, launch.game_no);
-        if produced_replay {
-            self.game = None;
-            self.count = 0;
-            self.retry_at = None;
-            return Ok(());
-        }
         if self.game != Some(game) {
             self.game = Some(game);
             self.count = 0;
+            self.no_shows = 0;
         }
+        let exit = match outcome {
+            Outcome::Replay => {
+                self.game = None;
+                self.count = 0;
+                self.no_shows = 0;
+                self.retry_at = None;
+                return After::Continue;
+            }
+            Outcome::NoOpponent => {
+                self.no_shows += 1;
+                self.retry_at = Some(Instant::now() + self.base);
+                if self.no_shows >= NO_SHOW_STRIKES {
+                    self.no_shows = 0;
+                    return After::ReportNoShow(format!(
+                        "no opponent joined ({NO_SHOW_STRIKES} attempts)"
+                    ));
+                }
+                println!(
+                    "Nobody joined game {} ({} of {NO_SHOW_STRIKES}); hosting again in {:?}",
+                    launch.game_no, self.no_shows, self.base
+                );
+                return After::Continue;
+            }
+            Outcome::Failed(exit) => exit,
+        };
+        self.no_shows = 0;
         self.count += 1;
         if self.count >= MAX_FAILED_RUNS {
-            bail!(
-                "the game ended without a replay {MAX_FAILED_RUNS} times in a row (set {}, \
-                 game {}). Check that `melee` and `iso` in the client config point at a working \
-                 engine and game image, and that the relay {relay} is reachable, then run \
-                 `play` again",
-                launch.set_id,
-                launch.game_no
-            );
+            let last = match exit.and_then(|e| e.code) {
+                Some(code) => format!("last exit code {code}"),
+                None => "no exit code from the last run".to_string(),
+            };
+            return After::GiveUp {
+                error: anyhow::anyhow!(
+                    "the game ended without a replay {MAX_FAILED_RUNS} times in a row (set {}, \
+                     game {}). Check that `melee` and `iso` in the client config point at a \
+                     working engine and game image, and that the relay {relay} is reachable, \
+                     then run `play` again",
+                    launch.set_id,
+                    launch.game_no
+                ),
+                // Worded as this client's failure, not the opponent's.
+                detail: format!(
+                    "client could not complete a game: {MAX_FAILED_RUNS} runs without a \
+                     replay, {last}"
+                ),
+            };
         }
         let wait = self.base * 3u32.pow(self.count - 1);
         self.retry_at = Some(Instant::now() + wait);
@@ -163,12 +234,114 @@ impl Failures {
             "The game ended without a replay ({} of {MAX_FAILED_RUNS}); trying again in {wait:?}",
             self.count
         );
-        Ok(())
+        After::Continue
     }
 
     /// Whether a relaunch of this game must still wait.
     fn waiting(&self, set_id: u32, game_no: u8) -> bool {
         self.game == Some((set_id, game_no)) && self.retry_at.is_some_and(|t| Instant::now() < t)
+    }
+}
+
+/// An exit that means the player's own setup is broken and will not fix itself: the
+/// engine's disc check failed, or it refused its arguments. `play` stops at once, and
+/// nothing is reported to the organiser.
+fn setup_error(engine: &dyn Engine, exit: Option<RunExit>) -> Option<anyhow::Error> {
+    let code = exit?.code?;
+    let setup = engine.last_setup();
+    if code == DISC_CHECK_EXIT_CODE {
+        let iso = setup.iso.as_deref().unwrap_or("(unknown)");
+        return Some(anyhow::anyhow!(
+            "the engine's disc check failed (exit code {code}) for the disc image {iso}. \
+             Check that `iso` in the client config points at your own NTSC 1.02 Melee \
+             image, then run `play` again"
+        ));
+    }
+    if code == USAGE_EXIT_CODE {
+        let log = match &setup.log {
+            Some(path) if !setup.log_tail.is_empty() => format!(
+                "\nLast lines of {}:\n  {}",
+                path.display(),
+                setup.log_tail.join("\n  ")
+            ),
+            _ => String::new(),
+        };
+        return Some(anyhow::anyhow!(
+            "the engine refused its arguments (exit code {code}, a usage error). It was \
+             started with the template {:?} (`host_args` or `join_args` in the client \
+             config); fix it, then run `play` again.{log}",
+            setup.args
+        ));
+    }
+    None
+}
+
+/// Acts on [`After`] for `launch`'s set.
+async fn settle(
+    api: &Api,
+    net: &mut Net,
+    event: i64,
+    launch: Launch,
+    after: After,
+) -> anyhow::Result<()> {
+    match after {
+        After::Continue => Ok(()),
+        After::ReportNoShow(detail) => {
+            if report_no_show(api, net, event, launch.set_id, &detail).await? {
+                println!(
+                    "Nobody joined set {} game {} after {NO_SHOW_STRIKES} tries; reported a \
+                     no-show to the organiser",
+                    launch.set_id, launch.game_no
+                );
+            }
+            Ok(())
+        }
+        After::GiveUp { error, detail } => {
+            match report_no_show(api, net, event, launch.set_id, &detail).await {
+                Ok(true) => println!("Reported set {} to the organiser: {detail}", launch.set_id),
+                Ok(false) => {}
+                Err(e) => eprintln!(
+                    "Could not report set {} to the organiser: {e:#}",
+                    launch.set_id
+                ),
+            }
+            Err(error)
+        }
+    }
+}
+
+/// Reports a no-show, retrying while the server is unreachable. Whether the server took it:
+/// a `409` (the set is not in a state for it) or `404` (an older server) is logged and not
+/// an error.
+async fn report_no_show(
+    api: &Api,
+    net: &mut Net,
+    event: i64,
+    set_id: u32,
+    detail: &str,
+) -> anyhow::Result<bool> {
+    match net
+        .retry(|| api.report_no_show(event, set_id, Some(detail)))
+        .await
+    {
+        Ok(()) => Ok(true),
+        Err(e) => match e.downcast_ref::<ApiError>() {
+            Some(err) if err.status == Some(StatusCode::CONFLICT) => {
+                println!(
+                    "The server did not take the no-show report for set {set_id}: {}",
+                    err.message
+                );
+                Ok(false)
+            }
+            Some(err) if err.status == Some(StatusCode::NOT_FOUND) => {
+                println!(
+                    "This server cannot take no-show reports ({}); tell the organiser about set {set_id}",
+                    err.message
+                );
+                Ok(false)
+            }
+            _ => Err(e.context(format!("reporting a no-show for set {set_id}"))),
+        },
     }
 }
 
@@ -191,12 +364,36 @@ pub async fn play_event_with(
     event: i64,
     opts: &PlayOptions,
 ) -> anyhow::Result<Next> {
+    let ended = play_event_until(api, engine, event, opts, std::future::pending()).await?;
+    ended.context("play stopped without being asked to")
+}
+
+/// [`play_event_with`] that also stops when `stop` completes (on a signal, say): it stops
+/// polling, leaves a running game running, prints what was left unfinished as on a
+/// failure, and returns `None`.
+pub async fn play_event_until(
+    api: &Api,
+    engine: &mut dyn Engine,
+    event: i64,
+    opts: &PlayOptions,
+    stop: impl Future<Output = ()>,
+) -> anyhow::Result<Option<Next>> {
     let mut session = Session::default();
-    let result = run(api, engine, event, opts, &mut session).await;
-    if result.is_err() {
-        report_unfinished(engine, event, &mut session);
+    let result = tokio::select! {
+        r = run(api, &mut *engine, event, opts, &mut session) => Some(r),
+        () = stop => None,
+    };
+    match result {
+        Some(Ok(next)) => Ok(Some(next)),
+        Some(Err(e)) => {
+            report_unfinished(engine, event, &mut session);
+            Err(e)
+        }
+        None => {
+            report_unfinished(engine, event, &mut session);
+            Ok(None)
+        }
     }
-    result
 }
 
 async fn run(
@@ -216,6 +413,7 @@ async fn run(
         base: opts.launch_backoff,
         game: None,
         count: 0,
+        no_shows: 0,
         retry_at: None,
     };
     loop {
@@ -262,13 +460,22 @@ async fn run(
                 let this_game = Launch {
                     set_id: *set_id,
                     game_no: *game_no,
+                    host: *role == Role::Host,
                 };
                 if engine.running() {
                     // Playing; nothing to do until the game exits.
                 } else if let Some(launch) = s.launched.take() {
                     let produced = collect(engine, launch, s)?;
-                    failures.record(launch, produced, relay)?;
+                    let exit = engine.last_exit();
+                    if !produced {
+                        if let Some(e) = setup_error(engine, exit) {
+                            return Err(e);
+                        }
+                    }
+                    let outcome = Outcome::of(launch, produced, exit);
+                    let after = failures.record(launch, outcome, relay);
                     upload_pending(api, &mut net, event, s).await?;
+                    settle(api, &mut net, event, launch, after).await?;
                     // Ask again before doing anything else: the server now knows about it.
                 } else if *awaiting_verdict {
                     status.detail(format!("Game {game_no} uploaded; waiting for the verdict"));
@@ -290,7 +497,8 @@ async fn run(
                             );
                             engine.stop();
                             s.launched = None;
-                            failures.record(this_game, false, relay)?;
+                            let after = failures.record(this_game, Outcome::Failed(None), relay);
+                            settle(api, &mut net, event, this_game, after).await?;
                         }
                         // Exited before printing a code; collected on the next poll.
                         None => {}
@@ -375,7 +583,9 @@ async fn upload_pending(
     s: &mut Session,
 ) -> anyhow::Result<()> {
     while let Some(p) = s.pending.first() {
-        let Launch { set_id, game_no: n } = p.launch;
+        let Launch {
+            set_id, game_no: n, ..
+        } = p.launch;
         let slp = read(&p.path).await?;
         let sent = net
             .retry(|| api.upload_replay(event, set_id, n, slp.clone()))
