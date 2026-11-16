@@ -13,3 +13,4 @@ auto.key
 *.slp
 *.slpz
 *.mrpl
+dist/
