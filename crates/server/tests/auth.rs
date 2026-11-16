@@ -272,15 +272,24 @@ async fn extractors_enforce_roles() {
         call(registered.sk.clone(), "/p").await,
         (StatusCode::OK, "Mango:3".into())
     );
-    assert_eq!(call(new_key(), "/p").await.0, StatusCode::FORBIDDEN);
+    assert_eq!(
+        call(new_key(), "/p").await,
+        (
+            StatusCode::FORBIDDEN,
+            r#"{"error":"key is not registered"}"#.into()
+        )
+    );
 
     assert_eq!(
         call(app.to.clone(), "/t").await,
         (StatusCode::OK, "3".into())
     );
     assert_eq!(
-        call(registered.sk.clone(), "/t").await.0,
-        StatusCode::FORBIDDEN
+        call(registered.sk.clone(), "/t").await,
+        (
+            StatusCode::FORBIDDEN,
+            r#"{"error":"not a tournament organiser"}"#.into()
+        )
     );
 
     // A signature over a different body is rejected.
@@ -346,4 +355,27 @@ async fn signature_covers_full_path_when_nested() {
         .body(Body::from("abc"))
         .unwrap();
     assert_eq!(router.oneshot(req).await.unwrap().status(), StatusCode::OK);
+}
+
+/// Extractor rejections carry the same `{"error": ...}` JSON body as handler errors.
+#[tokio::test]
+async fn rejections_are_json() {
+    let app = TestApp::spawn(|_| {}).await;
+    let res = reqwest::Client::new()
+        .post(format!("{}/v1/admin/events", app.url))
+        .body("{}")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
+    assert_eq!(
+        res.headers()["content-type"],
+        "application/json",
+        "content type"
+    );
+    let body: serde_json::Value = res.json().await.unwrap();
+    assert_eq!(
+        body,
+        serde_json::json!({"error": "missing signature headers"})
+    );
 }

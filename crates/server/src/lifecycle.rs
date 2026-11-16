@@ -162,6 +162,14 @@ async fn open_set(
     Ok(())
 }
 
+/// The stored bracket of a started event, read on `conn` (e.g. inside a caller's transaction).
+pub async fn load_bracket_on(
+    conn: &mut SqliteConnection,
+    event_id: i64,
+) -> Result<Bracket, LifecycleError> {
+    read_bracket(conn, event_id).await
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

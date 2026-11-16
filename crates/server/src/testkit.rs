@@ -4,7 +4,8 @@
 use std::net::SocketAddr;
 use std::sync::Arc;
 
-use proto::{sign_request, RegisterReq, SigningKey};
+use bracket::Format;
+use proto::{sign_request, EventCreateReq, EventSummary, RegisterReq, SigningKey, SignupReq};
 use rand::rngs::OsRng;
 use rand::RngCore;
 use reqwest::Method;
@@ -99,6 +100,36 @@ impl TestApp {
     pub fn as_to(&self) -> TestPlayer {
         TestPlayer::new(self.to.clone(), "TO", &self.url)
     }
+
+    /// Creates an event (default ruleset) as the organiser and returns its id.
+    pub async fn create_event(&self, format: Format) -> i64 {
+        let req = EventCreateReq {
+            name: "Weekly".into(),
+            format,
+            ruleset: None,
+        };
+        let res = self.as_to().post_json("/v1/admin/events", &req).await;
+        assert_eq!(res.status(), reqwest::StatusCode::CREATED, "creating event");
+        let summary: EventSummary = res.json().await.expect("event summary");
+        summary.id
+    }
+
+    /// Creates an event, signs `players` up in order (so `players[i]` is seed `i`), and starts it.
+    pub async fn started_event(&self, format: Format, players: &[&TestPlayer]) -> i64 {
+        let event = self.create_event(format).await;
+        for p in players {
+            p.sign_up(event).await;
+        }
+        let res = self
+            .as_to()
+            .post_json(
+                &format!("/v1/admin/events/{event}/start"),
+                &serde_json::json!({}),
+            )
+            .await;
+        assert_eq!(res.status(), reqwest::StatusCode::OK, "starting event");
+        event
+    }
 }
 
 pub struct TestPlayer {
@@ -116,6 +147,22 @@ impl TestPlayer {
             url: url.into(),
             client: reqwest::Client::new(),
         }
+    }
+
+    /// Enters `event` with engine build `"b1"`; asserts it succeeds.
+    pub async fn sign_up(&self, event: i64) {
+        let req = SignupReq {
+            engine_build: "b1".into(),
+        };
+        let res = self
+            .post_json(&format!("/v1/events/{event}/entrants"), &req)
+            .await;
+        assert_eq!(
+            res.status(),
+            reqwest::StatusCode::CREATED,
+            "{} signing up",
+            self.tag
+        );
     }
 
     pub async fn get(&self, path: &str) -> reqwest::Response {

@@ -13,6 +13,7 @@ use crate::state::AppState;
 mod admin;
 mod events;
 mod players;
+mod sets;
 
 pub fn router() -> Router<AppState> {
     Router::new()
@@ -23,6 +24,12 @@ pub fn router() -> Router<AppState> {
         .route("/v1/admin/events", post(admin::create_event))
         .route("/v1/admin/events/{id}/start", post(admin::start_event))
         .route("/v1/admin/invites", post(admin::create_invite))
+        .route("/v1/me/next", get(sets::next))
+        .route("/v1/sets/{event}/{set}/room", post(sets::room))
+        .route(
+            "/v1/sets/{event}/{set}/games/{n}/replay",
+            post(sets::upload),
+        )
 }
 
 /// An error response: a status code and a JSON body of the form `{"error": "...", ...}`.
