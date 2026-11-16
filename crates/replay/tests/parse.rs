@@ -357,6 +357,50 @@ fn with_raw(stream: &[u8]) -> Vec<u8> {
     f
 }
 
+#[test]
+fn zero_size_table_entry_is_rejected() {
+    // A command listed with size 0 (real files never list one); the engine stops walking at it.
+    let file = SlpBuilder::new()
+        .player(1, 2, PlayerKind::Human)
+        .gecko(true)
+        .event(0x42, vec![])
+        .frame(10, 1, 4, 0.0)
+        .build();
+    assert_eq!(parse(&file), Err(ReplayError::BadEventSizes));
+    assert_eq!(gecko_fnv32(&file), Err(ReplayError::BadEventSizes));
+}
+
+/// The crafted file from review: list A, the frames, then a lone byte of a size-0 command, then
+/// more Gecko chunks (list B). The engine stops at the lone byte and applies only A; a reader
+/// that walked on would hash A+B. It must be rejected, not read as A+B.
+#[test]
+fn list_split_by_a_size_0_command_is_rejected() {
+    let a: Vec<u8> = long_list()[..600].to_vec(); // two splitter events
+    let b: Vec<u8> = long_list()[600..].to_vec(); // two more
+    let built = SlpBuilder::new()
+        .player(1, 2, PlayerKind::Human)
+        .player(2, 9, PlayerKind::Human)
+        .gecko_bytes(&a)
+        .event(0x42, vec![])
+        .frame(10, 1, 4, 0.0)
+        .frame(10, 2, 3, 0.0)
+        .end(2, None)
+        .build();
+    let mut raw = raw_element(&built).unwrap().to_vec();
+    // Move the lone 0x42 from after the Gecko chunks to the end of the stream.
+    let at = 1 + usize::from(raw[1]) + (1 + 0x2F8) + 2 * 0x205;
+    assert_eq!(raw[at], 0x42);
+    raw.remove(at);
+    raw.push(0x42);
+    for chunk in b.chunks(512) {
+        raw.push(0x10);
+        raw.extend(splitter(chunk, chunk.len() as u16));
+    }
+    let crafted = with_raw(&raw);
+    assert_eq!(parse(&crafted), Err(ReplayError::BadEventSizes));
+    assert_eq!(gecko_fnv32(&crafted), Err(ReplayError::BadEventSizes));
+}
+
 /// Parses `f` and checks the invariants that must hold for any readable file.
 fn parse_checked(f: &[u8]) -> Result<ReplayFacts, ReplayError> {
     let parsed = parse(f);
@@ -365,7 +409,9 @@ fn parse_checked(f: &[u8]) -> Result<ReplayFacts, ReplayError> {
         let _ = winner_port(facts);
         assert_eq!(facts.has_gecko, facts.gecko_sha256.is_some());
         let sha = facts.gecko_sha256.as_deref().unwrap_or("");
-        assert!(sha.is_empty() || (sha.len() == 64 && sha.bytes().all(|b| b.is_ascii_hexdigit())));
+        // Lowercase only: legality compares hashes exactly.
+        let lower_hex = |b: u8| matches!(b, b'0'..=b'9' | b'a'..=b'f');
+        assert!(sha.is_empty() || (sha.len() == 64 && sha.bytes().all(lower_hex)));
         // The walk that parse completed also completes for the list alone.
         let fnv = fnv.expect("gecko_fnv32 succeeds on a file parse accepts");
         assert_eq!(fnv.is_some(), facts.has_gecko);

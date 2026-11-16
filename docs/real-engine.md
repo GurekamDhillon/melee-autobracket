@@ -249,8 +249,9 @@ not leak through). A file that cannot be read or parsed runs without it, the eng
 default. After the fix all 42 manifest-`match` files come back `Match` from `Slpcheck::check`,
 including the three `own-offline/pairs_*_bf.slp` files (Battlefield, with a Gecko list), and all
 five own-netplay exports still match. Before the fix the effect was masked in production,
-because `legality` rejects any Gecko list (F3) and those replays never reach resim; it would
-have become a real fault the moment Slippi replays were admitted.
+because `legality` then rejected any Gecko list (F3; it now rejects a list that is not on the
+`allowed_gecko` allow-list, see "Gecko code lists") and those replays never reached resim; it
+would have become a real fault the moment Slippi replays were admitted.
 Missing fixture: an own-netplay export on Battlefield or another non-FD stage, to confirm that
 own exports need the variable there.
 
@@ -401,7 +402,30 @@ and a finding that limits the approach.
 all **50 files our reader parses agree** (`1 passed`, 292.9 s). 37 carry a
 list and the two values are equal for each (for example `tournament/20476_0a7cb485-...slp`:
 `83817cc6` both sides); the 13 without a list (own-netplay exports and the synthetic files) are
-`none` on both sides. So our byte selection is the engine's.
+`none` on both sides. So on the corpus our byte selection is the engine's.
+
+For crafted files it holds by construction, not by measurement. The two walkers apply the same
+chunk rule, and they read the same events in every file our reader accepts: wherever the engine
+stops walking early, our reader returns an error instead, so `parse` and `gecko_fnv32` fail and
+the game is never judged on a partial list. The engine's walker (`melee_data/src/slp.rs`,
+`parse`) and ours (`crates/replay/src/raw.rs`, `events.rs`), exit condition by exit condition:
+
+| engine | ours |
+|---|---|
+| finds `U\x03raw[$U#l` anywhere in the file | requires the file to start `{U\x03raw[$U#l`, else `NotSlp`; when it does, the engine's first match is the same element |
+| declared raw length 0: reads to the end of the file | `Truncated` (F4) |
+| declared length past the end of the file: walks the part that is there | `Truncated` |
+| first byte not 0x35, or raw shorter than 2 bytes: error | `BadEventSizes` / `Truncated` |
+| size table entry past the end of raw: error | `Truncated` |
+| table size byte not 3n+1 (reads floor((n-1)/3) entries) | `BadEventSizes` |
+| table longer than raw: walks nothing | `Truncated` |
+| duplicate table entries: last wins | last wins, unless one of them is 0 (below) |
+| command not in the table (size 0): stops | `BadEventSizes` |
+| command listed with size 0: stops | `BadEventSizes` when the table is read (since the review fix; before it, a 1-byte event and the walk went on, so a crafted file could append Gecko chunks the engine never applies) |
+| event runs past the end of raw: stops | `Truncated` |
+| end of raw: done | done |
+| splitter chunk: length >= 0x205, byte 0x203 = 0x3D, bytes `1..1+min(u16@0x201, 512)` | the same (`events::gecko_chunk`) |
+| bare 0x3D event: ignored | ignored |
 
 **Measured SHA-256 values** (`console_recordings_gecko_sha256`). 37 files carry a list, and
 there are **37 distinct values: no two files share a list.** That includes the 28 Slippi
@@ -492,10 +516,12 @@ shape of an entry (config validation does not call it yet).
   server and clients; `docs/real-engine-e2e.md` on the main branch covers that.
 - **What goes to the organiser:** a game where only one player uploaded (`Single`). Also a game
   that ended by disconnect or by both players quitting without a winner (`Undecided`), a game
-  with the wrong rules, stage, ports or a Gecko list (`Illegal`), and a file the reader cannot
-  read (`Undecided`). Replays recorded on Slippi Dolphin or a console are all refused today (F3).
-  Admitting them needs the Gecko rule and the ports rule changed; the spawn setting (F1) is
-  already per replay.
+  with the wrong rules, stage, ports or a Gecko list that is not on the allow-list (`Illegal`),
+  and a file the reader cannot read (`Undecided`). Replays recorded on Slippi Dolphin or a
+  console are all refused today: the ports rule (F3), and the Gecko allow-list cannot name the
+  Slippi set because every recording's list hashes differently ("Gecko code lists"). Admitting
+  them needs the ports rule changed and a different Gecko list identity; the spawn setting (F1)
+  is already per replay.
 - **A misconfigured verifier is caught (F2, fixed):** a missing, unreadable or too-small disc
   image, or an engine that cannot run, stops the server (`in_process`) or `verify-worker` at start-up with the
   path in the error. A disc that disappears later makes games `PeerOnly`, not
