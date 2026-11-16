@@ -11,12 +11,19 @@ use serde_json::{json, Value};
 
 use crate::state::AppState;
 
+mod account;
 mod admin;
+mod admin_web;
 mod events;
+mod hooks;
+mod live;
+mod me;
 mod players;
 mod quarantine;
 mod results;
+mod setflow;
 mod sets;
+mod site;
 mod stream;
 mod verify_jobs;
 mod view;
@@ -62,6 +69,13 @@ pub fn router() -> Router<AppState> {
         .route("/v1/verify/claim", post(verify_jobs::claim))
         .route("/v1/verify/jobs/{id}/replay", get(verify_jobs::replay))
         .route("/v1/verify/jobs/{id}/result", post(verify_jobs::result))
+        .merge(account::router())
+        .merge(admin_web::router())
+        .merge(hooks::router())
+        .merge(me::router())
+        .merge(setflow::router())
+        .merge(live::router())
+        .merge(site::router())
         .fallback(not_found)
         .method_not_allowed_fallback(method_not_allowed)
 }

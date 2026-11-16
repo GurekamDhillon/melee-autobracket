@@ -96,6 +96,7 @@ fn verdict_counts() {
 #[test]
 fn serde_round_trip() {
     let next = Next::Play {
+        event_id: 1,
         set_id: 7,
         opponent_tag: "mango".into(),
         role: Role::Host,

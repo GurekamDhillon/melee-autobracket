@@ -101,6 +101,7 @@ async fn next_roles() {
     assert_eq!(
         next(&host, event).await,
         Next::Play {
+            event_id: event,
             set_id: 0,
             opponent_tag: "Bob".into(),
             role: Role::Host,
@@ -117,6 +118,7 @@ async fn next_roles() {
     assert_eq!(
         next(&guest, event).await,
         Next::Play {
+            event_id: event,
             set_id: 0,
             opponent_tag: "Alice".into(),
             role: Role::Guest,
@@ -170,8 +172,20 @@ async fn next_review_champion_eliminated() {
         .execute(&app.state.db)
         .await
         .unwrap();
-    assert_eq!(next(&host, event).await, Next::Review { set_id: 0 });
-    assert_eq!(next(&guest, event).await, Next::Review { set_id: 0 });
+    assert_eq!(
+        next(&host, event).await,
+        Next::Review {
+            event_id: event,
+            set_id: 0,
+        }
+    );
+    assert_eq!(
+        next(&guest, event).await,
+        Next::Review {
+            event_id: event,
+            set_id: 0,
+        }
+    );
 
     let mut b = load_bracket(&app.state.db, event).await.unwrap();
     b.report(0, 0).unwrap();
@@ -747,7 +761,13 @@ async fn client_failure_has_no_grace_period() {
         .unwrap();
     assert!(detail.contains("slot 0"), "{detail}");
     assert!(detail.contains("engine exited 1 four times"), "{detail}");
-    assert_eq!(next(&host, event).await, Next::Review { set_id: 0 });
+    assert_eq!(
+        next(&host, event).await,
+        Next::Review {
+            event_id: event,
+            set_id: 0,
+        }
+    );
 }
 
 /// Reports `kind` on set 0 (grace period off) and checks the set went to review.
@@ -818,7 +838,13 @@ async fn review_for_a_no_show_still_takes_the_played_game() {
             "{kind}"
         );
         // Both players are still told to wait for the organiser.
-        assert_eq!(next(&host, event).await, Next::Review { set_id: 0 });
+        assert_eq!(
+            next(&host, event).await,
+            Next::Review {
+                event_id: event,
+                set_id: 0,
+            }
+        );
 
         autobracket_server::worker::judge_due(&app.state)
             .await
@@ -880,7 +906,13 @@ async fn review_for_a_verdict_takes_no_upload() {
     autobracket_server::worker::judge_due(&app.state)
         .await
         .unwrap();
-    assert_eq!(next(&host, event).await, Next::Review { set_id: 0 });
+    assert_eq!(
+        next(&host, event).await,
+        Next::Review {
+            event_id: event,
+            set_id: 0,
+        }
+    );
     let reasons = queue_reasons(&app).await;
     assert_eq!(reasons.len(), 1);
     assert!(!["no-show", "stalled", "client-failure"].contains(&reasons[0].0.as_str()));

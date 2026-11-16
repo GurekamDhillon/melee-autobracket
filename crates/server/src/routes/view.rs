@@ -65,6 +65,30 @@ const SOURCES: &[(&str, &str, &str, &str)] = &[
         include_str!("../../assets/pages/player.html"),
         include_str!("../../assets/pages/player.js"),
     ),
+    (
+        "account",
+        "Account",
+        include_str!("../../assets/pages/account.html"),
+        include_str!("../../assets/pages/account.js"),
+    ),
+    (
+        "admin",
+        "Admin",
+        include_str!("../../assets/pages/admin.html"),
+        include_str!("../../assets/pages/admin.js"),
+    ),
+    (
+        "privacy",
+        "Privacy",
+        include_str!("../../assets/pages/privacy.html"),
+        include_str!("../../assets/pages/privacy.js"),
+    ),
+    (
+        "terms",
+        "Terms",
+        include_str!("../../assets/pages/terms.html"),
+        include_str!("../../assets/pages/terms.js"),
+    ),
 ];
 
 /// A finished page and the policy that pins its inline blocks.
@@ -90,6 +114,9 @@ static PAGES: LazyLock<HashMap<&'static str, Page>> = LazyLock::new(|| {
         .collect()
 });
 
+/// Every page's image sources, as its policy states them.
+const IMG_SRC: &str = "img-src data:";
+
 /// Fills the shell for one page. The CSP allows nothing but the page's own inline script and
 /// style (by hash), requests to this server, fonts from this server, the empty `data:` icon,
 /// and no framing.
@@ -102,7 +129,7 @@ fn assemble(title: &str, body: &str, script: &str) -> Page {
         .replace("{{script}}", &script);
     let csp = format!(
         "default-src 'none'; script-src 'sha256-{}'; style-src 'sha256-{}'; \
-         connect-src 'self'; font-src 'self'; img-src data:; base-uri 'none'; form-action 'none'; \
+         connect-src 'self'; font-src 'self'; {IMG_SRC}; base-uri 'none'; form-action 'none'; \
          frame-ancestors 'none'",
         inline_hash(&html, "script"),
         inline_hash(&html, "style"),
@@ -111,8 +138,18 @@ fn assemble(title: &str, body: &str, script: &str) -> Page {
 }
 
 /// The assembled page `name` (a key of [`SOURCES`]) with its headers.
-fn page(name: &'static str) -> Response {
+pub(crate) fn page(name: &'static str) -> Response {
     page_with_csp(name, |p| p.csp.clone())
+}
+
+/// The assembled page `name` with `extra` (space-separated sources) added to its policy's
+/// `img-src`: `img-src data:` becomes `img-src data: {extra}`, still one directive.
+// Unrouted until the account and admin pages are (phase 2b wave 2); drop the allow then.
+#[allow(dead_code)]
+pub(crate) fn page_with_img_src(name: &'static str, extra: &str) -> Response {
+    page_with_csp(name, |p| {
+        p.csp.replacen(IMG_SRC, &format!("{IMG_SRC} {extra}"), 1)
+    })
 }
 
 /// The assembled page `name` with the policy `csp` makes from it.
@@ -258,7 +295,8 @@ fn base64(bytes: &[u8]) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{base64, PAGES, SOURCES};
+    use super::{base64, page_with_img_src, PAGES, SOURCES};
+    use axum::http::header;
 
     #[test]
     fn base64_matches_rfc_4648() {
@@ -290,5 +328,28 @@ mod tests {
                 page.csp
             );
         }
+    }
+
+    /// The phase 2b pages exist (not routed yet), and only the helper that widens `img-src`
+    /// does so, in place.
+    #[test]
+    fn new_pages_serve_with_csp() {
+        for name in ["account", "admin", "privacy", "terms"] {
+            let page = PAGES.get(name).unwrap_or_else(|| panic!("no page {name}"));
+            assert!(page.csp.contains("img-src data:;"), "{name}: {}", page.csp);
+            assert_eq!(page.csp.matches("img-src").count(), 1, "{name}");
+        }
+        let res = page_with_img_src("account", "https://cdn.discordapp.com");
+        let csp = res.headers()[header::CONTENT_SECURITY_POLICY]
+            .to_str()
+            .unwrap()
+            .to_owned();
+        assert_eq!(
+            csp.matches("img-src data: https://cdn.discordapp.com;")
+                .count(),
+            1,
+            "{csp}"
+        );
+        assert_eq!(csp.matches("img-src").count(), 1, "{csp}");
     }
 }

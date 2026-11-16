@@ -15,6 +15,16 @@ pub struct Ruleset {
     /// list bytes (`replay::ReplayFacts::gecko_sha256`). A replay without a list
     /// is always allowed on this point; one with a list must match an entry exactly.
     pub allowed_gecko: Vec<String>,
+    /// The stages game 1's strikes are over, by stage id; empty means every `legal_stages`
+    /// entry ([`Ruleset::starters`]). Left out of the JSON when empty, so a ruleset without
+    /// stage selection encodes as it did before this field existed.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub starter_stages: Vec<u16>,
+    /// How many stages the winner of a game bans before the loser picks the next game's stage;
+    /// absent means the default ([`Ruleset::effective_stage_bans`]). Left out of the JSON when
+    /// absent, as `starter_stages` when empty.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stage_bans: Option<u8>,
 }
 
 impl Default for Ruleset {
@@ -27,14 +37,35 @@ impl Default for Ruleset {
             legal_stages: vec![2, 3, 8, 28, 31, 32],
             banned_characters: vec![],
             allowed_gecko: vec![],
+            starter_stages: vec![],
+            stage_bans: None,
         }
     }
 }
 
 impl Ruleset {
+    /// The stages game 1's strikes are over: `starter_stages`, or `legal_stages` when that is
+    /// empty.
+    pub fn starters(&self) -> &[u16] {
+        if self.starter_stages.is_empty() {
+            &self.legal_stages
+        } else {
+            &self.starter_stages
+        }
+    }
+
+    /// How many stages the winner of a game bans: `stage_bans`, or 2 when unset, but never
+    /// more than one fewer than the legal stages, so a stage is always left to pick.
+    pub fn effective_stage_bans(&self) -> u8 {
+        let fit = u8::try_from(self.legal_stages.len().saturating_sub(1)).unwrap_or(u8::MAX);
+        self.stage_bans.unwrap_or(2).min(fit)
+    }
+
     /// Checks that games can be played and judged under these rules: `best_of` and
     /// `best_of_finals` odd (so not 0), `stocks` at least 1, at least one legal stage, and
-    /// every `allowed_gecko` entry shaped like a SHA-256 ([`is_gecko_hash`]). The error names
+    /// every `allowed_gecko` entry shaped like a SHA-256 ([`is_gecko_hash`]), every
+    /// `starter_stages` entry legal, and an explicit `stage_bans` fewer than the legal stages
+    /// when there is more than one (so a stage is left to pick). The error names
     /// the field first (e.g. `best_of must be ...`).
     pub fn validate(&self) -> Result<(), String> {
         for (field, n) in [
@@ -50,6 +81,23 @@ impl Ruleset {
         }
         if self.legal_stages.is_empty() {
             return Err("legal_stages must list at least one stage".into());
+        }
+        if let Some(bad) = self
+            .starter_stages
+            .iter()
+            .find(|s| !self.legal_stages.contains(s))
+        {
+            return Err(format!(
+                "starter_stages: stage {bad} is not in legal_stages"
+            ));
+        }
+        if let Some(bans) = self.stage_bans {
+            let legal = self.legal_stages.len();
+            if legal > 1 && usize::from(bans) >= legal {
+                return Err(format!(
+                    "stage_bans must be fewer than the {legal} legal stages, not {bans}"
+                ));
+            }
         }
         if let Some(bad) = self.allowed_gecko.iter().find(|h| !is_gecko_hash(h)) {
             return Err(format!(

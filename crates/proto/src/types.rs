@@ -14,11 +14,17 @@ pub enum Next {
     NotEntered,
     Waiting,
     Review {
+        /// The event this answer is about. Absent (0) from servers before phase 2b.
+        #[serde(default)]
+        event_id: i64,
         set_id: u32,
     },
     Eliminated,
     Champion,
     Play {
+        /// The event this answer is about. Absent (0) from servers before phase 2b.
+        #[serde(default)]
+        event_id: i64,
         set_id: u32,
         opponent_tag: String,
         role: Role,

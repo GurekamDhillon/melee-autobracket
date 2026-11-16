@@ -137,7 +137,10 @@ async fn server(no_show: &[u16]) -> Stub {
     Stub::start(move |req| match (req.method.as_str(), req.path.as_str()) {
         ("GET", p) if p.starts_with("/v1/me/next") => {
             let next = if reviewed.load(Ordering::SeqCst) {
-                Next::Review { set_id: 0 }
+                Next::Review {
+                    event_id: 1,
+                    set_id: 0,
+                }
             } else {
                 host_play()
             };
@@ -708,7 +711,13 @@ async fn the_failure_count_starts_again_after_a_review() {
             if seen.load(Ordering::SeqCst) == MAX_FAILED_RUNS as usize - 1
                 && review_polls.fetch_add(1, Ordering::SeqCst) < 5
             {
-                return (200, json(&Next::Review { set_id: 0 }));
+                return (
+                    200,
+                    json(&Next::Review {
+                        event_id: 1,
+                        set_id: 0,
+                    }),
+                );
             }
             (200, json(&host_play()))
         }
