@@ -15,6 +15,7 @@ mod admin;
 mod events;
 mod players;
 mod quarantine;
+mod results;
 mod sets;
 mod verify_jobs;
 mod view;
@@ -27,6 +28,9 @@ pub fn router() -> Router<AppState> {
         .route("/v1/players", post(players::register))
         .route("/v1/events", get(events::list))
         .route("/v1/events/{id}", get(events::view))
+        .route("/v1/history", get(results::history))
+        .route("/v1/players", get(results::players))
+        .route("/v1/players/{tag}", get(results::player))
         .route("/v1/events/{id}/entrants", post(events::signup))
         .route("/v1/admin/events", post(admin::create_event))
         .route("/v1/admin/events/{id}/start", post(admin::start_event))

@@ -268,6 +268,71 @@ pub struct QuarantineItem {
     pub judged_at: Option<i64>,
 }
 
+/// One entrant's final place in a complete event. Ties share a place (two 3rds, four 5ths).
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct Placing {
+    /// 1-based.
+    pub place: u32,
+    pub tag: String,
+}
+
+/// A complete event and its placings (`GET /v1/history`).
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct EventResult {
+    pub summary: EventSummary,
+    /// Ordered by place, then seed.
+    pub placings: Vec<Placing>,
+}
+
+/// One row of the players index (`GET /v1/players`).
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct PlayerSummary {
+    pub tag: String,
+    /// Events entered, in any state.
+    pub events: u32,
+    /// Complete events won.
+    pub titles: u32,
+    /// Sets `[won, lost]`.
+    pub sets: [u32; 2],
+}
+
+/// A player's entry in one event.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct PlayerEvent {
+    pub event: EventSummary,
+    /// The entrant's index in the event's `tags` (0 = top seed).
+    pub seed: u32,
+    /// The final place; null unless the event is complete.
+    pub place: Option<u32>,
+    /// Sets `[won, lost]` in this event.
+    pub sets: [u32; 2],
+    /// Games `[won, lost]` in this event.
+    pub games: [u32; 2],
+}
+
+/// A player's record against one opponent.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct HeadToHead {
+    pub tag: String,
+    /// Sets `[won, lost]`.
+    pub sets: [u32; 2],
+    /// Games `[won, lost]`.
+    pub games: [u32; 2],
+}
+
+/// A player's profile (`GET /v1/players/{tag}`).
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct PlayerProfile {
+    /// The canonical spelling.
+    pub tag: String,
+    /// When the player registered, unix seconds.
+    pub since: i64,
+    /// Newest first.
+    pub events: Vec<PlayerEvent>,
+    /// By sets played descending, then tag.
+    pub head_to_head: Vec<HeadToHead>,
+}
+
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub struct RekeyReq {
     /// The player's new verifying key, 64 lowercase hex characters.
