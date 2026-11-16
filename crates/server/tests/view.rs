@@ -18,7 +18,12 @@ async fn fetch(app: &TestApp, path: &str) -> reqwest::Response {
 async fn all_pages(app: &TestApp) -> Vec<String> {
     let event = app.create_event(Format::SingleElim).await;
     app.player("Mango").await;
-    vec!["/".to_owned(), format!("/events/{event}")]
+    vec![
+        "/".to_owned(),
+        "/players".to_owned(),
+        "/players/Mango".to_owned(),
+        format!("/events/{event}"),
+    ]
 }
 
 #[tokio::test]
@@ -37,6 +42,42 @@ async fn pages_serve_html() {
         assert_eq!(body.matches("<script>").count(), 1, "{path}: one <script>");
         assert_eq!(body.matches("<style>").count(), 1, "{path}: one <style>");
     }
+}
+
+#[tokio::test]
+async fn player_page_matches_tag_in_any_case_and_rejects_unknown() {
+    let app = TestApp::spawn(|_| {}).await;
+    app.player("Mango").await;
+    for path in ["/players/MANGO", "/players/Ma%6Ego"] {
+        let res = fetch(&app, path).await;
+        assert_eq!(res.status(), StatusCode::OK, "{path}");
+        let ctype = res.headers()["content-type"].to_str().unwrap().to_owned();
+        assert!(ctype.starts_with("text/html"), "{path}: {ctype}");
+    }
+    for path in ["/players/nobody", "/players/..%2Fetc"] {
+        let res = fetch(&app, path).await;
+        assert_eq!(res.status(), StatusCode::NOT_FOUND, "{path}");
+        let ctype = res.headers()["content-type"].to_str().unwrap().to_owned();
+        assert!(ctype.starts_with("application/json"), "{path}: {ctype}");
+        let body: serde_json::Value = res.json().await.unwrap();
+        assert_eq!(body["error"], "no such player", "{path}");
+    }
+}
+
+#[tokio::test]
+async fn players_pages_fetch_their_data() {
+    let app = TestApp::spawn(|_| {}).await;
+    app.player("Mango").await;
+    let body = fetch(&app, "/players").await.text().await.unwrap();
+    assert!(body.contains("/v1/players"));
+    assert!(body.contains(r#"type="search""#));
+    assert!(body.contains("No players yet"));
+    let body = fetch(&app, "/players/Mango").await.text().await.unwrap();
+    assert!(body.contains("/v1/players/"));
+    assert!(body.contains("Head to head"));
+    assert!(body.contains("playing since"));
+    // The tag comes from the path, decoded.
+    assert!(body.contains("decodeURIComponent(location.pathname"));
 }
 
 #[tokio::test]

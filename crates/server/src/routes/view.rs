@@ -35,6 +35,18 @@ const SOURCES: &[(&str, &str, &str, &str)] = &[
         include_str!("../../assets/pages/event.html"),
         include_str!("../../assets/pages/event.js"),
     ),
+    (
+        "players",
+        "Players",
+        include_str!("../../assets/pages/players.html"),
+        include_str!("../../assets/pages/players.js"),
+    ),
+    (
+        "player",
+        "Player",
+        include_str!("../../assets/pages/player.html"),
+        include_str!("../../assets/pages/player.js"),
+    ),
 ];
 
 /// A finished page and the policy that pins its inline blocks.
@@ -104,6 +116,21 @@ pub async fn event(
         return Err(ApiError::new(StatusCode::NOT_FOUND, "no such event"));
     }
     Ok(page("event"))
+}
+
+/// `GET /players`: the players index.
+pub async fn players() -> Response {
+    page("players")
+}
+
+/// `GET /players/{tag}`: a player's profile; the tag matches in any case; 404 unless the
+/// player exists.
+pub async fn player(
+    State(state): State<AppState>,
+    Path(tag): Path<String>,
+) -> Result<Response, ApiError> {
+    super::results::find_player(&state.db, &tag).await?;
+    Ok(page("player"))
 }
 
 /// The pages' fonts by file name (`assets/fonts/README.md` says where they come from).

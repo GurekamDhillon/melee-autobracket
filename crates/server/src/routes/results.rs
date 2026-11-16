@@ -40,16 +40,25 @@ pub async fn player(
     State(state): State<AppState>,
     Path(tag): Path<String>,
 ) -> Result<Json<PlayerProfile>, ApiError> {
+    let (tag, since) = find_player(&state.db, &tag).await?;
+    let events = load_events(&state.db).await?;
+    Ok(Json(player_profile(&tag, since, &events)))
+}
+
+/// The canonical tag and registration time of the player whose tag matches `tag` in any
+/// case; 404 `no such player` when there is none. Among case variants the exact spelling
+/// wins, then the one that is not a marked duplicate.
+pub(super) async fn find_player(
+    db: &sqlx::SqlitePool,
+    tag: &str,
+) -> Result<(String, i64), ApiError> {
     let found: Option<(String, i64)> = sqlx::query_as(
         "SELECT tag, created_at FROM players WHERE tag = ? COLLATE NOCASE
          ORDER BY tag = ? DESC, tag_case_duplicate LIMIT 1",
     )
-    .bind(&tag)
-    .bind(&tag)
-    .fetch_optional(&state.db)
+    .bind(tag)
+    .bind(tag)
+    .fetch_optional(db)
     .await?;
-    let (tag, since) =
-        found.ok_or_else(|| ApiError::new(StatusCode::NOT_FOUND, "no such player"))?;
-    let events = load_events(&state.db).await?;
-    Ok(Json(player_profile(&tag, since, &events)))
+    found.ok_or_else(|| ApiError::new(StatusCode::NOT_FOUND, "no such player"))
 }
