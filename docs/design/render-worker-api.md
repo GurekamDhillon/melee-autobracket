@@ -292,7 +292,11 @@ lists the other statuses.
 | POST | `/v1/admin/render/jobs/{id}/rerun` | organiser | `RerunReq`, or empty | 200 `RenderJob` | 400; 404; 409 job is `queued` or `leased` (cancel first) |
 | POST | `/v1/admin/render/jobs/{id}/cancel` | organiser | ignored (send `{}`) | 200 `RenderJob` | 400; 404; 409 already terminal |
 | GET | `/v1/events/{id}/media` | public | — | 200 `EventMedia` | 400; 404 |
-| GET | `/media/{event}/{set}/{file}` | public | — | 200 `video/mp4` (or `application/json` for `analysis-*.json`), `accept-ranges: bytes`, 206 for `range` | 404; 416 |
+| GET | `/media/{event}/{set}/{file}` | public | — | 200 `video/mp4`, `accept-ranges: bytes`, 206 for `range` | 404; 416 |
+| GET | `/v1/sets/{event}/{set}/analyses/{job}` | player of the set, or organiser | — | 200 the full analysis document (`application/json`) | 400; **404** for anything else: no such job, not an analysis, not stored, or the key is not one of the set's two players or an organiser (never 403; see section 8) |
+| GET | `/v1/sets/{event}/{set}/analyses/{job}/public` | public | — | 200 the public view of the document (section 8); `cache-control: private, no-store` | 400; **404** when nothing of it is public |
+| GET | `/v1/me/analyses?event={id}` | player | — | 200 `[AnalysisRef]`, the signer's analyses in the event | 400; 404 no such event |
+| POST | `/v1/admin/events/{id}/analysis-private` | organiser | `{"private": true}` | 200 `EventSummary` | 400; 404 |
 
 Notes on individual routes:
 
@@ -315,8 +319,9 @@ Notes on individual routes:
 - **Outputs** are named by the job (`RenderJob.outputs[*].name`); any other name is 400. An
   `analyse` job's single output `analysis.json` goes through the same begin/chunks/finish (one
   chunk, in practice); at `finish` the server additionally checks that the bytes parse as a JSON
-  object with a string `schema` and a `data` member (else 400 `analysis is not valid JSON` and
-  the upload is discarded) and does nothing else with the content. An output is `missing` (nothing begun), `uploading` (begun; `received` lists the byte ranges in),
+  object with a string `schema` and a `data` member whose `halves` is an array of two (else 400
+  `analysis is not valid JSON` and the upload is discarded) and does nothing else with the
+  content. An output is `missing` (nothing begun), `uploading` (begun; `received` lists the byte ranges in),
   or `stored` (finished, hash verified, on disk). Uploads are described in section 6.
 - **Result `ok`** requires every output `stored`; the server marks the job `done`, writes the
   set's manifest, and the page starts showing the media. **Result `failed`** may come with some
@@ -338,7 +343,9 @@ Notes on individual routes:
   from the path's; the old job is left as is and the manifest points at whichever job of that
   set/clip finished most recently.
 - **Media listing and files** are public, like the bracket page, and unsigned; the rate limit
-  applies. `/media/...` is served by the app with range support (section 8).
+  applies. `/media/...` is served by the app with range support (section 8). **Analyses are
+  not media**: they are never under `/media/`, and are served only by the gated routes above
+  (section 8, "Analysis visibility").
 
 ## 6. Uploads
 
@@ -450,7 +457,7 @@ One replay the job reads.
 | `state` | `"missing"`, `"uploading"` or `"stored"` | |
 | `bytes`, `sha256` | integer, string, or null | once begun |
 | `report` | `RenderReport` or null | once stored; for `analysis.json` the media fields are 0 and `schema` is filled |
-| `url` | string or null | public path once stored, `/media/{event}/{set}/{file}` |
+| `url` | string or null | once stored: `/media/{event}/{set}/{file}` for media; for `analysis.json` the gated path `/v1/sets/{event}/{set}/analyses/{job}` (section 8) |
 | `content_type` | `"video/mp4"` or `"application/json"` | |
 
 ### RenderJob
@@ -545,11 +552,19 @@ whose bytes are a JSON object:
 | `tool_build` | string | the analysis tool's build string |
 | `game_no` | integer | |
 | `windows` | [[from, to]] | the windows analysed, echoed |
-| `data` | any JSON | the tool's result; the server stores and serves it, nothing more |
+| `data` | object | the tool's result, split so the server can apply per-player visibility (section 8): `data.common` (any JSON: facts about the game that belong to nobody, such as the windows and stage) and `data.halves`, an array of exactly two members, `halves[0]` about the slot 0 player and `halves[1]` about the slot 1 player (any JSON each, null allowed). The server never looks inside `common` or a half |
 
-The server checks `schema`, `tool_build` and `data` are present (400 at `finish` otherwise) and
-that the whole file is at most `render.max_analysis_output_bytes` (default 4 MiB). The page
-(or a later organiser tool) interprets `data` by `schema`.
+```json
+{"schema": "missed-punish/1", "tool_build": "melee-analyse 0.1.0+abc1234", "game_no": 2,
+ "windows": [[1800, 2140], [4410, 4702]],
+ "data": {"common": {"stage": 31}, "halves": [{"missed": [{"window": 0, "frame": 1861, "note": "…"}]}, {"missed": []}]}}
+```
+
+The server checks `schema`, `tool_build` and `data` are present, that `data.halves` is an array
+of two (400 at `finish` otherwise), and that the whole file is at most
+`render.max_analysis_output_bytes` (default 4 MiB). The page (or a later organiser tool)
+interprets the halves by `schema`. The `common`/`halves` split is the one piece of structure the
+server imposes, and it exists only so that one player's half can be shown without the other's.
 
 ### ClaimReq
 
@@ -668,13 +683,18 @@ in the game's VOD in milliseconds (`at_ms`, computed from `moment_from - first_f
     {"set_id": 3, "tags": ["Mango", "Armada"], "complete": false,
      "games": [{"game_no": 1, "url": "/media/1/3/game-1.mp4", "bytes": 74211998, "duration_ms": 166667}],
      "clips": [{"url": "/media/1/3/clip-19-zero-to-death.mp4", "label": "zero-to-death", "game_no": 2, "at_ms": 75550, "duration_ms": 8383}],
-     "analyses": [{"url": "/media/1/3/analysis-23.json", "game_no": 2, "schema": "missed-punish/1", "bytes": 48210}]}
+     "analyses": [{"job": 23, "url": "/v1/sets/1/3/analyses/23/public", "game_no": 2, "schema": "missed-punish/1", "public": "partial", "halves": [true, false]}]}
   ]
 }
 ```
 
-`complete` is true when every counted game of the set has a stored VOD. `analyses` lists stored
-analysis documents; whether they are public or organiser-only is open question 15.
+`complete` is true when every counted game of the set has a stored VOD. `analyses` lists only
+the analysis documents of which **something is public** (section 8): `public` is `"full"` (both
+players opted in) or `"partial"`, and `halves` says which player's half the public view carries.
+A private analysis is absent from `EventMedia` entirely; its players find it with
+`GET /v1/me/analyses?event={id}`, whose `AnalysisRef` entries are
+`{"job", "event_id", "set_id", "game_no", "schema", "url": "/v1/sets/{event}/{set}/analyses/{job}", "stored_at"}`,
+and the organiser with the admin job listing.
 
 ## 8. Storage and serving
 
@@ -686,8 +706,9 @@ media/
   {event}/{set}/
     game-{n}.mp4                  the set's VOD, one file per counted game
     clip-{job}-{label}.mp4        clips; the job id keeps names unique and stable
-    analysis-{job}.json           analysis results, served as application/json
     manifest.json                 what EventMedia says about this set, rewritten on every change
+    analyses/
+      analysis-{job}.json         analysis results; NOT served by /media/, see "Analysis visibility"
 ```
 
 Final paths are recorded in `render_outputs.path`; `finish` writes to `incoming/` and renames
@@ -712,8 +733,8 @@ the bytes but the page's manifest changes the URL's query string with the new sh
   `404` vs `200` and the etags stay right without a second source of truth.
 - `tower-http`'s `ServeDir`/`ServeFile` already does ranges, etags and conditional requests;
   there is nothing to write but the path check (`{event}` and `{set}` are integers and `{file}`
-  matches `^(game-\d+|clip-\d+-[a-z0-9-]{1,40})\.mp4$` or `^analysis-\d+\.json$`; nothing else
-  is looked up).
+  matches `^(game-\d+|clip-\d+-[a-z0-9-]{1,40})\.mp4$`; nothing else is looked up, so the
+  `analyses/` subdirectory is unreachable through `/media/`).
 - The nginx front needs only `proxy_buffering off` for `/media/` and a longer
   `proxy_read_timeout`; `client_max_body_size` for `/v1/render/` rises to the chunk size plus
   headers (`9m`). If serving load ever matters, `proxy_cache` on `/media/` in the front gives
@@ -721,6 +742,51 @@ the bytes but the page's manifest changes the URL's query string with the new sh
 
 The media routes are public and unsigned like the bracket page; the general rate limit applies
 per client, and a video element fetching ranges makes few requests. Nothing in a URL is secret.
+
+### Analysis visibility
+
+Owner decision (2026-11-15): an analysis describes a player's mistakes, so **by default it is
+visible only to the set's two players and to organisers, never to the public.** Two toggles
+change that:
+
+| Toggle | Where | Default | Effect |
+|---|---|---|---|
+| `share_analysis` | per player (`players.share_analysis`) | `false` | "share my analysis publicly". The player's **own half** of every analysis of their games becomes public. A game's analysis becomes **fully** public (both halves and `common`) only when **both** players of the set have opted in |
+| `analysis_private` | per event (`events.analysis_private`), organiser override | `false` | when `true`, nothing of any analysis of the event is public, whatever the players chose; players and organisers still see everything |
+
+`share_analysis` needs accounts (phase 2b) to be set by the player, so for now it is a column
+with a default and no route; the account work adds `PUT /v1/me/settings`. `analysis_private` is
+set at event creation (`EventCreateReq.analysis_private`, optional, default `false`) or later
+with `POST /v1/admin/events/{id}/analysis-private`; changing it affects what is served from the
+next request on, and `EventMedia` is recomputed from the rules on every request, not cached.
+
+What each route serves:
+
+| Route | Caller | Serves |
+|---|---|---|
+| `GET /v1/sets/{event}/{set}/analyses/{job}` | a player of the set (either slot), or an organiser | the whole stored document, unchanged |
+| same | anyone else, or unsigned | **404** |
+| `GET …/analyses/{job}/public` | anyone, unsigned | the document with `data.halves[i]` replaced by `null` for each player who has not opted in; `data.common` is included only when both opted in (it may describe both); when the event is `analysis_private`, or neither player opted in, **404** |
+| `GET /v1/me/analyses?event={id}` | a player | refs of the analyses of the signer's own sets |
+| `GET /v1/admin/render/jobs/{id}` | organiser | the job, with the output's URL |
+
+**404, not 403.** A gated analysis route answers 404 to a correctly signed request from a key that
+may not read it, and to an unsigned request, so that the existence of an analysis of a given set
+and game cannot be probed; a 403 would confirm it. The only non-404 refusals are the signing
+layer's own (401 for a missing or bad signature, 429), which say nothing about the resource. For
+the same reason the public view of a fully private document is 404 rather than an empty object,
+and `EventMedia` omits private analyses instead of listing them without a URL. Internally this is
+a role check that *follows* the lookup: the handler loads the job, confirms it is a stored
+`analyse` output of that set, then checks the signer against the set's two player keys and
+`to_keys`, and any failure on that path is the same 404. This differs from every other route in
+`docs/api.md`, where a role failure is 403 before the body is read; the difference is deliberate
+and confined to these routes. When accounts arrive, "a player of the set" also means a session
+belonging to one of those players, with the same answers.
+
+The analysis file itself is written once at `finish` and never rewritten for visibility; the
+filtering happens when serving. Caching: the gated route sends `cache-control: private, no-store`
+and no `etag`, since the same URL yields different bodies for different callers and the public
+view changes when a player toggles sharing.
 
 ## 9. Limits
 
@@ -885,8 +951,11 @@ start. Everything it needs to resume is in the `RenderJob` and `UploadState` ans
     need the ISO and engine (a headless simulation, like a clip render) or only the `.slp`, so
     `source` is irrelevant and a machine without a GPU could run it? (c) Is the output a single
     JSON document per game, and what size should the cap allow (4 MiB proposed)? (d) How is
-    `--frames` spelled (a list of `from-to` pairs?) and how are `params` passed? (e) Should
-    analyses be public like VODs, or visible only to the organiser and the two players (they
-    are about a player's mistakes)? The design serves them publicly for now because the media
-    routes are unsigned; an organiser-only `GET /v1/admin/render/jobs/{id}` already returns the
-    output URL, so making `/media/…/analysis-*.json` require a signature is a small change.
+    `--frames` spelled (a list of `from-to` pairs?) and how are `params` passed? (e) **Resolved
+    by the owner (2026-11-15):** private to the set's two players and organisers by default; a
+    per-player "share my analysis publicly" opt-in (both must opt in for the whole game's
+    analysis to be public, otherwise only each opted-in player's own half) and a per-event
+    organiser override forcing private; the route is gated and answers 404, never 403, to anyone
+    else. See section 8, "Analysis visibility". What this asks of the tool: the output's `data`
+    must be split into `common` and two `halves` (one per slot) so the server can serve one
+    player's half without the other's. Is that split natural for `melee analyse`?
