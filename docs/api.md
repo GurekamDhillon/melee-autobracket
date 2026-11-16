@@ -386,7 +386,7 @@ In a request every field is optional (missing ones take the defaults shown here)
 `{"Entrant": id}`), `winner_to` and `loser_to` (`[set id, slot]` or null), and `state`
 (`"Waiting"`, `"Ready"`, `{"Done":{"winner": slot}}` or `"Skipped"`).
 
-<!-- checked: EventView; pending: unverified_games -->
+<!-- checked: EventView -->
 ```json
 {
   "summary": {"id": 1, "name": "Weekly #12", "state": "running", "entrants": 2},
@@ -494,7 +494,7 @@ How a judged game was decided. Only `Verified`, `VerifiedInexact` and `PeerOnly`
 {"Illegal": "stage"}
 ```
 
-<!-- pending: Verdict -->
+<!-- checked: Verdict -->
 ```json
 "VerifierUnavailable"
 ```
@@ -567,7 +567,7 @@ An open organiser queue item.
 | `reporter_tag` | string or null | **added in the same release** |
 | `tags` | [slot 0 tag, slot 1 tag] or null | **added in the same release** |
 
-<!-- checked: QueueItem; pending: evidence, reporter_tag, tags -->
+<!-- checked: QueueItem -->
 ```json
 {
   "id": 7,

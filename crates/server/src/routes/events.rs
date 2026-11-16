@@ -153,13 +153,13 @@ pub(super) async fn event_view(db: &SqlitePool, id: i64) -> Result<EventView, Ap
     .bind(id)
     .fetch_all(&mut *tx)
     .await?;
+    let unverified_games = crate::lifecycle::unverified_games(&mut *tx, id).await?;
     tx.commit().await?;
     let decided_by = decided
         .into_iter()
         .map(|(set_id, how)| Ok((to_int(set_id)?, how)))
         .collect::<Result<_, ApiError>>()?;
 
-    let unverified_games = crate::lifecycle::unverified_games(db, id).await?;
     let entrants = i64::try_from(tags.len()).unwrap_or(i64::MAX);
     Ok(EventView {
         summary: summary(id, name, state, entrants)?,
