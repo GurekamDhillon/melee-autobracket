@@ -1,0 +1,40 @@
+[Unit]
+Description=autobracket nightly local backup (SQLite snapshot, optional Zitadel pg_dump)
+Documentation=file:///usr/share/doc/autobracket/backup.md
+# Only the local disk is written to: there is no off-site copy (docs/backup.md).
+After=autobracket.service docker.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/autobracket-backup.sh
+# Runs as root: it must read the DynamicUser's state directory and talk to Docker. Keep the
+# rest of the system read-only to it.
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictSUIDSGID=yes
+RestrictRealtime=yes
+RestrictNamespaces=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+# @system-service keeps setrlimit etc., which the docker CLI (Go) needs at start-up.
+SystemCallFilter=@system-service
+# Enough to read the service's private state directory and manage its own files.
+CapabilityBoundingSet=CAP_DAC_OVERRIDE CAP_DAC_READ_SEARCH CAP_FOWNER
+# Where backups are written (BACKUP_DIR in backup.env; change both together), and the live
+# database's directory: a reader of a WAL-mode SQLite database writes to its -shm file, so
+# the state directory cannot be read-only here. Paths marked "-" may be missing.
+ReadWritePaths=/var/backups/autobracket
+ReadWritePaths=-/var/lib/private/autobracket -/var/lib/autobracket
+# Leave CPU and disk to the server and the players.
+Nice=10
+IOSchedulingClass=idle
+# No [Install]: autobracket-backup.timer starts this unit; enable the timer, not the service.

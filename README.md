@@ -492,6 +492,12 @@ sqlite3 /var/lib/autobracket/autobracket.sqlite ".backup /root/autobracket-$(dat
 or stop the service (`systemctl stop autobracket`), copy `/var/lib/autobracket` (database and
 `replays/`), and start it again.
 
+`deploy/backup/` automates the first form as a nightly systemd timer: a verified
+`.backup` snapshot (and, if configured, a `pg_dump` of a Zitadel Postgres container) into
+root-only `/var/backups/autobracket`, keeping the newest 7. It is a **local** backup on the
+same disk, with no off-site copy: it covers bad writes and botched migrations, not a lost
+disk. Install, limits and restore steps: [docs/backup.md](docs/backup.md).
+
 Keep a private copy of the organiser key (`organiser.key` from `init`) too: whoever holds it
 can run your events. If it is lost or leaks, make a new one with `autobracket keygen` and
 replace the old public key in `to_keys`.
