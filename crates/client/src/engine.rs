@@ -23,6 +23,22 @@ pub struct GameParams<'a> {
     pub timer_secs: u32,
 }
 
+/// The line the engine prints on stderr when it was hosting and no guest joined within its
+/// `--np-join-wait`.
+pub const NO_OPPONENT_LINE: &str = "play: netplay: no opponent joined";
+/// The engine's exit status in that case.
+pub const NO_OPPONENT_EXIT_CODE: i32 = 4;
+
+/// How a run ended.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RunExit {
+    /// The exit status; `None` when the process was ended by a signal.
+    pub code: Option<i32>,
+    /// The game gave up because nobody joined: it exited with [`NO_OPPONENT_EXIT_CODE`] or
+    /// printed [`NO_OPPONENT_LINE`].
+    pub no_opponent: bool,
+}
+
 pub trait Engine {
     /// Starts a run hosting a netplay room.
     fn host(&mut self, p: &GameParams) -> anyhow::Result<()>;
@@ -40,13 +56,19 @@ pub trait Engine {
     fn run_dir(&self) -> Option<PathBuf> {
         None
     }
+    /// How the last run that exited on its own ended; `None` before then, while a run is
+    /// going, or after [`Engine::stop`].
+    fn last_exit(&mut self) -> Option<RunExit> {
+        None
+    }
 }
 
 /// Runs `{melee}` with `host_args` or `join_args`. Each argument has `{iso}`, `{relay}`,
 /// `{code}` (empty when hosting), `{mrpl}`, `{stocks}` and `{timer_secs}` replaced; no
-/// shell is involved. Every run gets a fresh `{work_dir}/run-{n}/`, which is the
-/// `MELEE_SLP_DIR` and holds `game.mrpl` and `engine.log` (the game's stdout and stderr,
-/// which the client follows and forwards); run directories are never deleted.
+/// shell is involved; `{iso}` and `{mrpl}` are absolute paths. Every run gets a fresh
+/// `{work_dir}/run-{n}/`, which is the game's working directory and `MELEE_SLP_DIR` and
+/// holds `game.mrpl` and `engine.log` (the game's stdout and stderr, which the client
+/// follows and forwards); run directories are never deleted.
 pub struct CommandEngine {
     melee: PathBuf,
     iso: String,
@@ -56,6 +78,7 @@ pub struct CommandEngine {
     code_regex: Regex,
     output: Output,
     run: Option<Run>,
+    last_exit: Option<RunExit>,
 }
 
 /// Where the game's output lines are forwarded.
@@ -86,15 +109,23 @@ impl CommandEngine {
     pub fn new(cfg: &ClientConfig) -> anyhow::Result<Self> {
         let code_regex = Regex::new(&cfg.code_regex)
             .with_context(|| format!("invalid code_regex {:?}", cfg.code_regex))?;
+        // The game runs in its run directory, so relative paths would point elsewhere. A
+        // `melee` that is a bare name is left for a PATH lookup.
+        let melee = if cfg.melee.components().count() > 1 {
+            absolute(&cfg.melee)?
+        } else {
+            cfg.melee.clone()
+        };
         Ok(CommandEngine {
-            melee: cfg.melee.clone(),
-            iso: utf8(&cfg.iso)?.to_string(),
-            work_dir: cfg.work_dir.clone(),
+            melee,
+            iso: utf8(&absolute(&cfg.iso)?)?.to_string(),
+            work_dir: absolute(&cfg.work_dir)?,
             host_args: cfg.host_args.clone(),
             join_args: cfg.join_args.clone(),
             code_regex,
             output: Arc::new(|line: &str| eprintln!("{line}")),
             run: None,
+            last_exit: None,
         })
     }
 
@@ -107,6 +138,7 @@ impl CommandEngine {
         if self.running() {
             bail!("the game is already running");
         }
+        self.last_exit = None;
         let dir = self.new_run_dir()?;
         let mrpl = dir.join("game.mrpl");
         let mrpl = utf8(&mrpl)?;
@@ -142,6 +174,7 @@ impl CommandEngine {
         let child = Command::new(&self.melee)
             .args(&args)
             .env("MELEE_SLP_DIR", &dir)
+            .current_dir(&dir)
             .stdin(Stdio::null())
             .stdout(log.try_clone().context("duplicating the log file handle")?)
             .stderr(log)
@@ -223,12 +256,14 @@ impl Engine for CommandEngine {
                 }
                 run.child = None;
                 run.done.store(true, Ordering::Release);
+                self.last_exit = Some(run_exit(status.code(), &run.dir));
                 false
             }
             Err(e) => {
                 eprintln!("checking on the game: {e}");
                 run.child = None;
                 run.done.store(true, Ordering::Release);
+                self.last_exit = Some(run_exit(None, &run.dir));
                 false
             }
         }
@@ -256,6 +291,7 @@ impl Engine for CommandEngine {
     }
 
     fn stop(&mut self) {
+        self.last_exit = None;
         if let Some(mut run) = self.run.take() {
             if let Some(child) = run.child.as_mut() {
                 kill_group(child);
@@ -266,6 +302,26 @@ impl Engine for CommandEngine {
 
     fn run_dir(&self) -> Option<PathBuf> {
         self.run.as_ref().map(|r| r.dir.clone())
+    }
+
+    fn last_exit(&mut self) -> Option<RunExit> {
+        if self.running() {
+            return None;
+        }
+        self.last_exit
+    }
+}
+
+/// How a run in `dir` that exited with `code` ended, from its code and its `engine.log`.
+fn run_exit(code: Option<i32>, dir: &Path) -> RunExit {
+    let printed = std::fs::read(dir.join("engine.log")).is_ok_and(|log| {
+        String::from_utf8_lossy(&log)
+            .lines()
+            .any(|l| l.trim_end() == NO_OPPONENT_LINE)
+    });
+    RunExit {
+        code,
+        no_opponent: code == Some(NO_OPPONENT_EXIT_CODE) || printed,
     }
 }
 
@@ -352,6 +408,10 @@ impl Tail {
             }
         }
     }
+}
+
+fn absolute(path: &Path) -> anyhow::Result<PathBuf> {
+    std::path::absolute(path).with_context(|| format!("resolving {}", path.display()))
 }
 
 fn utf8(path: &Path) -> anyhow::Result<&str> {

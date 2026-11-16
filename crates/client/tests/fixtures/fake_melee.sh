@@ -8,8 +8,15 @@
 #     spawner       like slow, but first starts a background `sleep 30` of its own and
 #                   records its pid to $MELEE_SLP_DIR/bgpid.
 #     quick         prints the host's MATCH CODE line on stderr, writes one replay, exits.
+#     sleepy        prints the MATCH CODE line, sleeps 30 s, writes one replay.
+#     no-opponent   prints the MATCH CODE line and the engine's "no opponent joined" line,
+#                   exits 4 without a replay.
+#     exit4         exits 4 without that line and without a replay.
+#     line-exit1    prints the "no opponent joined" line, exits 1 without a replay.
+#     fail          exits 1 without a replay.
+#     cwd           writes `stray.txt` to its current directory, then one replay.
 #     (otherwise)   prints the MATCH CODE line, sleeps 1 s, writes one replay.
-# Every mode exits 0.
+# Modes not listed with another exit status exit 0.
 set -eu
 
 if [ "${1:-}" = "version" ]; then
@@ -44,6 +51,32 @@ case "${1:-}" in
         ;;
     quick)
         echo "$code_line" >&2
+        printf 'fake replay' > "$replay"
+        ;;
+    sleepy)
+        echo "$code_line" >&2
+        sleep 30
+        printf 'fake replay' > "$replay"
+        ;;
+    no-opponent)
+        echo "$code_line" >&2
+        echo "play: netplay: no opponent joined" >&2
+        exit 4
+        ;;
+    exit4)
+        echo "$code_line" >&2
+        exit 4
+        ;;
+    line-exit1)
+        echo "play: netplay: no opponent joined" >&2
+        exit 1
+        ;;
+    fail)
+        echo "fake: failing" >&2
+        exit 1
+        ;;
+    cwd)
+        printf 'stray' > stray.txt
         printf 'fake replay' > "$replay"
         ;;
     *)

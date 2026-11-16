@@ -22,7 +22,7 @@ libc.workspace = true
 rand.workspace = true
 regex.workspace = true
 reqwest.workspace = true
-tokio.workspace = true
+tokio = { workspace = true, features = ["signal"] }
 
 [dev-dependencies]
 autobracket-server = { path = "../server", features = ["testkit"] }
