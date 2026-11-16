@@ -67,14 +67,14 @@ binary, runs as uid 10001, and keeps everything in the volume mounted on `/data`
 
 ```sh
 docker compose -f deploy/docker-compose.yml build
-docker compose -f deploy/docker-compose.yml run --rm autobracket \
-  init --dir /data --bind 0.0.0.0:8080 --proxy-cidr 172.16.0.0/12
+docker compose -f deploy/docker-compose.yml run --rm autobracket init --dir /data \
+  --bind 0.0.0.0:8080 --proxy-cidr 172.16.0.0/12 --proxy-cidr 192.168.0.0/16
 docker compose -f deploy/docker-compose.yml up -d
 ```
 
 The server is then published on the host's `127.0.0.1:8080` only. The comments in
 `deploy/docker-compose.yml` show how to run the admin CLI with `docker compose exec`, how to
-edit the config, why `--proxy-cidr` is the Docker range here, and how to mount your own engine
+edit the config, why `--proxy-cidr` names Docker's address ranges here, and how to mount your own engine
 and disc image read-only for the `in_process` verifier.
 
 ### C. Build from source

@@ -7,10 +7,12 @@
 # proxy. The X-Forwarded-For line below passes the client's address on; list the address nginx
 # connects from in the server's trusted_proxies so it is believed (README, "TLS and reverse
 # proxies"):
-#   nginx on the same host, proxying to 127.0.0.1:8080 (systemd, or the compose file's
-#   loopback port):   trusted_proxies = ["127.0.0.1/32"]   (`init --proxy-cidr 127.0.0.1/32`)
-#   ...except that with the server in Docker the request then reaches it from the Docker
-#   network's gateway:  trusted_proxies = ["172.16.0.0/12"], or better that network's subnet.
+#   nginx and the server on the same host, the server not in Docker (e.g. systemd):
+#     trusted_proxies = ["127.0.0.1/32"]   (`init --proxy-cidr 127.0.0.1/32`)
+#   The server in Docker (deploy/docker-compose.yml), nginx on the host proxying to its
+#   loopback port: requests reach the server from the Docker network's gateway, so trust
+#   that network's subnet, from
+#   `docker network inspect autobracket_default` (e.g. "172.18.0.0/16" or "192.168.80.0/20").
 # Never trust a range that clients can connect from directly.
 
 server {

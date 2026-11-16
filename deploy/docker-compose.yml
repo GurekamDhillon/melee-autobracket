@@ -6,12 +6,14 @@
 #     published below on the host's loopback only; never publish it on a public address.
 #     --proxy-cidr is your reverse proxy's address as the container sees it (README, "TLS and
 #     reverse proxies"): a proxy on the host connecting to 127.0.0.1:8080 arrives from this
-#     project's Docker network gateway, inside 172.16.0.0/12 on a default Docker install
-#     (`docker network inspect autobracket_default` shows the exact subnet; prefer it).
+#     project's Docker network gateway. Docker picks that network from its default pools,
+#     172.17.0.0/16-172.31.0.0/16 and then 192.168.0.0/16, hence the two ranges below; safe
+#     only because the port is published on loopback. Narrow it later to the subnet that
+#     `docker network inspect autobracket_default` shows.
 #
 #       docker compose -f deploy/docker-compose.yml build
-#       docker compose -f deploy/docker-compose.yml run --rm autobracket \
-#         init --dir /data --bind 0.0.0.0:8080 --proxy-cidr 172.16.0.0/12
+#       docker compose -f deploy/docker-compose.yml run --rm autobracket init --dir /data \
+#         --bind 0.0.0.0:8080 --proxy-cidr 172.16.0.0/12 --proxy-cidr 192.168.0.0/16
 #       docker compose -f deploy/docker-compose.yml up -d
 #
 #     `init` prints the next steps; run its `autobracket ...` commands as in (b). The organiser
