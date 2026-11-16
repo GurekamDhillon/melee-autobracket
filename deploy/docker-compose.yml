@@ -4,20 +4,22 @@
 # (a) First-time setup: build the image, then write a key and a config into the volume.
 #     Inside a container the server must listen on 0.0.0.0, so pass --bind 0.0.0.0:8080. It is
 #     published below on the host's loopback only; never publish it on a public address.
-#     --proxy-cidr is your reverse proxy's address as the container sees it (README, "TLS and
-#     reverse proxies"): a proxy on the host connecting to 127.0.0.1:8080 arrives from this
-#     project's Docker network gateway. Docker picks that network from its default pools,
-#     172.17.0.0/16-172.31.0.0/16 and then 192.168.0.0/16, hence the two ranges below; safe
-#     only because the port is published on loopback. Narrow it later to the subnet that
-#     `docker network inspect autobracket_default` shows.
+#     --proxy-cidr is your reverse proxy's address as the server sees it (README, "TLS and
+#     reverse proxies"). A proxy on the host connecting to 127.0.0.1:8080 reaches the server
+#     through Docker's port publishing and arrives from the gateway of this project's
+#     network, which is pinned below to 10.203.47.0/28: the gateway is 10.203.47.1. Trust
+#     that one address and nothing wider: a trusted range that holds any client's own
+#     address lets that client choose the address the server sees.
 #
 #       docker compose -f deploy/docker-compose.yml build
 #       docker compose -f deploy/docker-compose.yml run --rm autobracket init --dir /data \
-#         --bind 0.0.0.0:8080 --proxy-cidr 172.16.0.0/12 --proxy-cidr 192.168.0.0/16
+#         --bind 0.0.0.0:8080 --proxy-cidr 10.203.47.1/32
 #       docker compose -f deploy/docker-compose.yml up -d
 #
-#     `init` prints the next steps; run its `autobracket ...` commands as in (b). The organiser
-#     key is /data/organiser.key in the volume: back it up (README, "Backups").
+#     `init` then prints its next steps. Skip its step 1 (`autobracket serve ...`):
+#     `docker compose up -d` runs the server. Run its other `autobracket ...` commands as in
+#     (b). The organiser key is /data/organiser.key in the volume: back it up (README,
+#     "Backups").
 #
 # (b) Admin commands run inside the running container, against the server's own port:
 #
@@ -44,7 +46,13 @@
 #       engine = "/opt/melee/melee"
 #       iso = "/opt/melee/melee.iso"
 #
-#     then `docker compose -f deploy/docker-compose.yml restart`.
+#     then `docker compose -f deploy/docker-compose.yml restart`. The engine's scratch files
+#     go to /tmp (a tmpfs below; raise its size if re-simulations fail for lack of space) and
+#     its crash logs to /data/crashlogs.
+#
+# The container runs with a read-only root file system, no capabilities and no privilege
+# escalation; only /data (the volume) and /tmp are writable. To use a host directory instead
+# of the named volume, it must be owned by uid 10001 (`sudo chown 10001:10001 DIR`).
 
 name: autobracket
 
@@ -64,6 +72,21 @@ services:
       # - /opt/melee/melee.iso:/opt/melee/melee.iso:ro
     environment:
       AUTOBRACKET_LOG: info
+    read_only: true
+    tmpfs:
+      - /tmp:size=256m,mode=1777
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+
+networks:
+  default:
+    ipam:
+      config:
+        # Pinned so the proxy's address (the gateway, 10.203.47.1) is known in advance. Any
+        # free private /28 works; Compose refuses to start, naming the overlap, if this one
+        # collides with a network already on the host. Change --proxy-cidr to match.
+        - subnet: 10.203.47.0/28
+          gateway: 10.203.47.1
 
 volumes:
   data:
