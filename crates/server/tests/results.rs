@@ -115,6 +115,43 @@ async fn history_is_newest_first() {
     assert_eq!(h[0].placings[0].tag, "Armada");
 }
 
+/// `?limit=N` keeps the newest N complete events; the default is every one; 1..=100 only.
+#[tokio::test]
+async fn history_limit_keeps_the_newest() {
+    let app = TestApp::spawn(|_| {}).await;
+    let (first, players) = played_out_se4(&app).await;
+    let refs: Vec<&TestPlayer> = players.iter().take(2).collect();
+    let second = app.started_event(Format::SingleElim, &refs).await;
+    win_set(&app, second, 0, &players, 1).await;
+    // A newer running event does not use up the limit.
+    app.started_event(Format::SingleElim, &refs).await;
+
+    let h: Vec<EventResult> = get_json(&app, "/v1/history?limit=1").await;
+    let ids: Vec<i64> = h.iter().map(|r| r.summary.id).collect();
+    assert_eq!(ids, vec![second]);
+    assert_eq!(h[0].placings.len(), 2, "placings come with the event");
+    for path in [
+        "/v1/history",
+        "/v1/history?limit=2",
+        "/v1/history?limit=100",
+    ] {
+        let h: Vec<EventResult> = get_json(&app, path).await;
+        let ids: Vec<i64> = h.iter().map(|r| r.summary.id).collect();
+        assert_eq!(ids, vec![second, first], "{path}");
+    }
+    for path in [
+        "/v1/history?limit=0",
+        "/v1/history?limit=101",
+        "/v1/history?limit=-1",
+        "/v1/history?limit=x",
+    ] {
+        let res = reqwest::get(format!("{}{path}", app.url)).await.unwrap();
+        assert_eq!(res.status(), StatusCode::BAD_REQUEST, "{path}");
+        let body: serde_json::Value = res.json().await.unwrap();
+        assert!(body["error"].is_string(), "{path}: {body}");
+    }
+}
+
 #[tokio::test]
 async fn players_index_counts_events_titles_and_sets() {
     let app = TestApp::spawn(|_| {}).await;

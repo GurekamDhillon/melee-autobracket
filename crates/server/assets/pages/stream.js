@@ -60,8 +60,17 @@
     try {
       const list = await getJson("/v1/events");
       const running = (Array.isArray(list) ? list : []).filter((ev) => ev.state === "running");
-      const views = await Promise.all(running.map((ev) => getJson("/v1/events/" + encodeURIComponent(ev.id))));
-      render(running.map((ev, i) => ({ id: ev.id, name: ev.name, sets: liveSetLines(views[i]) })));
+      // An event gone between the two requests (404) is no longer live; the rest still show.
+      const views = await Promise.all(running.map((ev) =>
+        getJson("/v1/events/" + encodeURIComponent(ev.id)).catch((err) => {
+          if (err && err.status === 404) return null;
+          throw err;
+        })));
+      const shown = [];
+      running.forEach((ev, i) => {
+        if (views[i]) shown.push({ id: ev.id, name: ev.name, sets: liveSetLines(views[i]) });
+      });
+      render(shown);
     } catch (err) {
       if (!drawnKey) now.replaceChildren(el("p", "notice", "Couldn’t reach the server just now; trying again in a few seconds."));
     }

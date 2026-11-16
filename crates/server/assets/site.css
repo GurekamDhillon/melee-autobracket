@@ -345,6 +345,9 @@ h2 { margin: 0 0 var(--sp-4); font-size: 1.125rem; line-height: 1.2; white-space
 }
 .seed { color: var(--on-surface-quiet); font-size: 0.75rem; text-align: right; font-variant-numeric: tabular-nums; }
 .tag { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; overflow-wrap: normal; font-size: 0.9375rem; }
+/* Tags on the bracket link to the profile, quietly: no underline until pointed at. */
+a.tag, a.champ-tag { color: inherit; text-decoration: none; }
+a.tag:hover, a.tag:focus-visible, a.champ-tag:hover, a.champ-tag:focus-visible { text-decoration: underline; }
 .score { display: flex; align-items: center; gap: 0.4rem; font-size: 1.1875rem; line-height: 1; font-variant-numeric: tabular-nums; }
 .tick {
   width: 0.4rem; height: 0.75rem;
@@ -478,7 +481,8 @@ ol.entrants.few { grid-template-columns: min(17rem, 100%); }
 .nav a:nth-child(odd) { rotate: -0.8deg; }
 .nav a:nth-child(even) { rotate: 0.8deg; }
 .nav a:hover, .nav a:focus-visible { background: var(--accent); rotate: 0deg; translate: 0 -3px; box-shadow: var(--shadow-hover); outline: none; }
-.nav a[aria-current="page"] { background: var(--accent); rotate: 0deg; }
+/* This page ("page"), or the section it belongs to ("true"). */
+.nav a[aria-current] { background: var(--accent); rotate: 0deg; }
 .nav a:focus-visible { box-shadow: var(--ring-hover), 4px 6px 0 3px var(--outline); }
 
 /* ---- cards: a sticker list (events, results) ---- */
@@ -665,6 +669,7 @@ h3 { margin: 0 0 var(--sp-1); font-family: var(--font-display); font-weight: 800
   box-shadow: var(--shadow);
   font-size: 0.9375rem;
 }
+.live-sets li a { color: inherit; }
 .live-sets li:nth-child(odd) { rotate: -0.5deg; }
 .live-sets li:nth-child(even) { rotate: 0.5deg; }
 /* A pill link, as the nav's. */

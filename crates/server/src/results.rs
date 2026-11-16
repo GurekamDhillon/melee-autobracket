@@ -43,23 +43,54 @@ type EventRow = (
 
 /// Every event, oldest first, read in one deferred transaction (one consistent snapshot).
 pub async fn load_events(db: &SqlitePool) -> Result<Vec<LoadedEvent>, ApiError> {
+    load_matching(db, "", "id", NO_LIMIT).await
+}
+
+/// The newest `limit` complete events (every one when `None`), newest first; only their
+/// entrants and sets are read, so the cost is bounded by `limit`, not by the table.
+pub async fn load_latest_complete(
+    db: &SqlitePool,
+    limit: Option<u32>,
+) -> Result<Vec<LoadedEvent>, ApiError> {
+    let limit = limit.map_or(NO_LIMIT, i64::from);
+    load_matching(db, "WHERE state = 'complete'", "id DESC", limit).await
+}
+
+/// SQLite's "no limit".
+const NO_LIMIT: i64 = -1;
+
+/// At most `limit` events in `order` among those `filter` (a fixed `WHERE` clause or empty;
+/// both are code, never data) keeps, with their entrants and sets, in one deferred
+/// transaction (one consistent snapshot).
+async fn load_matching(
+    db: &SqlitePool,
+    filter: &str,
+    order: &str,
+    limit: i64,
+) -> Result<Vec<LoadedEvent>, ApiError> {
+    let chosen = format!("SELECT id FROM events {filter} ORDER BY {order} LIMIT ?");
     let mut tx = db.begin().await?;
-    let events: Vec<EventRow> = sqlx::query_as(
+    let events: Vec<EventRow> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
         "SELECT id, name, state, bracket_json, starts_at, description, created_at
-         FROM events ORDER BY id",
-    )
+         FROM events WHERE id IN ({chosen}) ORDER BY {order}"
+    )))
+    .bind(limit)
     .fetch_all(&mut *tx)
     .await?;
-    let entrants: Vec<(i64, String)> = sqlx::query_as(
+    let entrants: Vec<(i64, String)> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
         "SELECT n.event_id, p.tag FROM entrants n JOIN players p ON p.key = n.player_key
-         ORDER BY n.event_id, n.seed",
-    )
+         WHERE n.event_id IN ({chosen}) ORDER BY n.event_id, n.seed"
+    )))
+    .bind(limit)
     .fetch_all(&mut *tx)
     .await?;
-    let sets: Vec<(i64, i64, i64, i64)> =
-        sqlx::query_as("SELECT event_id, set_id, wins0, wins1 FROM sets ORDER BY event_id, set_id")
-            .fetch_all(&mut *tx)
-            .await?;
+    let sets: Vec<(i64, i64, i64, i64)> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
+        "SELECT event_id, set_id, wins0, wins1 FROM sets
+         WHERE event_id IN ({chosen}) ORDER BY event_id, set_id"
+    )))
+    .bind(limit)
+    .fetch_all(&mut *tx)
+    .await?;
     tx.commit().await?;
 
     let mut tags_by_event: HashMap<i64, Vec<String>> = HashMap::new();

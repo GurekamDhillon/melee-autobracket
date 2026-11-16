@@ -12,8 +12,6 @@
   let drawnKey = "";
   let drawnOnce = false;
 
-  document.title = "Bracket";
-
   // ---- pieces --------------------------------------------------------------
 
   function heading(text) {
@@ -46,8 +44,15 @@
     card.append(el("span", "flag", "Live"));
     card.append(nameLink(ev));
     if (lines.length) {
+      // Each line links to the bracket, as on the stream page.
       const list = el("ol", "live-sets");
-      for (const line of lines) list.append(el("li", null, line));
+      for (const line of lines) {
+        const li = el("li");
+        const a = el("a", null, line);
+        a.href = eventHref(ev.id);
+        li.append(a);
+        list.append(li);
+      }
       card.append(list);
     } else {
       card.append(el("p", "quiet", "No set is being played right now."));
@@ -167,7 +172,8 @@
     try {
       const [list, hist, stream] = await Promise.all([
         getJson("/v1/events"),
-        getJson("/v1/history"),
+        // Only the newest result is shown, so only that one is asked for.
+        getJson("/v1/history?limit=1"),
         // The stream route may be missing or unconfigured; then there is no stream to watch.
         getJson("/v1/stream").catch(() => null),
       ]);

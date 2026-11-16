@@ -30,8 +30,10 @@
     const rows = el("ol", "rows");
     for (const p of result.placings) if (p.place <= PLACES_SHOWN) rows.append(placing(p));
     li.append(rows);
-    if (ev.entrants > PLACES_SHOWN) {
-      const more = el("a", "quiet", "and " + (ev.entrants - PLACES_SHOWN) + " more");
+    // A tie across 8th shows every entrant of that place, so count what is left, not 8.
+    const hidden = result.placings.length - rows.childElementCount;
+    if (hidden > 0) {
+      const more = el("a", "quiet", "and " + hidden + " more");
       more.href = AB.eventHref(ev.id);
       const p = el("p");
       p.append(more);
