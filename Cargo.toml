@@ -30,3 +30,5 @@ toml = "1"
 async-trait = "0.1"
 reqwest = { version = "0.13", default-features = false, features = ["json", "rustls"] }
 tempfile = "3"
+regex = "1"
+libc = "0.2"

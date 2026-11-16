@@ -1,0 +1,33 @@
+[package]
+name = "autobracket-client"
+edition.workspace = true
+version.workspace = true
+
+[lib]
+name = "autobracket_client"
+
+[[bin]]
+name = "autobracket-client"
+path = "src/main.rs"
+
+[dependencies]
+proto.workspace = true
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+toml.workspace = true
+clap.workspace = true
+hex.workspace = true
+libc.workspace = true
+rand.workspace = true
+regex.workspace = true
+reqwest.workspace = true
+tokio.workspace = true
+
+[dev-dependencies]
+autobracket-server = { path = "../server", features = ["testkit"] }
+replay = { workspace = true, features = ["testkit"] }
+bracket.workspace = true
+tempfile.workspace = true
+reqwest.workspace = true
+tokio = { workspace = true, features = ["io-util"] }
