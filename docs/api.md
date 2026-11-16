@@ -61,8 +61,9 @@ Contents:
 ## 2. Signing a request
 
 There are no accounts or passwords. A participant is an Ed25519 key pair; the public key is
-their identity. Every route except the public ones (`GET /`, `GET /assets/fonts/{file}`,
-`GET /v1/events`, `GET /v1/events/{id}`) must be signed with four headers:
+their identity. Every route except the public ones (`GET /`, `GET /events/{id}`,
+`GET /assets/fonts/{file}`, `GET /v1/events`, `GET /v1/events/{id}`) must be signed with four
+headers:
 
 | Header | Value |
 |---|---|
@@ -223,7 +224,8 @@ described above; the tables list the other statuses.
 
 | Method | Path | Who | Request body | Success | Other statuses |
 |---|---|---|---|---|---|
-| GET | `/` | public | — | 200 HTML bracket page | — |
+| GET | `/` | public | — | 200 HTML landing page | — |
+| GET | `/events/{id}` | public | — | 200 HTML bracket page | 400, 404 |
 | GET | `/assets/fonts/{file}` | public | — | 200 `font/woff2`, one of the page's fonts | 404 |
 | GET | `/v1/events` | public | — | 200 `[EventSummary]` | — |
 | GET | `/v1/events/{id}` | public | — | 200 `EventView` | 400, 404 |

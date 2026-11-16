@@ -1,0 +1,594 @@
+/* Fonts: served by this server; fonts/README.md beside this file says where they come from. The text face is
+   Source Sans 3 700, subset and therefore renamed (its licence reserves the name). */
+@font-face {
+  font-family: "Bricolage Grotesque";
+  src: url("/assets/fonts/bricolage-grotesque-800.woff2") format("woff2");
+  font-weight: 800;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: "Autobracket Text";
+  src: url("/assets/fonts/autobracket-text-700.woff2") format("woff2");
+  font-weight: 700;
+  font-style: normal;
+  font-display: swap;
+}
+
+/* ---- Envoy "Party pack" tokens, copied from design/envoy/tokens.css. Rules below use them by
+   name only, so a change to the kit's values is an edit to this block. ---- */
+:root {
+  --envoy-sunny: #FFD84A;        /* cursor, hovered sticker, ready, highlights */
+  --envoy-ink: #2A1A6E;          /* grape ink: every outline, hard shadow, text on white */
+  --envoy-white: #FFFFFF;        /* sticker faces */
+  --envoy-coral: #FF4D6D;        /* Player 1, warnings, stamps */
+  --envoy-lagoon: #00A99D;       /* Player 2 */
+  --envoy-lilac: #5A4C99;        /* quiet text on white */
+  --envoy-lilac-pale: #C9BFF5;   /* quiet text on ink or violet */
+  --envoy-coral-deep: #C2183F;   /* cannot-pay / error text */
+  --envoy-faded: #DAD7E8;        /* done, locked */
+  --envoy-cream: #FBF6DD;        /* dashed empty seat */
+  --envoy-violet: #4C3D9E;       /* scene base (scenery only, no outline) */
+  --envoy-violet-d: #33257C;     /* scene ground */
+
+  /* semantic aliases (dark = the game) */
+  --bg: var(--envoy-violet);
+  --bg-ground: var(--envoy-violet-d);
+  --surface: var(--envoy-white);       /* sticker face */
+  --on-surface: var(--envoy-ink);
+  --on-surface-quiet: var(--envoy-lilac);
+  --on-bg: var(--envoy-white);
+  --on-bg-quiet: var(--envoy-lilac-pale);
+  --outline: var(--envoy-ink);
+  --accent: var(--envoy-sunny);        /* hover / focus / current */
+  --p1: var(--envoy-coral);
+  --p2: var(--envoy-lagoon);
+  --danger: var(--envoy-coral-deep);
+
+  /* shape */
+  --edge: 3px;                         /* sticker outline (2.5 pills, 2 name tags) */
+  --radius: 12px;                      /* general; 10 list rows; 9-11 pills */
+  --radius-row: 10px;
+  --shadow: 3px 4px 0 var(--envoy-ink);        /* hard, no blur */
+  --shadow-hover: 4px 6px 0 var(--envoy-ink);
+  --ring-hover: 0 0 0 3px var(--envoy-white);  /* hovered sticker: white ring outside edge */
+
+  /* type */
+  --font-display: "Bricolage Grotesque", "Autobracket Text", "Source Sans 3", system-ui, sans-serif; /* 800, -0.02em */
+  --font-text: "Autobracket Text", "Source Sans 3", system-ui, sans-serif;                            /* 700 */
+
+  /* spacing rhythm */
+  --sp-1: 4px; --sp-2: 8px; --sp-3: 12px; --sp-4: 16px; --sp-5: 24px;
+  --stagger: 2;                        /* frames between list items (3 for cards) */
+
+  /* motion: 60 fps frames in ms */
+  --m-hover: 67ms;
+  --m-enter: 150ms;      /* scale .85 -> 1.04 -> 1, opacity 0 -> 1 */
+  --m-burst: 117ms;      /* scale 0 -> 1.2 -> 1 */
+  --ease: cubic-bezier(.22, 1, .36, 1);
+
+  /* ---- this page's own, derived from the above ---- */
+  --frame: 16.67ms;
+  --edge-pill: 2.5px;
+  --hill: color-mix(in srgb, var(--bg) 90%, var(--envoy-white));  /* scenery, one step lighter */
+  --focus: var(--envoy-white);         /* keyboard focus ring */
+  --title-edge: 5px;                   /* ink edge round the white title */
+  --title-drop: 3px;
+  --set-w: 13rem;
+  color-scheme: dark;
+}
+/* DERIVED LIGHT VARIANT (from tokens.css; not in the game): paper page, same ink and accent. */
+@media (prefers-color-scheme: light) {
+  :root:not([data-theme="dark"]) {
+    --bg: #F3F0FF; --bg-ground: #E6E1FA;
+    --on-bg: var(--envoy-ink); --on-bg-quiet: var(--envoy-lilac);
+    --surface: #FFFFFF; --on-surface: var(--envoy-ink);
+    --shadow: 3px 4px 0 var(--envoy-ink);
+    --hill: var(--bg-ground);
+    --focus: var(--envoy-ink);
+    --title-edge: 0px;
+    --title-drop: 0px;
+    color-scheme: light;
+  }
+}
+
+* { box-sizing: border-box; }
+[hidden] { display: none !important; }
+html { -webkit-text-size-adjust: 100%; }
+body {
+  margin: 0;
+  min-height: 100vh;
+  padding: var(--sp-5) var(--sp-5) 5rem;
+  background: var(--bg);
+  color: var(--on-bg);
+  font: 700 1rem/1.35 var(--font-text);
+  overflow-wrap: anywhere;
+  overflow-x: clip;
+}
+h1, h2, .score, .champ-tag, .stamp.big {
+  font-family: var(--font-display);
+  font-weight: 800;
+  letter-spacing: -0.02em;
+}
+.sr { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+.defs { position: absolute; }
+
+/* ---- scene: flat violet, a lighter hill behind, a darker one rising from the ground ---- */
+.scene { position: fixed; inset: 0; z-index: -1; overflow: hidden; pointer-events: none; }
+.scene::before, .scene::after { content: ""; position: absolute; border-radius: 50%; }
+.scene::before { width: 78vw; height: 78vw; right: -18vw; top: 22vh; background: var(--hill); }
+.scene::after { width: 90vw; height: 60vw; left: -30vw; bottom: -48vw; background: var(--bg-ground); }
+footer {
+  position: fixed;
+  left: 0; right: 0; bottom: 0;
+  padding: var(--sp-3) var(--sp-5);
+  background: var(--bg-ground);
+  color: var(--on-bg-quiet);
+  font-size: 0.8125rem;
+}
+
+/* ---- header ---- */
+header.top {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: var(--sp-3) var(--sp-5);
+  margin-bottom: var(--sp-4);
+}
+h1 {
+  margin: 0;
+  font-size: 2.25rem;
+  line-height: 1.1;
+  -webkit-text-stroke: var(--title-edge) var(--outline);
+  paint-order: stroke fill;
+  text-shadow: 0 var(--title-drop) 0 var(--outline);
+}
+.meta { margin: var(--sp-1) 0 0; color: var(--on-bg-quiet); font-size: 0.9375rem; }
+.meta .champion { color: var(--on-bg); }
+
+label.pick { display: flex; align-items: center; gap: var(--sp-2); color: var(--on-bg-quiet); font-size: 0.9375rem; max-width: 100%; }
+.pick-box { position: relative; display: inline-block; min-width: 0; }
+.pick-box::after {
+  content: "";
+  position: absolute;
+  right: 0.85rem; top: 50%;
+  border: 0.4rem solid transparent;
+  border-top-color: var(--outline);
+  border-bottom-width: 0;
+  translate: 0 -40%;
+  pointer-events: none;
+}
+select {
+  appearance: none;
+  display: block;
+  max-width: min(24rem, 100%);
+  padding: 0.35rem 2.3rem 0.35rem 0.75rem;
+  font: inherit;
+  color: var(--on-surface);
+  background: var(--surface);
+  border: var(--edge-pill) solid var(--outline);
+  border-radius: var(--radius-row);
+  box-shadow: var(--shadow);
+  text-overflow: ellipsis;
+  cursor: pointer;
+}
+select:hover { background: var(--accent); }
+select:focus-visible, .board:focus-visible { outline: 3px solid var(--focus); outline-offset: 3px; }
+/* Where the browser lets a real <select> be styled, its open list is kit list rows. */
+@supports (appearance: base-select) {
+  select, ::picker(select) { appearance: base-select; }
+  select::picker-icon { display: none; }
+  ::picker(select) {
+    margin-top: var(--sp-2);
+    padding: var(--sp-1) var(--sp-4) var(--sp-2) var(--sp-1);
+    background: transparent;
+    border: 0;
+  }
+  option {
+    margin-bottom: 6px;
+    padding: 0.3rem 0.75rem;
+    color: var(--on-surface);
+    background: var(--surface);
+    border: var(--edge-pill) solid var(--outline);
+    border-radius: var(--radius-row);
+    box-shadow: var(--shadow);
+    transition: translate var(--m-hover) var(--ease);
+  }
+  option:nth-child(odd) { rotate: -0.5deg; }
+  option:nth-child(even) { rotate: 0.5deg; }
+  option:hover, option:focus-visible {
+    background: var(--accent);
+    rotate: 0deg;
+    translate: 10px 0;
+    outline: none;
+  }
+  option::checkmark { order: 1; margin-left: auto; }
+}
+
+/* ---- notices: one sentence on a sticker, like the kit's description strip ---- */
+.notice {
+  width: fit-content;
+  max-width: 100%;
+  margin: 0 0 var(--sp-4);
+  padding: 0.3rem 0.8rem;
+  background: var(--surface);
+  color: var(--on-surface);
+  border: var(--edge) solid var(--outline);
+  border-radius: var(--radius-row);
+  box-shadow: var(--shadow);
+  font-size: 0.9375rem;
+  rotate: -0.6deg;
+}
+.notice.warn { color: var(--danger); border-color: var(--p1); }
+
+/* ---- the run strip: one mark per round ---- */
+.strip {
+  position: relative;
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--sp-2) 4.5rem;
+  margin: 0 0 var(--sp-5);
+  padding: 0.4rem 1.1rem 0.65rem;
+  background: var(--accent);
+  color: var(--on-surface);
+  border: var(--edge) solid var(--outline);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+}
+.grp-name { display: block; margin-bottom: 0.2rem; color: var(--on-surface-quiet); font-size: 0.8125rem; }
+.marks { display: flex; align-items: center; gap: 0.6rem; min-height: 1.75rem; }
+.mark { display: block; flex: none; width: 1.25rem; height: 1.25rem; border-radius: 50%; }
+.mark.disc { background: var(--envoy-white); border: var(--edge) solid var(--outline); }
+.mark.disc.done { background: var(--outline); }
+.mark.now { margin: 0 5px; box-shadow: 0 0 0 2.5px var(--accent), 0 0 0 5px var(--outline); }
+.mark.disc.now { background: var(--p1); border-width: var(--edge-pill); }
+.mark.star { width: 2rem; height: 2rem; }
+.mark.star svg {
+  display: block;
+  width: 100%; height: 100%;
+  overflow: visible;
+  fill: var(--envoy-white);
+  stroke: var(--outline);
+  stroke-width: 2.5;
+  stroke-linejoin: round;
+}
+.mark.star.done svg { fill: var(--outline); }
+.mark.star.now svg { fill: var(--p1); }
+
+/* ---- stamps and flags ---- */
+.stamp, .flag {
+  position: absolute;
+  top: -0.95rem; right: 0.6rem;
+  padding: 0 0.45rem;
+  border-radius: 8px;
+  font-size: 0.75rem;
+  line-height: 1.25rem;
+  white-space: nowrap;
+}
+.stamp { right: 2.9rem; background: var(--envoy-white); color: var(--danger); border: var(--edge-pill) solid var(--p1); rotate: -5deg; }
+.flag { background: var(--outline); color: var(--envoy-white); border: 2px solid var(--envoy-white); border-radius: 10px; }
+/* Large display text, so the kit's coral on white holds (3.2:1, large-text floor 3:1). */
+.stamp.big {
+  top: 50%; right: 1.25rem;
+  padding: 0.1rem 0.8rem;
+  color: var(--p1);
+  border-width: var(--edge);
+  border-radius: var(--radius-row);
+  font-size: 1.375rem;
+  line-height: 1.4;
+  translate: 0 -50%;
+  rotate: -7deg;
+}
+
+/* ---- bracket ---- */
+.board { overflow-x: auto; margin: 0 -0.75rem; padding: var(--sp-1) 0.75rem var(--sp-5); scrollbar-color: var(--on-bg-quiet) transparent; }
+.bracket {
+  display: grid;
+  grid-template-columns: max-content max-content;
+  grid-template-areas: "w f" "l l";
+  gap: 2.5rem 2rem;
+  width: max-content;
+}
+.side { display: flex; gap: 1.75rem; }
+.side.winners { grid-area: w; }
+.side.losers { grid-area: l; }
+.side.final { grid-area: f; }
+
+.round { display: flex; flex-direction: column; width: var(--set-w); }
+h2 { margin: 0 0 var(--sp-4); font-size: 1.125rem; line-height: 1.2; white-space: nowrap; }
+.sets { flex: 1; display: flex; flex-direction: column; justify-content: space-around; gap: 1.1rem; margin: 0; padding: 0; list-style: none; }
+.spacer { visibility: hidden; }
+
+.set {
+  position: relative;
+  min-height: 4.5rem;
+  padding: 0.3rem 0.65rem 0.3rem 0.4rem;
+  background: var(--surface);
+  color: var(--on-surface);
+  border: var(--edge) solid var(--outline);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+  transition: rotate var(--m-hover) var(--ease), translate var(--m-hover) var(--ease), box-shadow var(--m-hover) var(--ease);
+}
+/* Idle tilt: under 1.3 degrees, sign alternating down a column. */
+.tl1 { rotate: -1.1deg; }
+.tl2 { rotate: -0.6deg; }
+.tr1 { rotate: 0.7deg; }
+.tr2 { rotate: 1.2deg; }
+.set:hover { rotate: 0deg; translate: 0 -4px; box-shadow: var(--shadow-hover); }
+/* A live set rests in the kit's hovered look. */
+.set.live, .set.live:hover {
+  background: var(--accent);
+  rotate: 0deg;
+  box-shadow: var(--ring-hover), 4px 6px 0 3px var(--outline);
+}
+/* Nobody is known yet: the kit's dashed seat. */
+.set.seat, .set.seat:hover {
+  display: grid;
+  place-items: center;
+  background: var(--envoy-cream);
+  color: var(--on-surface-quiet);
+  border-style: dashed;
+  box-shadow: none;
+  rotate: 0deg;
+  translate: none;
+  font-size: 0.875rem;
+}
+
+.row {
+  display: grid;
+  grid-template-columns: 1.4rem minmax(0, 1fr) auto;
+  align-items: center;
+  column-gap: 0.4rem;
+  min-height: 1.875rem;
+}
+.seed { color: var(--on-surface-quiet); font-size: 0.75rem; text-align: right; font-variant-numeric: tabular-nums; }
+.tag { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; overflow-wrap: normal; font-size: 0.9375rem; }
+.score { display: flex; align-items: center; gap: 0.4rem; font-size: 1.1875rem; line-height: 1; font-variant-numeric: tabular-nums; }
+.tick {
+  width: 0.4rem; height: 0.75rem;
+  margin: 0 0.1rem 0.2rem;
+  border: solid var(--outline);
+  border-width: 0 3px 3px 0;
+  rotate: 45deg;
+}
+/* The one who lost goes quiet. The kit fades "others" to 36%, which text cannot take (2.2:1),
+   so the row takes the kit's quiet colour instead (7.2:1 on white). */
+.row.lose .tag, .row.lose .score { color: var(--on-surface-quiet); }
+.waiting {
+  justify-self: start;
+  padding: 0 0.5rem;
+  background: var(--envoy-cream);
+  color: var(--on-surface-quiet);
+  border: 2px dashed var(--outline);
+  border-radius: 9px;
+  font-size: 0.75rem;
+  line-height: 1.2rem;
+}
+
+/* ---- champion: the kit's 16-point burst, tilted 8 degrees ---- */
+.champ { position: relative; flex: none; align-self: center; width: 11rem; height: 11rem; margin: 0 var(--sp-2); rotate: 8deg; color: var(--on-surface); }
+.champ svg {
+  position: absolute; inset: 0;
+  width: 100%; height: 100%;
+  overflow: visible;
+  fill: var(--accent);
+  stroke: var(--outline);
+  stroke-width: 3.5px;
+  stroke-linejoin: round;
+  vector-effect: non-scaling-stroke;
+  filter: drop-shadow(3px 4px 0 var(--outline));
+}
+.champ-text {
+  position: absolute; inset: 0;
+  display: flex; flex-direction: column; align-items: center; justify-content: center;
+  padding: 0 1.9rem;
+  text-align: center;
+}
+.champ-label { color: var(--on-surface-quiet); font-size: 0.8125rem; }
+.champ-tag { max-width: 100%; font-size: 1.375rem; line-height: 1.05; }
+.champ-tag.long { font-size: 1rem; }
+
+/* ---- sign-up: entrants as list rows ---- */
+.signup h2 { white-space: normal; }
+ol.entrants {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(min(15rem, 100%), 1fr));
+  gap: var(--sp-3) var(--sp-5);
+  max-width: 68rem;
+  margin: 0 0 var(--sp-5);
+  padding: 0;
+  list-style: none;
+}
+ol.entrants.few { grid-template-columns: min(17rem, 100%); }
+.entrant {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: var(--sp-2);
+  min-height: 2rem;
+  padding: 0.15rem 0.75rem;
+  background: var(--surface);
+  color: var(--on-surface);
+  border: var(--edge) solid var(--outline);
+  border-radius: var(--radius-row);
+  box-shadow: var(--shadow);
+}
+.entrant .seed { text-align: left; }
+
+/* ---- site navigation: a row of pill stickers under the title ---- */
+.nav {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--sp-3) var(--sp-3);
+  margin: 0 0 var(--sp-5);
+}
+.nav a {
+  display: block;
+  padding: 0.2rem 0.85rem;
+  color: var(--on-surface);
+  background: var(--surface);
+  border: var(--edge-pill) solid var(--outline);
+  border-radius: var(--radius-row);
+  box-shadow: var(--shadow);
+  font-size: 0.9375rem;
+  text-decoration: none;
+  transition: rotate var(--m-hover) var(--ease), translate var(--m-hover) var(--ease), box-shadow var(--m-hover) var(--ease);
+}
+.nav a:nth-child(odd) { rotate: -0.8deg; }
+.nav a:nth-child(even) { rotate: 0.8deg; }
+.nav a:hover, .nav a:focus-visible { background: var(--accent); rotate: 0deg; translate: 0 -3px; box-shadow: var(--shadow-hover); outline: none; }
+.nav a[aria-current="page"] { background: var(--accent); rotate: 0deg; }
+.nav a:focus-visible { box-shadow: var(--ring-hover), 4px 6px 0 3px var(--outline); }
+
+/* ---- cards: a sticker list (events, results) ---- */
+.cards {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(min(18rem, 100%), 1fr));
+  gap: var(--sp-4) var(--sp-5);
+  margin: 0 0 var(--sp-5);
+  padding: 0;
+  list-style: none;
+}
+.card {
+  position: relative;
+  display: block;
+  padding: var(--sp-3) var(--sp-4);
+  background: var(--surface);
+  color: var(--on-surface);
+  border: var(--edge) solid var(--outline);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+  text-decoration: none;
+  transition: rotate var(--m-hover) var(--ease), translate var(--m-hover) var(--ease), box-shadow var(--m-hover) var(--ease);
+}
+.card h2 { margin: 0 0 var(--sp-1); white-space: normal; }
+.card .quiet { color: var(--on-surface-quiet); font-size: 0.875rem; }
+a.card:hover, a.card:focus-visible { background: var(--accent); rotate: 0deg; translate: 0 -4px; box-shadow: var(--shadow-hover); outline: none; }
+
+/* ---- rows: list rows for tables (players, placings, head to head) ---- */
+.rows { display: grid; gap: var(--sp-2); margin: 0 0 var(--sp-5); padding: 0; list-style: none; }
+.row-line {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) repeat(var(--cols, 3), auto);
+  align-items: center;
+  column-gap: var(--sp-4);
+  min-height: 2rem;
+  padding: 0.15rem 0.75rem;
+  background: var(--surface);
+  color: var(--on-surface);
+  border: var(--edge-pill) solid var(--outline);
+  border-radius: var(--radius-row);
+  box-shadow: var(--shadow);
+  font-variant-numeric: tabular-nums;
+}
+.row-line.head { background: var(--accent); font-size: 0.8125rem; }
+.row-line a { color: inherit; }
+.row-line .num { text-align: right; }
+
+/* ---- podium: the first three places, as stickers ---- */
+.podium { display: flex; flex-wrap: wrap; gap: var(--sp-3); margin: 0 0 var(--sp-4); padding: 0; list-style: none; }
+.podium li {
+  padding: 0.2rem 0.75rem;
+  background: var(--surface);
+  color: var(--on-surface);
+  border: var(--edge-pill) solid var(--outline);
+  border-radius: var(--radius-row);
+  box-shadow: var(--shadow);
+}
+.podium li:first-child { background: var(--accent); }
+.podium .place { color: var(--on-surface-quiet); font-size: 0.8125rem; margin-right: 0.4rem; }
+
+/* ---- how to enter: the two client commands on a sticker ---- */
+.howto {
+  width: fit-content;
+  max-width: 100%;
+  margin: 0 0 var(--sp-5);
+  padding: var(--sp-3) var(--sp-4);
+  background: var(--surface);
+  color: var(--on-surface);
+  border: var(--edge) solid var(--outline);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+  rotate: 0.6deg;
+}
+.howto h2 { white-space: normal; margin-bottom: var(--sp-2); }
+.howto code {
+  display: block;
+  margin: var(--sp-2) 0 0;
+  padding: 0.3rem 0.6rem;
+  background: var(--envoy-cream);
+  color: var(--envoy-ink);
+  border: 2px dashed var(--outline);
+  border-radius: 9px;
+  font: 0.875rem/1.4 ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  white-space: pre;
+  overflow-x: auto;
+}
+
+/* ---- stream: the 16:9 frame ---- */
+.player {
+  display: block;
+  aspect-ratio: 16 / 9;
+  width: 100%;
+  max-width: 72rem;
+  margin: 0 0 var(--sp-4);
+  background: var(--envoy-ink);
+  border: var(--edge) solid var(--outline);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+}
+
+/* ---- filter: the search input, styled as the select ---- */
+.filter {
+  display: block;
+  width: min(24rem, 100%);
+  margin: 0 0 var(--sp-4);
+  padding: 0.35rem 0.75rem;
+  font: inherit;
+  color: var(--on-surface);
+  background: var(--surface);
+  border: var(--edge-pill) solid var(--outline);
+  border-radius: var(--radius-row);
+  box-shadow: var(--shadow);
+}
+.filter::placeholder { color: var(--on-surface-quiet); }
+.filter:focus-visible { outline: 3px solid var(--focus); outline-offset: 3px; }
+
+/* ---- motion: one entrance, on the first drawing of an event only ---- */
+@keyframes sticker-in {
+  0% { opacity: 0; scale: 0.85; }
+  67% { opacity: 1; scale: 1.04; }
+  100% { opacity: 1; scale: 1; }
+}
+@keyframes burst-in {
+  0% { opacity: 0; scale: 0; }
+  57% { opacity: 1; scale: 1.2; }
+  100% { opacity: 1; scale: 1; }
+}
+.enter .strip, .enter .set, .enter .entrant {
+  animation: sticker-in var(--m-enter) var(--ease) both;
+  animation-delay: calc(var(--i, 0) * 3 * var(--frame));
+}
+.enter .entrant { animation-delay: calc(var(--i, 0) * var(--stagger) * var(--frame)); }
+.enter .champ { animation: burst-in var(--m-burst) var(--ease) both; animation-delay: calc(13 * 3 * var(--frame)); }
+.c1 { --i: 1; } .c2 { --i: 2; } .c3 { --i: 3; } .c4 { --i: 4; } .c5 { --i: 5; } .c6 { --i: 6; }
+.c7 { --i: 7; } .c8 { --i: 8; } .c9 { --i: 9; } .c10 { --i: 10; } .c11 { --i: 11; } .c12 { --i: 12; }
+
+@media (max-width: 40rem) {
+  body { padding: var(--sp-4) var(--sp-4) 4.5rem; }
+  h1 { font-size: 1.75rem; }
+  footer { padding: var(--sp-2) var(--sp-4); }
+  .strip { gap: var(--sp-2) 1.5rem; padding-inline: 0.8rem; }
+  .stamp.big { top: auto; bottom: -1rem; right: 0.6rem; translate: none; font-size: 1.1875rem; }
+  .scene::before { width: 150vw; height: 150vw; right: -70vw; top: 30vh; }
+  .scene::after { width: 160vw; height: 100vw; left: -60vw; bottom: -80vw; }
+}
+
+/* Last and global: reduced motion removes every animation and transition on every page. */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { animation: none !important; transition: none !important; }
+  .set:hover, .nav a:hover, .nav a:focus-visible, a.card:hover, a.card:focus-visible { translate: none; }
+  option:hover, option:focus-visible { translate: none; }
+}

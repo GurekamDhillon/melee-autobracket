@@ -4,41 +4,68 @@ use autobracket_server::config::VerifierMode;
 use autobracket_server::testkit::TestApp;
 use autobracket_server::Config;
 use axum::http::StatusCode;
+use bracket::Format;
 
-async fn fetch_root(app: &TestApp) -> reqwest::Response {
+async fn fetch(app: &TestApp, path: &str) -> reqwest::Response {
     reqwest::Client::new()
-        .get(format!("{}/", app.url))
+        .get(format!("{}{path}", app.url))
         .send()
         .await
         .unwrap()
 }
 
+/// Every public page, on a server with one event and one registered player.
+async fn all_pages(app: &TestApp) -> Vec<String> {
+    let event = app.create_event(Format::SingleElim).await;
+    app.player("Mango").await;
+    vec!["/".to_owned(), format!("/events/{event}")]
+}
+
 #[tokio::test]
-async fn root_serves_html() {
+async fn pages_serve_html() {
     let app = TestApp::spawn(|_| {}).await;
-    let res = fetch_root(&app).await;
-    assert_eq!(res.status(), StatusCode::OK);
-    let ctype = res.headers()["content-type"].to_str().unwrap().to_string();
-    assert!(ctype.starts_with("text/html"), "content-type {ctype:?}");
-    let body = res.text().await.unwrap();
-    assert!(body.contains("<title>"));
-    assert!(body.contains("/v1/events"));
+    for path in all_pages(&app).await {
+        let res = fetch(&app, &path).await;
+        assert_eq!(res.status(), StatusCode::OK, "{path}");
+        let ctype = res.headers()["content-type"].to_str().unwrap().to_string();
+        assert!(
+            ctype.starts_with("text/html"),
+            "{path}: content-type {ctype:?}"
+        );
+        let body = res.text().await.unwrap();
+        assert!(body.contains("<title>"), "{path}");
+        assert_eq!(body.matches("<script>").count(), 1, "{path}: one <script>");
+        assert_eq!(body.matches("<style>").count(), 1, "{path}: one <style>");
+    }
+}
+
+#[tokio::test]
+async fn event_page_is_the_bracket_viewer() {
+    let app = TestApp::spawn(|_| {}).await;
+    let path = all_pages(&app).await.pop().unwrap();
+    assert!(path.starts_with("/events/"), "{path}");
+    let body = fetch(&app, &path).await.text().await.unwrap();
+    assert!(body.contains("/v1/events/"));
     // Sets decided without play are labelled rather than shown as 0-0.
     assert!(body.contains("decided_by"));
     assert!(body.contains("Awarded"));
     // Games counted while the verifier was unavailable are mentioned under the header.
     assert!(body.contains("view.unverified_games"));
     assert!(body.contains("counted without engine verification"));
+    // The event id comes from the path, not a hash.
+    assert!(body.contains("location.pathname"));
 }
 
 #[tokio::test]
-async fn page_has_no_external_urls() {
+async fn pages_have_no_external_urls() {
     let app = TestApp::spawn(|_| {}).await;
-    let res = fetch_root(&app).await;
-    assert_eq!(res.status(), StatusCode::OK);
-    let body = res.text().await.unwrap();
-    assert!(!body.contains("http://"), "page references http://");
-    assert!(!body.contains("https://"), "page references https://");
+    for path in all_pages(&app).await {
+        let res = fetch(&app, &path).await;
+        assert_eq!(res.status(), StatusCode::OK, "{path}");
+        let body = res.text().await.unwrap();
+        assert!(!body.contains("http://"), "{path} references http://");
+        assert!(!body.contains("https://"), "{path} references https://");
+    }
 }
 
 #[test]
@@ -96,34 +123,67 @@ fn inline_block<'a>(page: &'a str, tag: &str) -> &'a str {
 }
 
 #[tokio::test]
-async fn page_has_security_headers() {
+async fn pages_have_security_headers() {
     use sha2::{Digest, Sha256};
     let app = TestApp::spawn(|_| {}).await;
-    let res = fetch_root(&app).await;
-    let header = |name: &str| res.headers()[name].to_str().unwrap().to_owned();
-    assert_eq!(header("x-content-type-options"), "nosniff");
-    let csp = header("content-security-policy");
-    for directive in [
-        "default-src 'none'",
-        "connect-src 'self'",
-        "img-src data:",
-        "base-uri 'none'",
-        "form-action 'none'",
-        "frame-ancestors 'none'",
+    for path in all_pages(&app).await {
+        let res = fetch(&app, &path).await;
+        let header = |name: &str| res.headers()[name].to_str().unwrap().to_owned();
+        assert_eq!(header("x-content-type-options"), "nosniff", "{path}");
+        let csp = header("content-security-policy");
+        for directive in [
+            "default-src 'none'",
+            "connect-src 'self'",
+            "img-src data:",
+            "base-uri 'none'",
+            "form-action 'none'",
+            "frame-ancestors 'none'",
+        ] {
+            assert!(csp.contains(directive), "{path}: {directive} in {csp}");
+        }
+        // Fonts come from this server and nowhere else.
+        assert!(csp.contains("font-src 'self';"), "{path}: {csp}");
+        assert!(!csp.contains('*'), "{path}: no wildcard: {csp}");
+        assert!(!csp.contains("unsafe"), "{path}: {csp}");
+        assert!(!csp.contains("http"), "{path}: no external origins: {csp}");
+        let page = res.text().await.unwrap();
+        for (tag, directive) in [("script", "script-src"), ("style", "style-src")] {
+            let hash = base64(&Sha256::digest(inline_block(&page, tag).as_bytes()));
+            let expected = format!("{directive} 'sha256-{hash}'");
+            assert!(csp.contains(&expected), "{path}: {expected} in {csp}");
+        }
+    }
+}
+
+#[tokio::test]
+async fn event_page_unknown_or_bad_id_is_json() {
+    let app = TestApp::spawn(|_| {}).await;
+    for (path, status) in [
+        ("/events/99999", StatusCode::NOT_FOUND),
+        ("/events/0", StatusCode::NOT_FOUND),
+        ("/events/-1", StatusCode::NOT_FOUND),
+        ("/events/abc", StatusCode::BAD_REQUEST),
     ] {
-        assert!(csp.contains(directive), "{directive} in {csp}");
+        let res = fetch(&app, path).await;
+        assert_eq!(res.status(), status, "{path}");
+        let ctype = res.headers()["content-type"].to_str().unwrap().to_owned();
+        assert!(ctype.starts_with("application/json"), "{path}: {ctype}");
+        let body: serde_json::Value = res.json().await.unwrap();
+        assert!(body["error"].is_string(), "{path}: {body}");
+        if status == StatusCode::NOT_FOUND {
+            assert_eq!(body["error"], "no such event", "{path}");
+        }
     }
-    // Fonts come from this server and nowhere else.
-    assert!(csp.contains("font-src 'self';"), "{csp}");
-    assert!(!csp.contains('*'), "no wildcard: {csp}");
-    assert!(!csp.contains("unsafe"), "{csp}");
-    assert!(!csp.contains("http"), "no external origins: {csp}");
-    let page = res.text().await.unwrap();
-    for (tag, directive) in [("script", "script-src"), ("style", "style-src")] {
-        let hash = base64(&Sha256::digest(inline_block(&page, tag).as_bytes()));
-        let expected = format!("{directive} 'sha256-{hash}'");
-        assert!(csp.contains(&expected), "{expected} in {csp}");
-    }
+}
+
+#[tokio::test]
+async fn home_redirects_old_hash_bookmarks() {
+    let app = TestApp::spawn(|_| {}).await;
+    let body = fetch(&app, "/").await.text().await.unwrap();
+    assert!(
+        body.contains(r#"location.replace("/events/" +"#),
+        "the landing page sends #N to /events/N"
+    );
 }
 
 /// The font files the page's stylesheet asks for, as paths.
@@ -141,7 +201,7 @@ fn font_paths(page: &str) -> Vec<&str> {
 #[tokio::test]
 async fn page_fonts_are_served() {
     let app = TestApp::spawn(|_| {}).await;
-    let page = fetch_root(&app).await.text().await.unwrap();
+    let page = fetch(&app, "/").await.text().await.unwrap();
     let paths = font_paths(&page);
     assert_eq!(paths.len(), 2, "one file per typeface: {paths:?}");
     for path in paths {
@@ -161,7 +221,7 @@ async fn page_fonts_are_served() {
 #[tokio::test]
 async fn unknown_font_is_json_404() {
     let app = TestApp::spawn(|_| {}).await;
-    for name in ["nope.woff2", "README.md", "..%2Fbracket.html"] {
+    for name in ["nope.woff2", "README.md", "..%2Fshell.html"] {
         let res = reqwest::get(format!("{}/assets/fonts/{name}", app.url))
             .await
             .unwrap();
@@ -173,18 +233,18 @@ async fn unknown_font_is_json_404() {
     }
 }
 
-/// The round names in `docs/api.md` ("Round names") are the ones the page uses.
+/// The round names in `docs/api.md` ("Round names") are the ones the shared script uses.
 ///
-/// This compares text, it does not run the page: for each side, the names the doc lists
-/// counting back from the last round must appear in the page's script as that side's list, in
-/// the same order, and the numbered and grand-final names must appear as written. It proves the
+/// This compares text, it does not run the script: for each side, the names the doc lists
+/// counting back from the last round must appear in the script as that side's list, in the
+/// same order, and the numbered and grand-final names must appear as written. It proves the
 /// two cannot drift apart in wording or order; it does not prove the script picks the right
 /// entry for a given round.
 #[test]
 fn round_names_match_the_doc() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let doc = std::fs::read_to_string(root.join("../../docs/api.md")).unwrap();
-    let page = std::fs::read_to_string(root.join("assets/bracket.html")).unwrap();
+    let page = std::fs::read_to_string(root.join("assets/site.js")).unwrap();
     let section = doc.split_once("## 7. Round names").unwrap().1;
     let rows: Vec<[&str; 3]> = section
         .lines()
@@ -212,19 +272,19 @@ fn round_names_match_the_doc() {
             .map(|[_, _, name]| format!("\"{name}\""))
             .collect();
         let list = format!("{key}: [{}],", named.join(", "));
-        assert!(page.contains(&list), "the page has `{list}`");
+        assert!(page.contains(&list), "the script has `{list}`");
         // The numbered rounds: "Winners round N" is built as "Winners round " + round.
         let [_, _, numbered] = rows
             .iter()
             .find(|[s, round, _]| *s == side && *round == "earlier")
             .unwrap();
         let stem = format!("\"{} \"", numbered.strip_suffix(" N").unwrap());
-        assert!(page.contains(&stem), "the page has {stem}");
+        assert!(page.contains(&stem), "the script has {stem}");
     }
     for [_, _, name] in rows.iter().filter(|[s, _, _]| *s == "Grand final") {
         assert!(
             page.contains(&format!("\"{name}\"")),
-            "the page has {name:?}"
+            "the script has {name:?}"
         );
     }
 }
@@ -275,26 +335,4 @@ async fn documented_routes_exist() {
         seen += 1;
     }
     assert!(seen >= 21, "parsed {seen} routes from the table");
-}
-
-/// Falling back to "no events" also hides the "counted without engine verification" line
-/// an earlier event's view put under the header.
-#[tokio::test]
-async fn no_events_view_removes_the_unverified_line() {
-    let app = TestApp::spawn(|_| {}).await;
-    let body = fetch_root(&app).await.text().await.unwrap();
-    let start = body
-        .find("function renderNoEvents()")
-        .expect("renderNoEvents in the page");
-    let end = start
-        + body[start..]
-            .find("\n  }\n")
-            .expect("end of renderNoEvents");
-    let func = &body[start..end];
-    // setNotice with empty text clears the line and hides it.
-    assert!(func.contains(r#"setNotice("unverified", "")"#), "{func}");
-    assert!(
-        body.contains("s.hidden = !text;"),
-        "setNotice hides empty notices"
-    );
 }
