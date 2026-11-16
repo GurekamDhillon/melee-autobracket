@@ -31,6 +31,12 @@ pub struct To {
     pub body: Bytes,
 }
 
+/// A replay verifier: 403 unless the key is in `cfg.verifier_keys` or `cfg.to_keys`.
+pub struct Verifier {
+    pub key: String,
+    pub body: Bytes,
+}
+
 /// Any validly signed request, registered or not.
 pub struct AnyKey {
     pub key: String,
@@ -109,6 +115,24 @@ impl FromRequest<AppState> for To {
             ));
         }
         Ok(To { key, body })
+    }
+}
+
+impl FromRequest<AppState> for Verifier {
+    type Rejection = Rejection;
+
+    async fn from_request(req: Request, state: &AppState) -> Result<Self, Rejection> {
+        let AnyKey { key, body } = AnyKey::from_request(req, state).await?;
+        let cfg = &state.cfg;
+        if !cfg
+            .verifier_keys
+            .iter()
+            .chain(&cfg.to_keys)
+            .any(|k| k.eq_ignore_ascii_case(&key))
+        {
+            return Err(ApiError::new(StatusCode::FORBIDDEN, "not a verifier"));
+        }
+        Ok(Verifier { key, body })
     }
 }
 

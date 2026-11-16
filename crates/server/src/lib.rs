@@ -19,10 +19,11 @@ pub mod routes;
 pub mod state;
 #[cfg(feature = "testkit")]
 pub mod testkit;
+pub mod verify_worker;
 pub mod worker;
 
 pub use config::Config;
-pub use resim::{NoResim, Resim};
+pub use resim::{ExternalResim, NoResim, Resim, Slpcheck};
 pub use state::AppState;
 
 /// How often the rate limiter forgets peers whose quota has fully replenished.
@@ -37,6 +38,7 @@ pub async fn build_app(cfg: Config, resim: Arc<dyn Resim>) -> anyhow::Result<(Ro
     let db = db::open(&cfg.db_path)
         .await
         .with_context(|| format!("opening database {}", cfg.db_path.display()))?;
+    resim.attach(&db);
 
     // Replenish one request every 1/rate_per_sec seconds, per peer IP.
     let governor = GovernorConfigBuilder::default()

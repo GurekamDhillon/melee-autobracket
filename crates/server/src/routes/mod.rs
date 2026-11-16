@@ -14,6 +14,7 @@ mod admin;
 mod events;
 mod players;
 mod sets;
+mod verify_jobs;
 mod view;
 
 pub fn router() -> Router<AppState> {
@@ -32,6 +33,9 @@ pub fn router() -> Router<AppState> {
             "/v1/sets/{event}/{set}/games/{n}/replay",
             post(sets::upload),
         )
+        .route("/v1/verify/claim", post(verify_jobs::claim))
+        .route("/v1/verify/jobs/{id}/replay", get(verify_jobs::replay))
+        .route("/v1/verify/jobs/{id}/result", post(verify_jobs::result))
 }
 
 /// An error response: a status code and a JSON body of the form `{"error": "...", ...}`.
