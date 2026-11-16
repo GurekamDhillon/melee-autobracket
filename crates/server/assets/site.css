@@ -534,6 +534,10 @@ a.card:hover, a.card:focus-visible { background: var(--accent); rotate: 0deg; tr
 /* A placing: the ordinal, then the tag. */
 .row-line.placing { grid-template-columns: 2.6rem minmax(0, 1fr); }
 .placing .place { color: var(--on-surface-quiet); font-size: 0.8125rem; }
+.row-line .quiet { color: var(--on-surface-quiet); font-size: 0.875rem; }
+.rows.cols-2 .row-line { --cols: 2; }
+.rows.cols-5 .row-line { --cols: 5; }
+.rows > .notice { rotate: 0deg; }
 
 /* ---- podium: the first three places, as stickers ---- */
 .podium { display: flex; flex-wrap: wrap; gap: var(--sp-3); margin: 0 0 var(--sp-4); padding: 0; list-style: none; }
@@ -632,6 +636,9 @@ a.card:hover, a.card:focus-visible { background: var(--accent); rotate: 0deg; tr
   .stamp.big { top: auto; bottom: -1rem; right: 0.6rem; translate: none; font-size: 1.1875rem; }
   .scene::before { width: 150vw; height: 150vw; right: -70vw; top: 30vh; }
   .scene::after { width: 160vw; height: 100vw; left: -60vw; bottom: -80vw; }
+  /* Wide rows: the name takes the first line, the numbers the second. */
+  .rows.cols-5 .row-line { grid-template-columns: repeat(5, auto); justify-content: space-between; padding-block: 0.3rem; }
+  .rows.cols-5 .row-line > :first-child { grid-column: 1 / -1; }
 }
 
 /* Last and global: reduced motion removes every animation and transition on every page. */

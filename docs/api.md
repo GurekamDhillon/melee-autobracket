@@ -62,7 +62,7 @@ Contents:
 
 There are no accounts or passwords. A participant is an Ed25519 key pair; the public key is
 their identity. Every route except the public ones (`GET /`, `GET /events/{id}`,
-`GET /schedule`, `GET /history`, `GET /assets/fonts/{file}`, `GET /v1/events`, `GET /v1/events/{id}`, `GET /v1/history`,
+`GET /schedule`, `GET /history`, `GET /players`, `GET /players/{tag}`, `GET /assets/fonts/{file}`, `GET /v1/events`, `GET /v1/events/{id}`, `GET /v1/history`,
 `GET /v1/players`, `GET /v1/players/{tag}`) must be signed with four headers:
 
 | Header | Value |
@@ -229,6 +229,8 @@ described above; the tables list the other statuses.
 | GET | `/stream` | public | — | 200 HTML stream page | — |
 | GET | `/schedule` | public | — | 200 HTML schedule page | — |
 | GET | `/history` | public | — | 200 HTML history page | — |
+| GET | `/players` | public | — | 200 HTML players index | — |
+| GET | `/players/{tag}` | public | — | 200 HTML player profile; `{tag}` matches in any case | 404 no such player |
 | GET | `/assets/fonts/{file}` | public | — | 200 `font/woff2`, one of the page's fonts | 404 |
 | GET | `/v1/stream` | public | — | 200 `StreamInfo` | — |
 | GET | `/v1/events` | public | — | 200 `[EventSummary]` | — |
