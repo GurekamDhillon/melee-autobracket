@@ -1,21 +1,43 @@
 //! Public results routes: history, the players index and player profiles.
 
-use axum::extract::{Path, State};
+use axum::extract::rejection::QueryRejection;
+use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::Json;
 use proto::{EventResult, PlayerProfile, PlayerSummary};
+use serde::Deserialize;
 
 use super::ApiError;
-use crate::results::{load_events, placings, player_profile, player_summaries};
+use crate::results::{
+    load_events, load_latest_complete, placings, player_profile, player_summaries,
+};
 use crate::state::AppState;
 
-/// `GET /v1/history`: complete events, newest first, with their placings.
-pub async fn history(State(state): State<AppState>) -> Result<Json<Vec<EventResult>>, ApiError> {
-    let events = load_events(&state.db).await?;
+/// The most `?limit=` may ask for.
+const MAX_HISTORY_LIMIT: u32 = 100;
+
+#[derive(Deserialize)]
+pub struct HistoryQuery {
+    limit: Option<u32>,
+}
+
+/// `GET /v1/history[?limit=N]`: complete events, newest first, with their placings; `limit`
+/// (1..=100) keeps the newest N, and without it every complete event is listed.
+pub async fn history(
+    State(state): State<AppState>,
+    query: Result<Query<HistoryQuery>, QueryRejection>,
+) -> Result<Json<Vec<EventResult>>, ApiError> {
+    let Query(HistoryQuery { limit }) =
+        query.map_err(|e| ApiError::new(StatusCode::BAD_REQUEST, e.to_string()))?;
+    if limit.is_some_and(|n| !(1..=MAX_HISTORY_LIMIT).contains(&n)) {
+        return Err(ApiError::new(
+            StatusCode::BAD_REQUEST,
+            format!("limit must be 1 to {MAX_HISTORY_LIMIT}"),
+        ));
+    }
+    let events = load_latest_complete(&state.db, limit).await?;
     let results = events
         .iter()
-        .rev()
-        .filter(|ev| ev.summary.state == "complete")
         .map(|ev| EventResult {
             summary: ev.summary.clone(),
             placings: placings(ev),

@@ -227,10 +227,14 @@ const AB = (function () {
 
   // ---- the shell's pieces -----------------------------------------------------------------
 
-  // Marks the nav link for this page; an event page has none.
+  // Marks the nav link for this page ("page"), or for the section a page belongs to ("true":
+  // a profile under Players); an event page has none.
   function markNav() {
+    const here = location.pathname;
     for (const a of document.querySelectorAll(".nav a")) {
-      if (a.getAttribute("href") === location.pathname) a.setAttribute("aria-current", "page");
+      const href = a.getAttribute("href");
+      if (href === here) a.setAttribute("aria-current", "page");
+      else if (href !== "/" && here.startsWith(href + "/")) a.setAttribute("aria-current", "true");
       else a.removeAttribute("aria-current");
     }
   }

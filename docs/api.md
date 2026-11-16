@@ -225,7 +225,7 @@ described above; the tables list the other statuses.
 | Method | Path | Who | Request body | Success | Other statuses |
 |---|---|---|---|---|---|
 | GET | `/` | public | — | 200 HTML landing page (live now, next up, latest results) | — |
-| GET | `/events/{id}` | public | — | 200 HTML bracket page | 400, 404 |
+| GET | `/events/{id}` | public | — | 200 HTML bracket page; `{id}` is decimal digits as written | 400 (a sign, an escape or anything else), 404 |
 | GET | `/stream` | public | — | 200 HTML stream page | — |
 | GET | `/schedule` | public | — | 200 HTML schedule page | — |
 | GET | `/history` | public | — | 200 HTML history page | — |
@@ -235,7 +235,7 @@ described above; the tables list the other statuses.
 | GET | `/v1/stream` | public | — | 200 `StreamInfo` | — |
 | GET | `/v1/events` | public | — | 200 `[EventSummary]` | — |
 | GET | `/v1/events/{id}` | public | — | 200 `EventView` | 400, 404 |
-| GET | `/v1/history` | public | — | 200 `[EventResult]`, complete events, newest first | — |
+| GET | `/v1/history` | public | — | 200 `[EventResult]`, complete events, newest first; `?limit=N` (1–100) keeps the newest N, default every one | 400 `limit` outside 1–100 |
 | GET | `/v1/players` | public | — | 200 `[PlayerSummary]`, every registered player, by tag ignoring case | — |
 | GET | `/v1/players/{tag}` | public | — | 200 `PlayerProfile`; `{tag}` matches in any case | 404 no such player |
 | POST | `/v1/players` | any key | `RegisterReq` | 201, empty | 400 tag or body; 403 invite missing, unknown or used; 409 key already registered, tag taken |
@@ -679,7 +679,8 @@ A game kept for study (a re-simulation divergence, a conflict), with its evidenc
 
 ### EventResult
 
-A complete event and its final placings (`GET /v1/history`). Placings are computed from the
+A complete event and its final placings (`GET /v1/history`, newest first; `?limit=N` with N in
+1–100 keeps the newest N, as the landing page's `?limit=1` does). Placings are computed from the
 bracket: the champion is 1st; every other entrant is ranked by the highest `(side, round)` set
 they lost (Winners < Losers < GrandFinal) and placed 1 + the number of entrants ranked
 strictly higher, so equal ranks share a place (single elimination gives 1, 2, 3, 3, 5, 5, 5,

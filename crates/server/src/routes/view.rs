@@ -7,7 +7,7 @@ use std::collections::HashMap;
 use std::sync::LazyLock;
 
 use axum::extract::{Path, State};
-use axum::http::{header, StatusCode};
+use axum::http::{header, StatusCode, Uri};
 use axum::response::{Html, IntoResponse, Response};
 use sha2::{Digest, Sha256};
 
@@ -135,11 +135,16 @@ pub async fn home() -> Response {
     page("home")
 }
 
-/// `GET /events/{id}`: the bracket page; 404 unless the event exists.
-pub async fn event(
-    State(state): State<AppState>,
-    Path(id): Path<i64>,
-) -> Result<Response, ApiError> {
+/// `GET /events/{id}`: the bracket page; 404 unless the event exists. The id must be written
+/// as decimal digits (no sign, no percent-escape): that is what the page's script reads back
+/// from the address bar, so the server accepts exactly what the script does.
+pub async fn event(State(state): State<AppState>, uri: Uri) -> Result<Response, ApiError> {
+    let id = uri
+        .path()
+        .strip_prefix("/events/")
+        .filter(|s| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit()))
+        .and_then(|s| s.parse::<i64>().ok())
+        .ok_or_else(|| ApiError::new(StatusCode::BAD_REQUEST, "event id must be a number"))?;
     let exists: Option<i64> = sqlx::query_scalar("SELECT 1 FROM events WHERE id = ?")
         .bind(id)
         .fetch_optional(&state.db)

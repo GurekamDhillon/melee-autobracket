@@ -339,11 +339,17 @@ async fn stream_page_frames_only_the_configured_origin() {
 #[tokio::test]
 async fn event_page_unknown_or_bad_id_is_json() {
     let app = TestApp::spawn(|_| {}).await;
+    // The id is decimal digits as written, which is what the page script reads from the
+    // address bar; a sign, an escape or anything else is a 400, not a page with a dead script.
     for (path, status) in [
         ("/events/99999", StatusCode::NOT_FOUND),
         ("/events/0", StatusCode::NOT_FOUND),
-        ("/events/-1", StatusCode::NOT_FOUND),
+        ("/events/-1", StatusCode::BAD_REQUEST),
+        ("/events/+1", StatusCode::BAD_REQUEST),
+        ("/events/%31", StatusCode::BAD_REQUEST),
+        ("/events/1%20", StatusCode::BAD_REQUEST),
         ("/events/abc", StatusCode::BAD_REQUEST),
+        ("/events/99999999999999999999", StatusCode::BAD_REQUEST),
     ] {
         let res = fetch(&app, path).await;
         assert_eq!(res.status(), status, "{path}");
@@ -670,5 +676,57 @@ async fn documented_routes_exist() {
         );
         seen += 1;
     }
-    assert!(seen >= 33, "parsed {seen} routes from the table");
+    // Exact: a route added to the router must be added to the table too.
+    assert_eq!(seen, 33, "routes in the table");
+}
+
+/// The final-review fixes that live in page scripts, pinned as text.
+#[tokio::test]
+async fn final_review_page_fixes() {
+    let app = TestApp::spawn(|_| {}).await;
+    let event = app.create_event(Format::SingleElim).await;
+
+    // The landing keeps the shell's title and asks for one history entry; its live set lines
+    // link to the bracket as the stream page's do.
+    let home = fetch(&app, "/").await.text().await.unwrap();
+    assert!(home.contains("<title>Autobracket</title>"));
+    assert!(
+        !home.contains("document.title"),
+        "the landing keeps the shell's title"
+    );
+    assert!(home.contains(r#"getJson("/v1/history?limit=1")"#));
+    let live_card = home.split("function liveCard").nth(1).unwrap();
+    let live_card = live_card.split("function renderLive").next().unwrap();
+    assert!(live_card.contains("a.href = eventHref(ev.id);"));
+
+    // The Players nav item is current on a profile page.
+    assert!(home.contains(
+        r#"else if (href !== "/" && here.startsWith(href + "/")) a.setAttribute("aria-current", "true");"#
+    ));
+    assert!(home.contains(".nav a[aria-current] {"));
+
+    // Tags on the bracket page link to the player's profile; the id comes from the path as
+    // the server accepts it: decimal digits only.
+    let bracket = fetch(&app, &format!("/events/{event}"))
+        .await
+        .text()
+        .await
+        .unwrap();
+    assert!(bracket.contains("function tagLink(tag)"));
+    assert!(bracket.contains("a.href = AB.playerHref(tag);"));
+    assert_eq!(
+        bracket.matches("tagLink(").count(),
+        4,
+        "defined once; set rows, entrants, champion"
+    );
+    assert!(bracket.contains(r#"/^\/events\/(\d+)$/.exec(location.pathname)"#));
+
+    // The stream page drops a running event that vanished and keeps the rest.
+    let stream = fetch(&app, "/stream").await.text().await.unwrap();
+    assert!(stream.contains("if (err && err.status === 404) return null;"));
+
+    // "and N more" counts the placings not shown, not entrants minus eight.
+    let history = fetch(&app, "/history").await.text().await.unwrap();
+    assert!(history.contains("const hidden = result.placings.length - rows.childElementCount;"));
+    assert!(!history.contains("ev.entrants - PLACES_SHOWN"));
 }

@@ -109,6 +109,13 @@
     return big ? "tr2" : "tr1";
   }
 
+  // A tag, linking to the player's profile as every other page does.
+  function tagLink(tag) {
+    const a = el("a", "tag", tag);
+    a.href = AB.playerHref(tag);
+    return a;
+  }
+
   // How a set decided without play is stamped.
   const DECIDED_LABEL = { award: "Awarded", dq: "DQ", "double-dq": "DQ" };
 
@@ -133,7 +140,11 @@
       row.append(el("span", "waiting", "Waiting"));
       return row;
     }
-    row.append(el("span", "tag", tagOf(entrant)));
+    // The face is aria-hidden (the set's words carry its meaning), so its links stay off the
+    // tab order rather than landing focus on something a screen reader cannot see.
+    const link = tagLink(tagOf(entrant));
+    link.tabIndex = -1;
+    row.append(link);
     const cell = el("span", "score");
     if (winner === idx) cell.append(el("span", "tick"));
     cell.append(scoreText(idx, set, score, decided));
@@ -202,7 +213,9 @@
     const text = el("span", "champ-text");
     text.append(el("span", "champ-label", "Champion"));
     text.append(el("span", "sr", ": "));
-    text.append(el("span", tag.length > 9 ? "champ-tag long" : "champ-tag", tag));
+    const name = tagLink(tag);
+    name.className = tag.length > 9 ? "champ-tag long" : "champ-tag";
+    text.append(name);
     box.append(text);
     return box;
   }
@@ -297,7 +310,7 @@
       const list = el("ol", n <= 8 ? "entrants few" : "entrants");
       tags.forEach((t, i) => {
         const li = el("li", "entrant " + (i % 2 ? "tr1" : "tl2") + " c" + Math.min(i, 12));
-        li.append(el("span", "tag", t));
+        li.append(tagLink(t));
         const seed = el("span", "seed");
         seed.append(el("span", "sr", ", "), "Seed " + (i + 1));
         li.append(seed);
