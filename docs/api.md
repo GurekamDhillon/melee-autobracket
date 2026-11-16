@@ -224,7 +224,7 @@ described above; the tables list the other statuses.
 
 | Method | Path | Who | Request body | Success | Other statuses |
 |---|---|---|---|---|---|
-| GET | `/` | public | — | 200 HTML landing page | — |
+| GET | `/` | public | — | 200 HTML landing page (live now, next up, latest results) | — |
 | GET | `/events/{id}` | public | — | 200 HTML bracket page | 400, 404 |
 | GET | `/stream` | public | — | 200 HTML stream page | — |
 | GET | `/schedule` | public | — | 200 HTML schedule page | — |

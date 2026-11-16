@@ -357,14 +357,25 @@ async fn event_page_unknown_or_bad_id_is_json() {
     }
 }
 
+/// The landing page sends `#N` bookmarks to `/events/N`, and has its three sections, the
+/// how-to-enter commands, the stream link and the empty-server notice.
 #[tokio::test]
-async fn home_redirects_old_hash_bookmarks() {
+async fn home_page_has_its_sections() {
     let app = TestApp::spawn(|_| {}).await;
     let body = fetch(&app, "/").await.text().await.unwrap();
-    assert!(
-        body.contains(r#"location.replace("/events/" +"#),
-        "the landing page sends #N to /events/N"
-    );
+    for needle in [
+        r#"location.replace("/events/" +"#,
+        "/v1/history",
+        "/v1/stream",
+        "Live now",
+        "Next up",
+        "Latest results",
+        "No events yet",
+        "autobracket-client register",
+        "Watch the stream",
+    ] {
+        assert!(body.contains(needle), "the landing page has {needle:?}");
+    }
 }
 
 /// The font files the page's stylesheet asks for, as paths.

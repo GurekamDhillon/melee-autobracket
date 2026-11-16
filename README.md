@@ -15,7 +15,8 @@ build, as a corpus for fixing the port. A bracket that cannot be lied to is also
 argument for self-hosting: an organiser running their own instance gets result integrity, not
 just control.
 
-Phase 1 (this repository) is the API, a read-only bracket page, and a reference command-line
+Phase 1 (this repository) is the API, public pages (landing, schedule, history, players,
+stream) and the bracket viewer, and a reference command-line
 client, `autobracket-client`, that drives the engine. There are no accounts: a player is an
 Ed25519 key their client generates, plus a display tag. The HTTP API, including the request
 signing, is documented in [docs/api.md](docs/api.md) for anyone writing another client.
@@ -155,8 +156,8 @@ The server refuses to start without an organiser key in `to_keys`, unless you se
 `allow_no_organiser = true` (then nobody can administer it). Unknown keys and bad values in
 the config, `[ruleset]` included, are start-up errors.
 
-Spectators open `http://YOUR-SERVER/` for the landing page, which lists the events, and the
-bracket page at `/events/{id}` for one of them. For a public instance set
+Spectators open `http://YOUR-SERVER/` for the landing page and the bracket page at
+`/events/{id}` for one event (see [Pages](#pages)). For a public instance set
 `require_invite = true` and hand each player a code from `autobracket admin ... invite new`;
 otherwise anyone can register keys and fill your events. Tags are unique regardless of case.
 
@@ -184,6 +185,29 @@ and set `relay = "relay.your-domain.example:51600"`. Rooms live only in the rela
 `allow_direct_connect = true` lets a host hand over `HOST:PORT` instead of a match code (LAN
 events). It is off by default, and a player's client also refuses such a code unless its own
 config sets `allow_direct_connect = true`.
+
+## Pages
+
+The server serves these pages. Everything on them is public and read-only: no login, no
+accounts, nothing beyond what the JSON API already shows. Times show in the visitor's own time
+zone (the API carries unix seconds).
+
+| Path | What it shows |
+|---|---|
+| `/` | Landing: *Live now* (every running event and its sets in play, "Watch the stream" when a stream is configured), *Next up* (the soonest sign-up event, its time and description, and the two client commands that enter it), *Latest results* (the newest complete event's top three). Refreshes every 10 seconds. |
+| `/events/{id}` | The bracket viewer for one event: the sign-up list before the start, the bracket with live and decided sets after it. Refreshes every 10 seconds. |
+| `/schedule` | Events happening now and coming up, with their start times and how to enter. |
+| `/history` | Complete events, newest first, with placings. |
+| `/players` | Every registered player: events entered, titles, set record, with a search box. |
+| `/players/{tag}` | One player: totals, events entered with seed and place, head-to-head records. |
+| `/stream` | The organiser's stream, embedded, with the sets being played under it. |
+
+Old bookmarks of the form `/#N` still land on that event: the landing page sends them to
+`/events/N`.
+
+The stream page embeds the URL in the config's `stream_url` (optional; see Deployment). Its
+origin is the only third party a visitor's browser ever contacts, and only from `/stream`;
+without `stream_url` the page says no stream is configured.
 
 ## Players
 

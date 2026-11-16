@@ -608,6 +608,72 @@ a.card:hover, a.card:focus-visible { background: var(--accent); rotate: 0deg; tr
 .filter::placeholder { color: var(--on-surface-quiet); }
 .filter:focus-visible { outline: 3px solid var(--focus); outline-offset: 3px; }
 
+/* ---- landing: live now across the top, next up and latest results side by side ---- */
+.home {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(24rem, 100%), 1fr));
+  gap: var(--sp-5);
+  align-items: start;
+  max-width: 90rem;
+  margin: 0 0 var(--sp-5);
+}
+.home > section { min-width: 0; max-width: 44rem; }
+#live { grid-column: 1 / -1; max-width: none; }
+.home h2 { white-space: normal; }
+h3 { margin: 0 0 var(--sp-1); font-family: var(--font-display); font-weight: 800; letter-spacing: -0.02em; font-size: 1.375rem; line-height: 1.15; }
+.home-card a:not(.pill) { color: inherit; }
+.home-card .quiet, .home-card .when .quiet { color: var(--on-surface-quiet); font-size: 0.875rem; }
+.home-card { margin: 0 0 var(--sp-5); }
+.home-card p { margin: 0 0 var(--sp-2); }
+.home .howto code { white-space: pre-wrap; }
+.home-card .podium { margin-top: var(--sp-3); }
+.actions { margin: 0; }
+.live-list {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(min(22rem, 100%), 1fr));
+  gap: var(--sp-4) var(--sp-5);
+  margin: 0 0 var(--sp-4);
+}
+/* A running event rests in the kit's hovered look, with its live flag. */
+.live-card {
+  position: relative;
+  padding: var(--sp-3) var(--sp-4);
+  background: var(--accent);
+  color: var(--on-surface);
+  border: var(--edge) solid var(--outline);
+  border-radius: var(--radius);
+  box-shadow: var(--ring-hover), 4px 6px 0 3px var(--outline);
+}
+.live-card .flag { right: 1rem; }
+.live-sets { display: grid; gap: var(--sp-2); margin: var(--sp-2) 0 0; padding: 0; list-style: none; }
+.live-sets li {
+  padding: 0.15rem 0.75rem;
+  background: var(--surface);
+  border: var(--edge-pill) solid var(--outline);
+  border-radius: var(--radius-row);
+  box-shadow: var(--shadow);
+  font-size: 0.9375rem;
+}
+.live-sets li:nth-child(odd) { rotate: -0.5deg; }
+.live-sets li:nth-child(even) { rotate: 0.5deg; }
+/* A pill link, as the nav's. */
+.pill {
+  display: inline-block;
+  padding: 0.2rem 0.85rem;
+  color: var(--on-surface);
+  background: var(--surface);
+  border: var(--edge-pill) solid var(--outline);
+  border-radius: var(--radius-row);
+  box-shadow: var(--shadow);
+  font-size: 0.9375rem;
+  text-decoration: none;
+  transition: translate var(--m-hover) var(--ease), box-shadow var(--m-hover) var(--ease);
+}
+.pill:hover, .pill:focus-visible { background: var(--accent); translate: 0 -3px; box-shadow: var(--shadow-hover); outline: none; }
+.links { margin: 0 0 var(--sp-5); color: var(--on-bg-quiet); }
+.links a { color: var(--on-bg); }
+.enter .home-card { animation: sticker-in var(--m-enter) var(--ease) both; animation-delay: calc(var(--i, 0) * 3 * var(--frame)); }
+
 /* ---- motion: one entrance, on the first drawing of an event only ---- */
 @keyframes sticker-in {
   0% { opacity: 0; scale: 0.85; }
