@@ -20,11 +20,93 @@ client, `autobracket-client`, that drives the engine. There are no accounts: a p
 Ed25519 key their client generates, plus a display tag. The HTTP API, including the request
 signing, is documented in [docs/api.md](docs/api.md) for anyone writing another client.
 
-## Requirements
+## Install
+
+Three ways to a running server, shortest first. Each ends at the same place: the server
+running on this machine with a config that names your organiser key, and the key itself in
+`organiser.key`. Then do the three things in [After installing](#after-installing).
+
+A release holds `autobracket` (the server, with the admin CLI, `init`, `keygen` and
+`verify-worker`) and the player's `autobracket-client`, for Linux x86_64. It does **not**
+include the game engine or a disc image (see [Requirements](#requirements)), so a new server
+runs with verification off: games count on peer agreement and the ruleset alone (verdict
+`PeerOnly`), which means both players' replays must agree and be legal but nothing
+re-simulates them. Turning verification on is optional; see
+[Verifier modes](#verifier-modes).
+
+### A. Release archive
+
+The repository is private and has no published release yet: `<release URL>` below stands for
+the address of a release's files once there is one. Until then, build the same archive
+yourself with `scripts/build-release.sh` (path C). The binaries are built on Ubuntu
+(GitHub's `ubuntu-latest`) and need a glibc at least that new (Debian 13, Ubuntu 24.04).
+
+```sh
+curl -LO <release URL>/autobracket-0.1.0-x86_64-unknown-linux-gnu.tar.gz
+curl -LO <release URL>/SHA256SUMS
+sha256sum -c SHA256SUMS
+tar xzf autobracket-0.1.0-x86_64-unknown-linux-gnu.tar.gz
+sudo install -m 755 autobracket-0.1.0-x86_64-unknown-linux-gnu/autobracket* /usr/local/bin/
+
+autobracket init --dir ~/autobracket       # key, config, replays/; prints the next steps
+autobracket serve --config ~/autobracket/autobracket.toml
+```
+
+`init` writes `organiser.key` (mode 0600), `autobracket.toml` (verifier off, listening on
+`127.0.0.1:8080`; every other setting shown commented out at its default) and `replays/`, then
+prints the commands to create and start your first event with that key. `--bind ADDR`,
+`--proxy-cidr CIDR` (repeatable: your reverse proxy, for `trusted_proxies`) and
+`--public-url URL` (used in the printed commands) adjust it; it refuses to replace an existing
+key or config without `--force`. To run the server as a service, see [systemd](#systemd).
+
+### B. Docker Compose
+
+From a checkout of the repository (`github.com/GurekamDhillon/melee-autobracket`, private for
+now); no prebuilt image is published. The image is Debian 13 slim with only the `autobracket`
+binary, runs as uid 10001, and keeps everything in the volume mounted on `/data`.
+
+```sh
+docker compose -f deploy/docker-compose.yml build
+docker compose -f deploy/docker-compose.yml run --rm autobracket \
+  init --dir /data --bind 0.0.0.0:8080 --proxy-cidr 172.16.0.0/12
+docker compose -f deploy/docker-compose.yml up -d
+```
+
+The server is then published on the host's `127.0.0.1:8080` only. The comments in
+`deploy/docker-compose.yml` show how to run the admin CLI with `docker compose exec`, how to
+edit the config, why `--proxy-cidr` is the Docker range here, and how to mount your own engine
+and disc image read-only for the `in_process` verifier.
+
+### C. Build from source
+
+You need:
 
 - **Rust 1.94 or later** (sqlx 0.9 needs it; it is the workspace's `rust-version`).
 - **A C compiler** (`cc`, e.g. gcc or clang): `aws-lc-sys` (TLS) and the bundled SQLite are
-  built from C source.
+  built from C source. Nothing else: no OpenSSL, no system SQLite.
+
+```sh
+cargo build --release
+# target/release/autobracket          the server, admin CLI, init, keygen and verify-worker
+# target/release/autobracket-client   the player's client
+target/release/autobracket init --dir ~/autobracket
+target/release/autobracket serve --config ~/autobracket/autobracket.toml
+```
+
+`scripts/build-release.sh` builds the release archive of path A into `dist/`, with its
+`SHA256SUMS`.
+
+### After installing
+
+1. **Put TLS in front** before players connect over the internet, and list the proxy in
+   `trusted_proxies`: [TLS and reverse proxies](#tls-and-reverse-proxies), with ready-made
+   `deploy/Caddyfile.example` (automatic certificates) and `deploy/nginx.conf.example`.
+2. **Turn on verification** when you have an engine and a disc image:
+   [Verifier modes](#verifier-modes). Until then results are `PeerOnly`.
+3. **Back up** the database and `organiser.key`: [Backups](#backups).
+
+## Requirements
+
 - **Linux** for the client: it uses process groups, Unix signals and `/proc` (`play` refuses
   to start on a system without `/proc`).
   It does not run on Windows. The server is tested on Linux (Debian 13) under systemd.
@@ -36,23 +118,17 @@ signing, is documented in [docs/api.md](docs/api.md) for anyone writing another 
 - **Your own NTSC 1.02 disc image** (a plain `.iso`). The project never distributes one, and no
   disc image belongs in this repository.
 
-Build both binaries:
-
-```sh
-cargo build --release
-# target/release/autobracket          the server, admin CLI and verify-worker
-# target/release/autobracket-client   the player's client
-```
-
 ## Organiser quick start
 
 ```sh
-# 1. Make your organiser key. The secret goes to to.key (kept out of git by .gitignore);
-#    the public key is printed.
+# 1. Make your organiser key. `autobracket init --dir DIR` (see Install) makes the key
+#    (DIR/organiser.key) and the config in one go: then go on at step 3. By hand: the secret
+#    goes to to.key (kept out of git by .gitignore); the public key is printed.
 autobracket keygen --out to.key
 
-# 2. Write a config. Put the printed public key in `to_keys`, point `db_path` and
-#    `replay_dir` somewhere writable, and set `relay` (see "The relay" below).
+# 2. Write a config. Put the printed public key in `to_keys`, delete the
+#    `allow_no_organiser` line, point `db_path` and `replay_dir` somewhere writable, and set
+#    `relay` (see "The relay" below).
 cp deploy/autobracket.example.toml autobracket.toml
 $EDITOR autobracket.toml
 
@@ -320,6 +396,17 @@ sudo systemctl daemon-reload
 sudo systemctl enable --now autobracket
 ```
 
+With `init` instead of the example config (the server never reads the organiser key, so move
+it to wherever you run admin commands; the config holds no secret):
+
+```sh
+sudo autobracket init --dir /var/lib/autobracket --proxy-cidr 127.0.0.1/32
+sudo install -d /etc/autobracket
+sudo install -m 644 /var/lib/autobracket/autobracket.toml /etc/autobracket/
+sudo rm /var/lib/autobracket/autobracket.toml
+sudo mv /var/lib/autobracket/organiser.key ~/organiser.key && sudo chown "$USER" ~/organiser.key
+```
+
 Because of `DynamicUser` and `ProtectHome`, an `in_process` verifier's `engine` and `iso` must
 live outside home directories and be readable by the service's dynamic user, e.g.
 world-readable files under `/opt/melee`.
@@ -385,6 +472,20 @@ sqlite3 /var/lib/autobracket/autobracket.sqlite ".backup /root/autobracket-$(dat
 
 or stop the service (`systemctl stop autobracket`), copy `/var/lib/autobracket` (database and
 `replays/`), and start it again.
+
+Keep a private copy of the organiser key (`organiser.key` from `init`) too: whoever holds it
+can run your events. If it is lost or leaks, make a new one with `autobracket keygen` and
+replace the old public key in `to_keys`.
+
+With Docker Compose everything (database, replays, key, config) is in the volume, and the
+image has no `sqlite3`; stop the server and archive the volume:
+
+```sh
+docker compose -f deploy/docker-compose.yml stop
+docker compose -f deploy/docker-compose.yml run --rm -T --entrypoint tar autobracket \
+  -czf - -C /data . > autobracket-$(date +%F).tar.gz
+docker compose -f deploy/docker-compose.yml start
+```
 
 ## Limits
 
