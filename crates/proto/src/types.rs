@@ -69,7 +69,10 @@ pub enum Verdict {
 impl Verdict {
     /// Whether a game with this verdict counts toward the set score.
     pub fn counts(&self) -> bool {
-        matches!(self, Verdict::Verified | Verdict::VerifiedInexact | Verdict::PeerOnly)
+        matches!(
+            self,
+            Verdict::Verified | Verdict::VerifiedInexact | Verdict::PeerOnly
+        )
     }
 }
 

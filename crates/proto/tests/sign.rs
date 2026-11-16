@@ -75,7 +75,11 @@ fn ruleset_default() {
 
 #[test]
 fn verdict_counts() {
-    for v in [Verdict::Verified, Verdict::VerifiedInexact, Verdict::PeerOnly] {
+    for v in [
+        Verdict::Verified,
+        Verdict::VerifiedInexact,
+        Verdict::PeerOnly,
+    ] {
         assert!(v.counts(), "{v:?} should count");
     }
     for v in [
@@ -125,5 +129,11 @@ fn serde_round_trip() {
 #[test]
 fn ruleset_partial() {
     let r: Ruleset = serde_json::from_str(r#"{"stocks":3}"#).unwrap();
-    assert_eq!(r, Ruleset { stocks: 3, ..Ruleset::default() });
+    assert_eq!(
+        r,
+        Ruleset {
+            stocks: 3,
+            ..Ruleset::default()
+        }
+    );
 }

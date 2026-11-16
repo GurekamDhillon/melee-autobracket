@@ -29,7 +29,13 @@ pub enum SignError {
 }
 
 /// The signed message: `"{METHOD}\n{path_and_query}\n{time}\n{nonce}\n{sha256_hex(body)}"`.
-pub fn canonical(method: &str, path_and_query: &str, time: &str, nonce: &str, body: &[u8]) -> String {
+pub fn canonical(
+    method: &str,
+    path_and_query: &str,
+    time: &str,
+    nonce: &str,
+    body: &[u8],
+) -> String {
     let body_hash = hex::encode(Sha256::digest(body));
     format!("{method}\n{path_and_query}\n{time}\n{nonce}\n{body_hash}")
 }
