@@ -32,8 +32,11 @@ pub const MAX_FAILED_RUNS: u32 = 4;
 /// Consecutive host runs of one game that may end with nobody joining before `play`
 /// reports a no-show.
 pub const NO_SHOW_STRIKES: u32 = 2;
-/// How many times a no-show report refused for a fresh room code is tried again.
+/// How many times a no-show report refused for a fresh room code is tried again, at least;
+/// it is tried for as long as the grace period the server names lasts.
 const NO_SHOW_RETRIES: u32 = 8;
+/// Added to the grace period the server names, which it measures in whole seconds.
+const GRACE_MARGIN: Duration = Duration::from_secs(2);
 
 /// Timing of the play loop.
 #[derive(Clone, Debug)]
@@ -52,6 +55,9 @@ pub struct PlayOptions {
     pub no_show_retry: Duration,
     /// Accept a `HOST:PORT` room code (direct connect).
     pub allow_direct_connect: bool,
+    /// Wait before hosting a game again after the server refused its room code because a
+    /// game of the set is in progress (unless the server offers a different game first).
+    pub in_progress_wait: Duration,
 }
 
 impl PlayOptions {
@@ -65,6 +71,7 @@ impl PlayOptions {
             )),
             no_show_retry: Duration::from_secs(15),
             allow_direct_connect: false,
+            in_progress_wait: Duration::from_secs(30),
         }
     }
 }
@@ -386,6 +393,9 @@ struct LaterReport {
     detail: String,
     at: Instant,
     tries: u32,
+    /// Until when refusals are expected: the server's grace period has certainly passed
+    /// by then. `None` when it named none; then only [`NO_SHOW_RETRIES`] are made.
+    until: Option<Instant>,
 }
 
 /// How long a guest has been without a usable room code, for its automatic report.
@@ -443,14 +453,15 @@ fn setup_error(engine: &dyn Engine, exit: Option<RunExit>) -> Option<anyhow::Err
 /// What became of a report.
 enum Reported {
     Taken,
-    /// Refused because a room code was posted moments ago: worth trying again shortly.
-    TooSoon,
+    /// Refused because a room code was posted moments ago: worth trying again shortly. The
+    /// grace period the server named, if it could be read.
+    TooSoon(Option<Duration>),
     /// Refused for another reason, or the server has no such route.
     NotTaken,
 }
 
-/// Reports the set to the organiser, retrying while the server is unreachable. A `409` or
-/// `404` (an older server) is printed and not an error.
+/// Reports the set to the organiser, retrying while the server is unreachable. A `409`,
+/// `404` (an older server), `403` or `400` is printed and not an error.
 async fn report(
     api: &Api,
     net: &mut Net,
@@ -471,7 +482,7 @@ async fn report(
                     err.message
                 );
                 if kind == NoShowKind::NoShow && err.message.contains("room code was posted") {
-                    Ok(Reported::TooSoon)
+                    Ok(Reported::TooSoon(grace_in(&err.message)))
                 } else {
                     Ok(Reported::NotTaken)
                 }
@@ -483,9 +494,29 @@ async fn report(
                 );
                 Ok(Reported::NotTaken)
             }
+            Some(err)
+                if err.status == Some(StatusCode::FORBIDDEN)
+                    || err.status == Some(StatusCode::BAD_REQUEST) =>
+            {
+                println!(
+                    "The server refused the report for set {set_id} ({}); tell the organiser \
+                     about the set",
+                    err.message
+                );
+                Ok(Reported::NotTaken)
+            }
             _ => Err(e.context(format!("reporting set {set_id} to the organiser"))),
         },
     }
+}
+
+/// The grace period in the server's refusal `a room code was posted less than N seconds
+/// ago`.
+fn grace_in(message: &str) -> Option<Duration> {
+    let (_, rest) = message.split_once("less than ")?;
+    let mut words = rest.split_whitespace();
+    let secs = words.next()?.parse().ok()?;
+    (words.next() == Some("seconds")).then(|| Duration::from_secs(secs))
 }
 
 /// Plays `event` until this player is out of it, polling the server every `poll`.
@@ -595,6 +626,23 @@ async fn recover(
             s.launched = Some(launch);
             return Ok(());
         }
+    } else if record.process.is_running() {
+        // The recorded process (pid, start time and boot all match) is alive but not in its
+        // run directory. It may well be the game: starting another, or reporting this one
+        // as ended, is worse than stopping here.
+        let cwd = record
+            .process
+            .cwd()
+            .map_or_else(|| "(unknown)".to_string(), |c| c.display().to_string());
+        bail!(
+            "{what} may still be running: its process (pid {}) is alive, but its working \
+             directory is {cwd}, not the recorded run directory {}. Nothing was started. Your \
+             game may still be running: let it finish, then run `play` again, which uploads its \
+             replay. If that process is not your game, delete {} and run `play` again",
+            record.process.pid,
+            record.run_dir.display(),
+            file.path().display()
+        );
     }
     let replays: Vec<PathBuf> = match session::replays_in(&record.run_dir) {
         Ok(r) => r
@@ -768,7 +816,7 @@ async fn finish_run(
                      no-show to the organiser",
                     launch.set_id, launch.game_no
                 ),
-                Reported::TooSoon => {
+                Reported::TooSoon(grace) => {
                     let at = Instant::now() + opts.no_show_retry;
                     l.failures.hold(launch.set_id, launch.game_no, at);
                     l.later = Some(LaterReport {
@@ -777,6 +825,7 @@ async fn finish_run(
                         detail,
                         at,
                         tries: 1,
+                        until: grace.map(|g| Instant::now() + g + GRACE_MARGIN),
                     });
                 }
                 Reported::NotTaken => {}
@@ -852,17 +901,16 @@ async fn play(
         host: *role == Role::Host,
         code: None,
     };
-    let hold = Instant::now() + opts.launch_backoff;
-
     if let Some(launch) = s.launched.clone() {
         // Playing, or the run ended after `finish_run` looked: it is collected on the next
         // poll, and nothing new starts before then. A game taken over from an earlier
         // `play` may not have had its room code sent yet.
         if engine.running() && launch.host && launch.is(set_id, game_no) && !s.code_posted() {
             if let Some(code) = engine.room_code(Duration::ZERO)? {
-                if !send_code(api, &mut l.net, s, &launch, &code).await? {
+                let sent = send_code(api, &mut l.net, s, &launch, &code).await?;
+                if sent != CodeSent::Taken {
                     stop_run(engine, s);
-                    l.failures.hold(set_id, game_no, hold);
+                    l.failures.hold(set_id, game_no, sent.hold_until(opts));
                 }
             }
         }
@@ -883,7 +931,10 @@ async fn play(
         }
         let detail = later.detail.clone();
         match report(api, &mut l.net, event, set_id, &detail, NoShowKind::NoShow).await? {
-            Reported::TooSoon if later.tries < NO_SHOW_RETRIES => {
+            Reported::TooSoon(_)
+                if later.tries < NO_SHOW_RETRIES
+                    || later.until.is_some_and(|u| Instant::now() < u) =>
+            {
                 later.tries += 1;
                 later.at = Instant::now() + opts.no_show_retry;
                 l.failures.hold(set_id, game_no, later.at);
@@ -917,9 +968,10 @@ async fn play(
         s.started(engine, this_game.clone());
         match wait_for_code(engine).await? {
             Some(code) => {
-                if !send_code(api, &mut l.net, s, &this_game, &code).await? {
+                let sent = send_code(api, &mut l.net, s, &this_game, &code).await?;
+                if sent != CodeSent::Taken {
                     stop_run(engine, s);
-                    l.failures.hold(set_id, game_no, hold);
+                    l.failures.hold(set_id, game_no, sent.hold_until(opts));
                 }
             }
             None if engine.running() => {
@@ -1034,15 +1086,36 @@ async fn guest_waits(
     Ok(())
 }
 
-/// Hands the host's room code to the server. `false` if the server refused it (the set is
-/// not ready for it, say); the run should then be stopped.
+/// What became of a room code sent to the server.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CodeSent {
+    Taken,
+    /// Refused (the set is not ready for it, say); the run should be stopped.
+    Refused,
+    /// Refused because a game of the set is still uploading or being judged; the run should
+    /// be stopped, and the game not hosted again for a while.
+    GameInProgress,
+}
+
+impl CodeSent {
+    /// Until when not to host this game again after the refusal.
+    fn hold_until(self, opts: &PlayOptions) -> Instant {
+        let wait = match self {
+            CodeSent::GameInProgress => opts.in_progress_wait,
+            _ => opts.launch_backoff,
+        };
+        Instant::now() + wait
+    }
+}
+
+/// Hands the host's room code to the server.
 async fn send_code(
     api: &Api,
     net: &mut Net,
     s: &mut Session,
     launch: &Launch,
     code: &str,
-) -> anyhow::Result<bool> {
+) -> anyhow::Result<CodeSent> {
     match net
         .retry(|| api.post_room(launch.event, launch.set_id, code))
         .await
@@ -1050,7 +1123,7 @@ async fn send_code(
         Ok(()) => {
             println!("Room code {code} sent");
             s.update(|r| r.code_posted = true);
-            Ok(true)
+            Ok(CodeSent::Taken)
         }
         Err(e) => match refused(&e) {
             Some(err) => {
@@ -1058,7 +1131,12 @@ async fn send_code(
                     "The server did not take room code {code} for game {}: {}; stopping that game",
                     launch.game_no, err.message
                 );
-                Ok(false)
+                // The room route's answer while a game of the set is uploading or judged.
+                if err.status == Some(StatusCode::CONFLICT) && err.message.contains("in progress") {
+                    Ok(CodeSent::GameInProgress)
+                } else {
+                    Ok(CodeSent::Refused)
+                }
             }
             None => Err(e),
         },

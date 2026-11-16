@@ -12,7 +12,7 @@ use tokio::signal::unix::{signal, SignalKind};
 #[derive(Parser)]
 #[command(
     name = "autobracket-client",
-    about = "Play your sets in an autobracket Melee tournament (Linux and other Unix systems)"
+    about = "Play your sets in an autobracket Melee tournament (Linux)"
 )]
 struct Cli {
     /// Config file [default: ~/.config/autobracket/client.toml]
@@ -209,6 +209,7 @@ async fn main() -> anyhow::Result<()> {
             println!("{}", describe(&api.next(event).await?));
         }
         Cmd::Play { event, poll_secs } => {
+            autobracket_client::session::require_proc(Path::new("/proc/self/stat"))?;
             let cfg = load(&path)?;
             config::check_disc(&cfg.iso)?;
             let build = config::engine_build(&cfg.melee)?;

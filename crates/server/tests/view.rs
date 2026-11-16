@@ -26,6 +26,9 @@ async fn root_serves_html() {
     // Sets decided without play are labelled rather than shown as 0-0.
     assert!(body.contains("decided_by"));
     assert!(body.contains("awarded"));
+    // Games counted while the verifier was unavailable are mentioned under the header.
+    assert!(body.contains("view.unverified_games"));
+    assert!(body.contains("counted without engine verification"));
 }
 
 #[tokio::test]
@@ -120,8 +123,7 @@ async fn page_has_security_headers() {
     }
 }
 
-/// Every route in the table of `docs/api.md` exists with its method (rows for routes added in
-/// the same release by another part of the server are skipped until they are integrated).
+/// Every route in the table of `docs/api.md` exists with its method.
 #[tokio::test]
 async fn documented_routes_exist() {
     let doc =
@@ -132,10 +134,10 @@ async fn documented_routes_exist() {
     let mut seen = 0;
     for line in doc.lines() {
         let cells: Vec<&str> = line.split('|').map(str::trim).collect();
-        let [_, method, path, _, _, success, ..] = cells[..] else {
+        let [_, method, path, ..] = cells[..] else {
             continue;
         };
-        if !["GET", "POST", "DELETE"].contains(&method) || success.contains("added in the same") {
+        if !["GET", "POST", "DELETE"].contains(&method) {
             continue;
         }
         // `{name}` placeholders become 1.
@@ -166,5 +168,5 @@ async fn documented_routes_exist() {
         );
         seen += 1;
     }
-    assert!(seen >= 20, "parsed {seen} routes from the table");
+    assert!(seen >= 21, "parsed {seen} routes from the table");
 }

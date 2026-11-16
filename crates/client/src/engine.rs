@@ -7,6 +7,9 @@
 //!   `play: netplay host: no connection after N s (...)` and exits 1. Builds with
 //!   `--np-join-wait` (engine branch port/np-nameentry) print `play: netplay: no opponent
 //!   joined` and exit 5. Either line means nobody joined; the exit code alone never does.
+//!   Except: when the host's log also has `play: netplay host: the server introduced …`
+//!   (`melee_net/src/app/rdv.rs:274`), a guest arrived and the peers never connected; that
+//!   run is a failed run, not a no-show.
 //! - A guest whose code names no room prints `play: netplay guest: no room with that code`;
 //!   one whose host closed the room, `play: netplay guest: The host closed the room`. Both
 //!   exit 1. Neither is the guest's own failure.
@@ -43,6 +46,10 @@ pub const NO_OPPONENT_LINE: &str = "play: netplay: no opponent joined";
 /// The start of the line the installed engine (0cd085d) prints when it was hosting and no
 /// guest connected within `--np-timeout` (it then exits 1): `play_net.rs:1154`.
 pub const HOST_NO_CONNECTION_PREFIX: &str = "play: netplay host: no connection after ";
+/// The start of the line the installed engine prints on the host when the relay hands it a
+/// guest (`rdv.rs:274`, printed through `play_net.rs:1163-1166`). A run that then ends with
+/// [`HOST_NO_CONNECTION_PREFIX`] had a guest who could not connect, not a missing opponent.
+pub const HOST_GUEST_INTRODUCED_PREFIX: &str = "play: netplay host: the server introduced ";
 /// Lines a guest's engine prints when the room it was sent to is gone: `melee_relay`'s
 /// `ERR no room with that code`, and the host's `BYE`.
 pub const HOST_GONE_LINES: [&str; 2] = [
@@ -192,7 +199,9 @@ impl CommandEngine {
         Ok(CommandEngine {
             melee,
             iso: utf8(&absolute(&cfg.iso)?)?.to_string(),
-            work_dir: absolute(&cfg.work_dir)?,
+            // Resolved, so it matches the working directory the kernel reports for a game
+            // (`/proc/PID/cwd`) when a restarted `play` checks whether to take it over.
+            work_dir: crate::config::resolve_work_dir(&cfg.work_dir)?,
             host_args: cfg.host_args.clone(),
             join_args: cfg.join_args.clone(),
             code_regex,
@@ -481,13 +490,20 @@ fn run_exit(code: Option<i32>, dir: &Path) -> RunExit {
         no_opponent: false,
         host_gone: false,
     };
+    let (mut no_connection, mut introduced) = (false, false);
     for line in log.lines().map(str::trim_end) {
-        if line == NO_OPPONENT_LINE || line.starts_with(HOST_NO_CONNECTION_PREFIX) {
+        if line == NO_OPPONENT_LINE {
             exit.no_opponent = true;
         }
+        no_connection |= line.starts_with(HOST_NO_CONNECTION_PREFIX);
+        introduced |= line.starts_with(HOST_GUEST_INTRODUCED_PREFIX);
         if HOST_GONE_LINES.contains(&line) {
             exit.host_gone = true;
         }
+    }
+    // A guest the relay introduced was there: the run failed, nobody failed to show up.
+    if no_connection && !introduced {
+        exit.no_opponent = true;
     }
     exit
 }

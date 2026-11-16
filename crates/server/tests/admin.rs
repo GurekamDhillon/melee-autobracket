@@ -1269,6 +1269,27 @@ async fn entrant_remove_during_signup_only() {
     assert_eq!(entrant_seeds(&app, event).await.len(), 3);
 }
 
+/// Tags are unique whatever their case, so the tag in the path matches in any case.
+#[tokio::test]
+async fn entrant_remove_matches_the_tag_in_any_case() {
+    let app = TestApp::spawn(|_| {}).await;
+    let ps = players(&app, 3).await;
+    let event = app.create_event(Format::SingleElim).await;
+    for p in &ps {
+        p.sign_up(event).await;
+    }
+
+    let path = format!("/v1/admin/events/{event}/entrants/p1");
+    assert_eq!(
+        signed_delete(&app.url, &app.to, &path).await,
+        StatusCode::NO_CONTENT
+    );
+    assert_eq!(
+        entrant_seeds(&app, event).await,
+        vec![("P0".into(), 0), ("P2".into(), 1)]
+    );
+}
+
 /// An organiser replays a game after one was counted: the set stays at 1-0 and the replayed
 /// game keeps its number, 2.
 #[tokio::test]

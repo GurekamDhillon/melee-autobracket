@@ -61,6 +61,19 @@ pub fn lock(work_dir: &Path) -> anyhow::Result<WorkLock> {
     Ok(WorkLock { _file: file })
 }
 
+/// Fails unless `stat` (`/proc/self/stat` for `play`) can be read. Without `/proc` a game
+/// is never recorded, so a restarted `play` would start a second one.
+pub fn require_proc(stat: &Path) -> anyhow::Result<()> {
+    std::fs::read_to_string(stat).with_context(|| {
+        format!(
+            "`play` needs Linux: it reads /proc to recognise a game still running when it is \
+             restarted, and {} cannot be read",
+            stat.display()
+        )
+    })?;
+    Ok(())
+}
+
 /// A process identified beyond its pid.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct ProcId {
@@ -115,10 +128,18 @@ impl ProcId {
         })
     }
 
-    /// [`ProcId::is_running`], and its working directory is `dir`.
+    /// Its working directory, as the kernel resolved it (no symlinks, no `..`).
+    pub fn cwd(&self) -> Option<PathBuf> {
+        std::fs::read_link(format!("/proc/{}/cwd", self.pid)).ok()
+    }
+
+    /// [`ProcId::is_running`], and its working directory is `dir` (compared resolved, so a
+    /// `dir` reached through a symlink or `..` still matches).
     pub fn is_running_in(&self, dir: &Path) -> bool {
         self.is_running()
-            && std::fs::read_link(format!("/proc/{}/cwd", self.pid)).is_ok_and(|cwd| cwd == dir)
+            && self.cwd().is_some_and(|cwd| {
+                cwd == dir || std::fs::canonicalize(dir).is_ok_and(|dir| cwd == dir)
+            })
     }
 }
 

@@ -775,3 +775,13 @@ async fn rate_limit_keys_on_the_forwarded_client_only_behind_a_trusted_proxy() {
     let body: serde_json::Value = spoofed.json().await.unwrap();
     assert!(body["error"].is_string(), "{body}");
 }
+
+/// A replay upload may take as long to arrive as the client allows it (120 s), so a slow
+/// uplink is not refused with 408 on every retry.
+#[test]
+fn an_upload_body_may_take_as_long_as_the_client_allows() {
+    assert_eq!(
+        autobracket_server::auth::UPLOAD_BODY_TIMEOUT,
+        Duration::from_secs(120)
+    );
+}

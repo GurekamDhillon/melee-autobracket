@@ -518,6 +518,30 @@ fn frames_after_game_end_are_rejected() {
     assert_eq!(parse(&file), Err(ReplayError::UnexpectedEvent));
 }
 
+/// The engine reads Pre-Frame Updates (0x37) into its frames and inputs too: one after Game
+/// End is refused like a Post-Frame Update, while one before it is ordinary.
+#[test]
+fn pre_frames_after_game_end_are_rejected() {
+    let pre_frame = || vec![0u8; 63];
+    let after = SlpBuilder::new()
+        .player(1, 2, PlayerKind::Human)
+        .player(2, 9, PlayerKind::Human)
+        .event(0x39, game_end_payload())
+        .event(0x37, pre_frame())
+        .build();
+    assert_eq!(parse(&after), Err(ReplayError::UnexpectedEvent));
+
+    let before = SlpBuilder::new()
+        .player(1, 2, PlayerKind::Human)
+        .player(2, 9, PlayerKind::Human)
+        .event(0x37, pre_frame())
+        .frame(10, 1, 4, 0.0)
+        .frame(10, 2, 3, 0.0)
+        .end(2, None)
+        .build();
+    assert!(parse(&before).is_ok());
+}
+
 /// Events other than frames may follow Game End; one Game End after the frames is the norm.
 #[test]
 fn other_events_after_game_end_are_accepted() {
