@@ -403,7 +403,7 @@ Phase 1 is a working tournament system with honest gaps:
   request to another instance within the two-minute signing window if the paths match. Keep
   separate keys (configs) for servers you do not trust.
 - **One SQLite file, one server process.** No clustering.
-- **Licence not yet chosen** by the owner; until one is, no licence is granted.
+- **Licence:** GNU Affero General Public License, version 3 or (at your option) any later version (`AGPL-3.0-or-later`); see `LICENSE`. If you run a modified copy as a network service, the AGPL requires you to offer its source to that service's users.
 
 ## Phase 2
 
