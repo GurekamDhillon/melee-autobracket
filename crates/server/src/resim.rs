@@ -2,6 +2,10 @@
 //!
 //! [`Slpcheck`] runs the engine's `slpcheck` command as a subprocess and reads its verdict from
 //! the CSV the engine writes; the CSV, not the exit code or the log lines, is the contract.
+//!
+//! It sets `SLPCHECK_VANILLA_SPAWN=1` for replays without a Gecko list. Those are this engine's
+//! own exports, played without Slippi's codes; every other replay is run without the variable,
+//! so the engine applies Slippi's replay rules (Neutral Spawn included).
 
 use std::io;
 use std::os::unix::fs::DirBuilderExt;
@@ -63,7 +67,9 @@ impl Resim for NoResim {
 /// run to the end. The engine's `last_frame` equals the replay reader's for a complete run.
 pub const EARLY_END_SLACK_FRAMES: i32 = 0;
 
-/// Environment variable the engine needs to spawn characters the way the vanilla game does.
+/// Environment variable that makes the engine spawn characters the way the vanilla game does
+/// instead of applying Slippi's Neutral Spawn. Set only for replays without a Gecko list
+/// (see [`vanilla_spawn`]); the engine checks only whether it is present, not its value.
 const SPAWN_ENV: &str = "SLPCHECK_VANILLA_SPAWN";
 /// Bytes of the engine's stderr kept for error messages.
 const STDERR_TAIL_BYTES: usize = 2048;
@@ -77,8 +83,12 @@ pub struct Slpcheck {
 }
 
 impl Slpcheck {
-    /// Checks that the engine runs and records its build: the first line of `{engine} version`,
-    /// `+`, and the first 12 hex digits of the binary's SHA-256.
+    /// Checks that the engine runs and that the disc image is a readable regular file, and
+    /// records the engine's build: the first line of `{engine} version`, `+`, and the first 12
+    /// hex digits of the binary's SHA-256.
+    ///
+    /// A verifier that cannot run at all must fail at start-up, not turn every game it is given
+    /// into an engine failure.
     pub async fn new(engine: PathBuf, iso: PathBuf, timeout: Duration) -> anyhow::Result<Self> {
         let version = Command::new(&engine)
             .arg("version")
@@ -111,6 +121,8 @@ impl Slpcheck {
         .with_context(|| format!("hashing {}", engine.display()))?;
         let build = format!("{line}+{}", hex::encode(&digest[..6]));
 
+        check_disc(&iso).await?;
+
         Ok(Self {
             engine,
             iso,
@@ -118,6 +130,40 @@ impl Slpcheck {
             build,
         })
     }
+}
+
+/// Fails, naming `iso`, unless it is a regular file (after symlinks) whose first bytes can be
+/// read. Reads only a few bytes, not the whole image.
+async fn check_disc(iso: &Path) -> anyhow::Result<()> {
+    let meta = tokio::fs::metadata(iso)
+        .await
+        .with_context(|| format!("disc image {}", iso.display()))?;
+    if !meta.is_file() {
+        bail!("disc image {} is not a regular file", iso.display());
+    }
+    let mut file = tokio::fs::File::open(iso)
+        .await
+        .with_context(|| format!("opening disc image {}", iso.display()))?;
+    let mut head = [0u8; 8];
+    file.read(&mut head)
+        .await
+        .with_context(|| format!("reading disc image {}", iso.display()))?;
+    Ok(())
+}
+
+/// Whether to run the replay at `slp` with [`SPAWN_ENV`] set: only when it parses and carries
+/// no Gecko code list, which identifies this engine's own exports. A file that cannot be read or
+/// parsed runs without the variable, the engine's own default.
+async fn vanilla_spawn(slp: &Path) -> bool {
+    let Ok(bytes) = tokio::fs::read(slp).await else {
+        return false;
+    };
+    // On a blocking thread: a replay is several megabytes, and a panic there stays contained.
+    tokio::task::spawn_blocking(move || replay::parse(&bytes).map(|facts| !facts.has_gecko))
+        .await
+        .ok()
+        .and_then(Result::ok)
+        .unwrap_or(false)
 }
 
 #[async_trait]
@@ -130,7 +176,15 @@ impl Resim for Slpcheck {
         };
         let csv_path = dir.path().join("slpcheck.csv");
 
-        let mut child = match Command::new(&self.engine)
+        let mut command = Command::new(&self.engine);
+        if vanilla_spawn(slp).await {
+            command.env(SPAWN_ENV, "1");
+        } else {
+            // Removed rather than left alone: the engine reacts to the variable's presence, and
+            // this process's own environment might have it.
+            command.env_remove(SPAWN_ENV);
+        }
+        let mut child = match command
             .arg("slpcheck")
             .arg("--slp")
             .arg(slp)
@@ -138,7 +192,6 @@ impl Resim for Slpcheck {
             .arg(&self.iso)
             .arg("--csv")
             .arg(&csv_path)
-            .env(SPAWN_ENV, "1")
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::piped())
@@ -166,6 +219,7 @@ impl Resim for Slpcheck {
             }
         };
 
+        // Exit 2 is a usage error or an unreadable `.slp`: the engine never looked at the game.
         if status.code() == Some(2) {
             return ResimOutcome::Unavailable(stderr_tail);
         }
@@ -383,7 +437,14 @@ pub fn outcome_from_csv(csv: &str, replay_last_frame: i32) -> ResimOutcome {
             engine_value: col("engine_value").to_string(),
             replay_value: col("replay_value").to_string(),
         },
+        // The engine could not boot the disc image (missing, unreadable, unusable). That is the
+        // verifier's fault, not the replay's: the game must not count as re-simulated.
+        "boot-error" => ResimOutcome::Unavailable(status.to_string()),
+        // The engine will not (`refused`) or cannot (`parse-error`) simulate this file. Those
+        // describe the replay, not the verifier, so they count like a crash of the replay.
+        "refused" | "parse-error" => ResimOutcome::Crashed(status.to_string()),
         _ if status.is_empty() => ResimOutcome::Crashed("empty status".into()),
+        // `panic@F`, or a status this server does not know: kept as the engine wrote it.
         _ => ResimOutcome::Crashed(status.to_string()),
     }
 }
