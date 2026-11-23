@@ -161,6 +161,25 @@ pub fn metadata_codes(file: &[u8]) -> Vec<(u8, String)> {
     out
 }
 
+/// Whether the file's `metadata` element has a top-level key named `key`. Empty/malformed
+/// metadata, or none, is `false`.
+pub fn metadata_has_key(file: &[u8], key: &str) -> bool {
+    let Some(rest) = file.strip_prefix(RAW_HEADER) else { return false };
+    let Some((len, rest)) = rest.split_first_chunk::<4>() else { return false };
+    let Ok(len) = usize::try_from(u32::from_be_bytes(*len)) else { return false };
+    let Some(rest) = rest.get(len..) else { return false };
+    let mut c = Cur(rest);
+    while c.peek().is_some() && c.peek() != Some(b'}') {
+        let Some(k) = c.string() else { return false };
+        let Some(m) = c.byte() else { return false };
+        let Some(v) = value(&mut c, m, 0) else { return false };
+        if k == "metadata" {
+            return get(&v, key).is_some();
+        }
+    }
+    false
+}
+
 /// A connect code in its comparison form: `TAG#123`, upper case, the full-width `＃` made
 /// ASCII; `None` unless it is 1 to 8 ASCII letters or digits, `#`, then 1 to 6 digits.
 pub fn normalize_code(code: &str) -> Option<String> {

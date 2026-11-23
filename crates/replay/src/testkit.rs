@@ -44,6 +44,8 @@ pub struct SlpBuilder {
     end: Option<(u8, Option<u8>)>,
     start_at: String,
     codes: Vec<(u8, String)>,
+    own_export: bool,
+    version: [u8; 4],
 }
 
 impl Default for SlpBuilder {
@@ -72,6 +74,8 @@ impl SlpBuilder {
             end: None,
             start_at: "2026-11-15T20:00:00Z".to_string(),
             codes: Vec::new(),
+            own_export: false,
+            version: [3, 18, 0, 0],
         }
     }
     pub fn stage(mut self, stage: u16) -> Self {
@@ -144,6 +148,16 @@ impl SlpBuilder {
     pub fn code(mut self, port: u8, code: &str) -> Self {
         index(port);
         self.codes.push((port, code.to_string()));
+        self
+    }
+    /// Write the metadata marker our own engine's exports carry (`gameplayCodes`).
+    pub fn own_export(mut self, own: bool) -> Self {
+        self.own_export = own;
+        self
+    }
+    /// The Slippi version written in Game Start (default 3.18.0.0).
+    pub fn version(mut self, version: [u8; 4]) -> Self {
+        self.version = version;
         self
     }
     pub fn start_at(mut self, start_at: &str) -> Self {
@@ -238,6 +252,10 @@ impl SlpBuilder {
         file.extend_from_slice(&last.to_be_bytes());
         ubjson_key(&mut file, "playedOn");
         ubjson_string(&mut file, "dolphin");
+        if self.own_export {
+            ubjson_key(&mut file, "gameplayCodes");
+            ubjson_string(&mut file, "0");
+        }
         if !self.codes.is_empty() {
             ubjson_key(&mut file, "players");
             file.push(b'{');
@@ -260,7 +278,7 @@ impl SlpBuilder {
         const INFO: usize = 0x5;
         let mut ev = vec![0u8; 1 + GAME_START_SIZE];
         ev[0] = GAME_START;
-        ev[0x1..0x5].copy_from_slice(&[3, 18, 0, 0]);
+        ev[0x1..0x5].copy_from_slice(&self.version);
         ev[INFO + 0x8] = u8::from(self.teams);
         ev[INFO + 0xE..INFO + 0x10].copy_from_slice(&self.stage.to_be_bytes());
         ev[INFO + 0x10..INFO + 0x14].copy_from_slice(&self.timer_secs.to_be_bytes());

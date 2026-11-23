@@ -457,6 +457,13 @@ Limits that stay: the room-code hand-off is for the reference client, and player
 clients arrange their connection themselves; a Gecko code list must be on `allowed_gecko`
 (Slippi Dolphin writes one into every replay).
 
+Spawn rule for re-simulation: the server runs the engine with vanilla spawns
+(`SLPCHECK_VANILLA_SPAWN=1`) only for replays that are this engine's own exports: no Gecko code
+list and the metadata key `gameplayCodes`, which every export writes and no Slippi client does
+(`resim::is_own_export`). Every other replay, including Slippi 1.7.x console replays (no Gecko
+list, played with Neutral Spawn), runs with Neutral Spawn. Without the marker check, 215 of 227
+`UnverifiedForeign` console replays diverged at frame -123 on port 1's x.
+
 Tested (`crates/server/tests/any_client_real.rs`, `#[ignore]`d, `AB_SLP_DIR=...`,
 `AB_SLP_COUNT_ALL=1` to judge every file) on 3561 real Slippi tournament replays kept outside
 the repository (never commit a `.slp`). The 3561 files are

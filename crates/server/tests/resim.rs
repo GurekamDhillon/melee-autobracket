@@ -44,10 +44,12 @@ fn replay_with(dir: &tempfile::TempDir, name: &str, bytes: &[u8]) -> PathBuf {
     p
 }
 
-/// A readable two-player replay, with or without a Gecko code list.
+/// A readable two-player replay, with or without a Gecko code list. Without one it is this
+/// engine's own export (carries the export marker).
 fn built_replay(gecko: bool) -> Vec<u8> {
     let bytes = SlpBuilder::new()
         .gecko(gecko)
+        .own_export(!gecko)
         .player(1, 2, PlayerKind::Human)
         .player(2, 9, PlayerKind::Human)
         .frame(-123, 1, 4, 0.0)
@@ -513,4 +515,27 @@ async fn engine_gone_after_start_is_an_error() {
         checker.check(&slp, 5000).await,
         ResimOutcome::Unavailable(_)
     ));
+}
+
+/// The spawn decision: only our own exports (no Gecko list plus the export marker) get vanilla
+/// spawn. Old console replays have no Gecko list either but were played with Neutral Spawn.
+#[test]
+fn own_export_decision() {
+    let base = |b: SlpBuilder| {
+        b.player(1, 2, PlayerKind::Human)
+            .player(2, 9, PlayerKind::Human)
+            .frame(-123, 1, 4, 0.0)
+            .frame(-123, 2, 4, 0.0)
+            .end(2, None)
+            .build()
+    };
+    let console = base(SlpBuilder::new().version([1, 7, 1, 0]).gecko(false));
+    let export = base(SlpBuilder::new().gecko(false).own_export(true));
+    let dolphin = base(SlpBuilder::new().gecko(true));
+    let dolphin_marked = base(SlpBuilder::new().gecko(true).own_export(true));
+    assert!(!autobracket_server::resim::is_own_export(&console));
+    assert!(autobracket_server::resim::is_own_export(&export));
+    assert!(!autobracket_server::resim::is_own_export(&dolphin));
+    assert!(!autobracket_server::resim::is_own_export(&dolphin_marked));
+    assert!(!autobracket_server::resim::is_own_export(b"junk"));
 }

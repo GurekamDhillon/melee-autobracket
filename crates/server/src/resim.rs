@@ -82,8 +82,8 @@ impl Resim for NoResim {
 pub const EARLY_END_SLACK_FRAMES: i32 = 0;
 
 /// Environment variable that makes the engine spawn characters the way the vanilla game does
-/// instead of applying Slippi's Neutral Spawn. Set only for replays without a Gecko list
-/// (see [`vanilla_spawn`]); the engine checks only whether it is present, not its value.
+/// instead of applying Slippi's Neutral Spawn. Set only for this engine's own exports
+/// (see [`is_own_export`]); the engine checks only whether it is present, not its value.
 const SPAWN_ENV: &str = "SLPCHECK_VANILLA_SPAWN";
 /// The smallest file accepted as a disc image. A GameCube disc image is about 1.36 GiB; anything
 /// under 1 GiB is empty, truncated or not a disc.
@@ -175,18 +175,34 @@ async fn check_disc(iso: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Whether to run the replay at `slp` with [`SPAWN_ENV`] set: only when it parses and carries
-/// no Gecko code list, which identifies this engine's own exports. A file that cannot be read or
-/// parsed runs without the variable, the engine's own default.
+/// The metadata key our own engine's exports always write (`gameplayCodes`, its opt-in gameplay
+/// code word). Slippi Dolphin and Slippi consoles never write it.
+const OWN_EXPORT_KEY: &str = "gameplayCodes";
+
+/// Whether a replay file is one of this engine's own exports and so was played with vanilla
+/// spawns: it carries no Gecko code list AND its metadata has [`OWN_EXPORT_KEY`].
+///
+/// "No Gecko list" alone is not enough: Slippi 1.7.x console replays have none either, but were
+/// played with Neutral Spawn, and forcing vanilla spawn on them diverges at frame -123 (215 of
+/// 227 such replays in a 485-replay set). `playedOn` is no marker either: our exports write
+/// "console" for offline play. The metadata key is explicit, is written by every export
+/// (slp_export.rs in the game repo) and by no Slippi client. An export that lacks it (an older
+/// build) runs with the engine's default, which is the safe direction. Unparseable input is
+/// `false`.
+pub fn is_own_export(bytes: &[u8]) -> bool {
+    replay::parse(bytes).is_ok_and(|facts| !facts.has_gecko)
+        && replay::metadata_has_key(bytes, OWN_EXPORT_KEY)
+}
+
+/// Whether to run the replay at `slp` with [`SPAWN_ENV`] set: only for [`is_own_export`]. A file
+/// that cannot be read or parsed runs without the variable, the engine's own default.
 async fn vanilla_spawn(slp: &Path) -> bool {
     let Ok(bytes) = tokio::fs::read(slp).await else {
         return false;
     };
     // On a blocking thread: a replay is several megabytes, and a panic there stays contained.
-    tokio::task::spawn_blocking(move || replay::parse(&bytes).map(|facts| !facts.has_gecko))
+    tokio::task::spawn_blocking(move || is_own_export(&bytes))
         .await
-        .ok()
-        .and_then(Result::ok)
         .unwrap_or(false)
 }
 

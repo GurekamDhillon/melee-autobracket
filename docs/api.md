@@ -603,6 +603,8 @@ How a judged game was decided. Only `Verified`, `VerifiedInexact` and `PeerOnly`
 | `"VerifierUnavailable"` | `strict_resim`, a verifier is configured, and it was unavailable; does not count |
 | `"UnverifiedForeign"` | the event has `any_client` on: both uploads agree on the outcome and are legal, but the re-simulation diverged, ended early or crashed; counts, and is quarantined for the organiser |
 
+Re-simulation uses vanilla spawns only for this engine's own exports (no Gecko list and the metadata key `gameplayCodes`); every other replay, including Slippi 1.7.x console replays, runs with Neutral Spawn (README, "Any client mode").
+
 <!-- checked: Verdict -->
 ```json
 "Verified"

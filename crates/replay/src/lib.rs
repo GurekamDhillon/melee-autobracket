@@ -10,7 +10,7 @@ mod raw;
 #[cfg(feature = "testkit")]
 pub mod testkit;
 
-pub use metadata::{metadata_codes, normalize_code};
+pub use metadata::{metadata_codes, metadata_has_key, normalize_code};
 pub use raw::raw_element;
 
 use events::{Events, GAME_END, GAME_START, POST_FRAME, PRE_FRAME};
