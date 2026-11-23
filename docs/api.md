@@ -240,6 +240,7 @@ described above; the tables list the other statuses.
 | GET | `/v1/players` | public | — | 200 `[PlayerSummary]`, every registered player, by tag ignoring case | — |
 | GET | `/v1/players/{tag}` | public | — | 200 `PlayerProfile`; `{tag}` matches in any case | 404 no such player |
 | POST | `/v1/players` | any key | `RegisterReq` | 201, empty | 400 tag or body; 403 invite missing, unknown or used; 409 key already registered, tag taken |
+| POST | `/v1/players/slippi` | player | `SlippiCodeReq` | 204, empty | 400 code not shaped like `ABCD#123`; 409 another player has that code |
 | POST | `/v1/events/{id}/entrants` | player | `SignupReq` | 201, empty | 400; 403 `{"error":"engine build not accepted","accepted":[…]}`; 404; 409 not in sign-up, already entered, event full (1024) |
 | GET | `/v1/me/next?event={id}` | player | — | 200 `Next` | 400; 404 no such event |
 | POST | `/v1/sets/{event}/{set}/room` | player, host (slot 0) of the set | `RoomReq` | 204, empty | 400 bad code, or a direct-connect code where not allowed; 403 not in the set, or not the host; 404 no such set; 409 set not `ready`, or a game of the set is uploading (with an upload) or being judged |
@@ -320,6 +321,23 @@ absent. In requests, a field marked optional may be left out.
 <!-- checked: RegisterReq -->
 ```json
 {"tag": "Mango", "invite": "ABCDEFGHJKLM"}
+```
+
+### SlippiCodeReq
+
+Sets (or changes) the Slippi connect code of the signing key's player. The server stores it
+upper case with an ASCII `#`; 1 to 8 letters or digits, `#`, 1 to 6 digits. A code belongs to
+one player on the whole server, so it is unique within every event too. In an event with
+`any_client` on, the judge identifies the two players in a replay by this code instead of by
+port (README, "Any client mode"). Without one, that event falls back to the port rule.
+
+| Field | Type | |
+|---|---|---|
+| `code` | string | `ABCD#123` |
+
+<!-- checked: SlippiCodeReq -->
+```json
+{"code": "MANG#0"}
 ```
 
 ### SignupReq
@@ -579,8 +597,8 @@ How a judged game was decided. Only `Verified`, `VerifiedInexact` and `PeerOnly`
 | `"PeerOnly"` | both agree and are legal; no re-simulation (verifier off, or unavailable) |
 | `"Conflicted"` | the two uploads disagree |
 | `"Single"` | only one upload arrived in time |
-| `{"Illegal": "word"}` | a ruleset violation; the word is one of `"players"` (not two human players), `"teams"`, `"stage"`, `"stocks"`, `"timer"`, `"character"` (a banned character), `"gecko"` (a Gecko code list not in `allowed_gecko`) |
-| `"Undecided"` | the replays determine no winner |
+| `{"Illegal": "word"}` | a ruleset violation; the word is one of `"players"` (not two human players), `"teams"`, `"stage"`, `"stocks"`, `"timer"`, `"character"` (a banned character), `"gecko"` (a Gecko code list not in `allowed_gecko`), `"codes"` (any-client events only: both players have registered connect codes and the replay carries codes on both ports, but they are not those two players' codes) |
+| `"Undecided"` | the replays determine no winner (a game that ended by a method other than TIME!, GAME! or an LRAS quit, no Game End in the file, no frames, a tie); the organiser decides. An LRAS quit (No Contest with a known initiator) is judged a win for the other player. The game's evidence says why in `undecided_reason` |
 | `"Inexact"` | `strict_resim` and the re-simulation diverged |
 | `"VerifierUnavailable"` | `strict_resim`, a verifier is configured, and it was unavailable; does not count |
 | `"UnverifiedForeign"` | the event has `any_client` on: both uploads agree on the outcome and are legal, but the re-simulation diverged, ended early or crashed; counts, and is quarantined for the organiser |
@@ -669,7 +687,7 @@ An open organiser queue item.
 | `verdict` | `Verdict` or null | |
 | `resim` | `ResimOutcome` or null | |
 | `detail` | string or null | for a no-show, who reported it and their note; for a stalled set, how long it was idle |
-| `evidence` | JSON or null | per uploaded file, what the replay shows (slot, tag, file hash prefix, parse result, stage, timer, per-port character, stocks and percent, end method, derived winner), and for a lone upload the re-simulation run as evidence; for a set-level item, that of every game of the set |
+| `evidence` | JSON or null | per uploaded file, what the replay shows (slot, tag, file hash prefix, parse result, stage, timer, per-port character, stocks and percent, end method, derived winner; in an any-client event also the replay's connect codes, `mapping` (how ports were matched to the set's players: by code, or the port rule and why not) and, for a game with no result, `undecided_reason`), and for a lone upload the re-simulation run as evidence; for a set-level item, that of every game of the set |
 | `reporter_tag` | string or null | the tag of the player who reported the set (`no-show`, `client-failure`), else null |
 | `tags` | [slot 0 tag, slot 1 tag] or null | the tags of the set's two players, or null when they are not known |
 

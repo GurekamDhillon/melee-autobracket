@@ -87,3 +87,45 @@ pub async fn register(State(state): State<AppState>, req: AnyKey) -> Result<Stat
 fn valid_tag(tag: &str) -> bool {
     (2..=16).contains(&tag.len()) && tag.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_')
 }
+
+/// `POST /v1/players/slippi`: sets (or changes) the Slippi connect code of the signing key's
+/// player. Codes are unique: 409 when another player has it.
+pub async fn set_slippi_code(
+    State(state): State<AppState>,
+    req: crate::auth::Player,
+) -> Result<StatusCode, ApiError> {
+    let body: proto::SlippiCodeReq = serde_json::from_slice(&req.body).map_err(|e| {
+        ApiError::new(StatusCode::BAD_REQUEST, format!("invalid request body: {e}"))
+    })?;
+    let code = replay::normalize_code(&body.code).ok_or_else(|| {
+        ApiError::new(
+            StatusCode::BAD_REQUEST,
+            "code must look like ABCD#123 (1-8 letters or digits, #, 1-6 digits)",
+        )
+    })?;
+    let mut tx = begin_write(&state.db).await?;
+    let taken: Option<i64> =
+        sqlx::query_scalar("SELECT 1 FROM players WHERE slippi_code = ? AND key <> ? LIMIT 1")
+            .bind(&code)
+            .bind(&req.key)
+            .fetch_optional(&mut *tx)
+            .await?;
+    if taken.is_some() {
+        return Err(ApiError::new(StatusCode::CONFLICT, "connect code is taken"));
+    }
+    match sqlx::query("UPDATE players SET slippi_code = ? WHERE key = ?")
+        .bind(&code)
+        .bind(&req.key)
+        .execute(&mut *tx)
+        .await
+    {
+        Ok(_) => {}
+        Err(sqlx::Error::Database(e)) if e.is_unique_violation() => {
+            return Err(ApiError::new(StatusCode::CONFLICT, "connect code is taken"));
+        }
+        Err(e) => return Err(e.into()),
+    }
+    tx.commit().await?;
+    tracing::info!(tag = %crate::logging::label(&req.tag), key = %key_prefix(&req.key), "slippi code set");
+    Ok(StatusCode::NO_CONTENT)
+}

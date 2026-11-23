@@ -31,7 +31,13 @@ enum Cmd {
         tag: String,
         #[arg(long)]
         invite: Option<String>,
+        /// Your Slippi connect code (ABCD#123), set right after registering.
+        #[arg(long)]
+        code: Option<String>,
     },
+    /// Set (or change) your Slippi connect code. Codes are unique; the server refuses one
+    /// another player has.
+    Code { code: String },
     /// Enter an event in sign-up.
     Signup {
         event: i64,
@@ -89,7 +95,22 @@ async fn run(cli: Cli) -> anyhow::Result<ExitCode> {
     let up = Uploader::new(&cli.server, read_key(&cli.key)?)?;
     let r = match cli.cmd {
         Cmd::Keygen => unreachable!(),
-        Cmd::Register { tag, invite } => up.register(&tag, invite.as_deref()).await?,
+        Cmd::Register { tag, invite, code } => {
+            let r = up.register(&tag, invite.as_deref()).await?;
+            match code {
+                Some(code) if (200..300).contains(&r.status) => {
+                    // The key is registered now; a refused code can be retried with `code`.
+                    let c = up.slippi_code(&code).await?;
+                    if !(200..300).contains(&c.status) {
+                        eprintln!("registered, but the connect code was refused ({}): {}", c.status, c.body);
+                        return Ok(ExitCode::FAILURE);
+                    }
+                    r
+                }
+                _ => r,
+            }
+        }
+        Cmd::Code { code } => up.slippi_code(&code).await?,
         Cmd::Signup { event, build } => up.signup(event, &build).await?,
         Cmd::Next { event } => up.next(event).await?,
         Cmd::Upload { event, set, game, build, file } => {

@@ -549,6 +549,29 @@ pub(crate) async fn slot_tags(
     Ok(Some(tags))
 }
 
+/// The registered Slippi connect codes of the players in `slots` (a bracket set's); an empty
+/// slot or a player without a code is `None`.
+pub(crate) async fn slot_codes(
+    conn: &mut SqliteConnection,
+    event_id: i64,
+    slots: [Slot; 2],
+) -> Result<[Option<String>; 2], LifecycleError> {
+    let mut codes: [Option<String>; 2] = Default::default();
+    for (code, slot) in codes.iter_mut().zip(slots) {
+        let Slot::Entrant(seed) = slot else { continue };
+        *code = sqlx::query_scalar(
+            "SELECT p.slippi_code FROM entrants n JOIN players p ON p.key = n.player_key
+             WHERE n.event_id = ? AND n.seed = ?",
+        )
+        .bind(event_id)
+        .bind(seed)
+        .fetch_optional(&mut *conn)
+        .await?
+        .flatten();
+    }
+    Ok(codes)
+}
+
 /// Queue reason for a set awarded with both of its entrants disqualified.
 pub const DOUBLE_DQ: &str = "double-dq";
 

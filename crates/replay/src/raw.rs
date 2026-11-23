@@ -4,7 +4,7 @@ use crate::ReplayError;
 
 /// `{` opens the root object, then key `U 3 "raw"`, then an optimized array
 /// header: `[` of type `$U` (uint8) with a `#l` (int32) count.
-const RAW_HEADER: &[u8] = b"{U\x03raw[$U#l";
+pub(crate) const RAW_HEADER: &[u8] = b"{U\x03raw[$U#l";
 
 /// Returns the bytes of the `raw` element (the event stream), ignoring the
 /// `metadata` element that follows it.

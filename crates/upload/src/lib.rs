@@ -107,6 +107,14 @@ impl Uploader {
             .await
     }
 
+    /// Sets the Slippi connect code (`ABCD#123`) of the registered player, so any-client games
+    /// can tell the two players apart by code instead of by port.
+    pub async fn slippi_code(&self, code: &str) -> anyhow::Result<Reply> {
+        let body = serde_json::json!({ "code": code }).to_string();
+        self.send(reqwest::Method::POST, "/v1/players/slippi", body.into_bytes(), &[("content-type", "application/json")])
+            .await
+    }
+
     pub async fn signup(&self, event: i64, build: &str) -> anyhow::Result<Reply> {
         let body = serde_json::json!({ "engine_build": build }).to_string();
         self.send(

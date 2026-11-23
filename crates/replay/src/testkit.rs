@@ -43,6 +43,7 @@ pub struct SlpBuilder {
     frames: Vec<Frame>,
     end: Option<(u8, Option<u8>)>,
     start_at: String,
+    codes: Vec<(u8, String)>,
 }
 
 impl Default for SlpBuilder {
@@ -70,6 +71,7 @@ impl SlpBuilder {
             frames: Vec::new(),
             end: None,
             start_at: "2026-11-15T20:00:00Z".to_string(),
+            codes: Vec::new(),
         }
     }
     pub fn stage(mut self, stage: u16) -> Self {
@@ -136,6 +138,12 @@ impl SlpBuilder {
             index(p);
         }
         self.end = Some((method, lras));
+        self
+    }
+    /// Write `code` as `port`'s connect code in the metadata (`players.<i>.names.code`).
+    pub fn code(mut self, port: u8, code: &str) -> Self {
+        index(port);
+        self.codes.push((port, code.to_string()));
         self
     }
     pub fn start_at(mut self, start_at: &str) -> Self {
@@ -230,6 +238,20 @@ impl SlpBuilder {
         file.extend_from_slice(&last.to_be_bytes());
         ubjson_key(&mut file, "playedOn");
         ubjson_string(&mut file, "dolphin");
+        if !self.codes.is_empty() {
+            ubjson_key(&mut file, "players");
+            file.push(b'{');
+            for (port, code) in &self.codes {
+                ubjson_key(&mut file, &(port - 1).to_string());
+                file.push(b'{');
+                ubjson_key(&mut file, "names");
+                file.push(b'{');
+                ubjson_key(&mut file, "code");
+                ubjson_string(&mut file, code);
+                file.extend_from_slice(b"}}");
+            }
+            file.push(b'}');
+        }
         file.extend_from_slice(b"}}");
         file
     }

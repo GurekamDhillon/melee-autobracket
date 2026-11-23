@@ -471,6 +471,8 @@ struct Claim {
     paths: [Option<PathBuf>; 2],
     /// What else is known about each slot's upload (the tag even without one).
     meta: [UploadMeta; 2],
+    /// The registered connect codes of the set's two players, normalised.
+    slot_codes: [Option<String>; 2],
 }
 
 /// Moves the game from `uploading` to `judging`: `false` if another task (or process) got
@@ -529,6 +531,18 @@ async fn load_claim(st: &AppState, game_id: i64) -> anyhow::Result<Claim> {
             m.tag = Some(tag);
         }
     }
+    let slot_codes = match lifecycle::load_bracket_on(&mut tx, event_id).await {
+        Ok(bracket) => match usize::try_from(set_id).ok().and_then(|i| bracket.sets.get(i)) {
+            Some(set) => lifecycle::slot_codes(&mut tx, event_id, set.slots)
+                .await
+                .unwrap_or_default(),
+            None => Default::default(),
+        },
+        Err(_) => Default::default(),
+    };
+    for m in &mut meta {
+        m.slot_codes = slot_codes.clone();
+    }
     tx.commit().await?;
     Ok(Claim {
         event_id,
@@ -537,6 +551,7 @@ async fn load_claim(st: &AppState, game_id: i64) -> anyhow::Result<Claim> {
         ruleset,
         paths,
         meta,
+        slot_codes,
     })
 }
 
@@ -559,10 +574,11 @@ async fn judge_claimed(st: &AppState, game_id: i64, claim: Claim) -> anyhow::Res
     }
     let ruleset = claim.ruleset.clone();
     let meta = claim.meta.clone();
-    let (pre, uploads, lone) = tokio::task::spawn_blocking(move || {
+    let slot_codes = claim.slot_codes.clone();
+    let (pre, slot_map, uploads, lone) = tokio::task::spawn_blocking(move || {
         let [a, b] = &files;
         let files = [a.as_deref(), b.as_deref()];
-        let pre = judge::pre_judge(files, &ruleset);
+        let (pre, slot_map) = judge::pre_judge_coded(files, &ruleset, &slot_codes);
         let mut uploads = Vec::new();
         let mut lone = None;
         for (slot, file) in (0u8..).zip(files) {
@@ -580,7 +596,7 @@ async fn judge_claimed(st: &AppState, game_id: i64, claim: Claim) -> anyhow::Res
                 }
             }
         }
-        (pre, uploads, lone)
+        (pre, slot_map, uploads, lone)
     })
     .await
     .context("pre-judging")?;
@@ -656,7 +672,7 @@ async fn judge_claimed(st: &AppState, game_id: i64, claim: Claim) -> anyhow::Res
                 "slot": 0,
                 "evidence_only": false,
             });
-            (v, Some(judge::winner_slot(winner_port)), outcome, build)
+            (v, Some(slot_map.slot_of(winner_port)), outcome, build)
         }
     };
     let evidence = serde_json::json!({
@@ -664,6 +680,7 @@ async fn judge_claimed(st: &AppState, game_id: i64, claim: Claim) -> anyhow::Res
         "verdict": verdict_display(&verdict),
         "uploads": uploads,
         "resim": resim_evidence,
+        "mapping": claim.ruleset.any_client.then(|| clean(&slot_map.note, MAX_DETAIL_CHARS)),
     });
     lifecycle::apply_verdict(
         st,
