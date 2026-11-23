@@ -226,6 +226,7 @@ described above; the tables list the other statuses.
 |---|---|---|---|---|---|
 | GET | `/` | public | — | 200 HTML landing page (live now, next up, latest results) | — |
 | GET | `/events/{id}` | public | — | 200 HTML bracket page; `{id}` is decimal digits as written | 400 (a sign, an escape or anything else), 404 |
+| GET | `/live/{event}/{set}` | public | — | 200 HTML live view of the set's current game (display only) | 400 |
 | GET | `/stream` | public | — | 200 HTML stream page | — |
 | GET | `/schedule` | public | — | 200 HTML schedule page | — |
 | GET | `/history` | public | — | 200 HTML history page | — |
