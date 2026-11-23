@@ -98,6 +98,12 @@ pub struct RegisterReq {
     pub invite: Option<String>,
 }
 
+/// `POST /v1/players/slippi`: the Slippi connect code (`ABCD#123`) the key's player plays under.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct SlippiCodeReq {
+    pub code: String,
+}
+
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub struct SignupReq {
     pub engine_build: String,

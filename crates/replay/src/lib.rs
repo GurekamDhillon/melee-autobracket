@@ -5,10 +5,12 @@
 //! Ports in all public types are 1-based (the file stores 0-based indices).
 
 mod events;
+mod metadata;
 mod raw;
 #[cfg(feature = "testkit")]
 pub mod testkit;
 
+pub use metadata::{metadata_codes, normalize_code};
 pub use raw::raw_element;
 
 use events::{Events, GAME_END, GAME_START, POST_FRAME, PRE_FRAME};
@@ -68,6 +70,10 @@ pub struct ReplayFacts {
     /// Leader (non-follower) state on `last_frame`, in port order. A port with
     /// no update on that frame is absent.
     pub finals: Vec<PlayerFinal>,
+    /// Connect codes from the metadata, `(1-based port, normalized code)` in port order; empty
+    /// for offline and console replays (see [`metadata_codes`]). Not part of the derived
+    /// outcome and not covered by the engine: the file's writer says it.
+    pub codes: Vec<(u8, String)>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
@@ -164,6 +170,7 @@ pub fn parse(file: &[u8]) -> Result<ReplayFacts, ReplayError> {
         last_frame,
         end,
         finals,
+        codes: metadata_codes(file),
     })
 }
 

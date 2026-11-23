@@ -555,3 +555,18 @@ fn other_events_after_game_end_are_accepted() {
     assert_eq!(f.end.map(|e| e.method), Some(2));
     assert!(parse(&simple_game(1, "t")).is_ok());
 }
+
+#[test]
+fn connect_codes_come_from_the_metadata_by_port() {
+    let b = SlpBuilder::new()
+        .player(1, 2, PlayerKind::Human)
+        .player(3, 9, PlayerKind::Human)
+        .code(3, "zain＃0")
+        .code(1, "MANG#1")
+        .frame(-123, 1, 4, 0.0)
+        .frame(-123, 3, 4, 0.0);
+    let f = parse(&b.build()).unwrap();
+    assert_eq!(f.codes, vec![(1, "MANG#1".to_string()), (3, "ZAIN#0".to_string())]);
+    // A file without codes has none.
+    assert!(duel((0, 0.0), (1, 0.0), None).codes.is_empty());
+}

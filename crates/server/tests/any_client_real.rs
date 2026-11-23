@@ -14,7 +14,7 @@
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use autobracket_server::judge::{finish, outcome, pre_judge, Pre};
+use autobracket_server::judge::{finish, outcome, pre_judge_coded, undecided_reason, Pre};
 use autobracket_server::Slpcheck;
 use proto::{Ruleset, Verdict};
 use replay::ReplayFacts;
@@ -43,6 +43,17 @@ fn rules_for(f: &ReplayFacts, any_client: bool) -> Ruleset {
         any_client,
         ..Ruleset::default()
     }
+}
+
+/// The two human players' connect codes in port order, as if both had registered them: what a
+/// bracket with registered players would hold for a game like this one.
+fn slot_codes_of(f: &ReplayFacts) -> [Option<String>; 2] {
+    let mut out: [Option<String>; 2] = Default::default();
+    let humans = f.players.iter().filter(|p| p.kind == replay::PlayerKind::Human);
+    for (o, p) in out.iter_mut().zip(humans) {
+        *o = f.codes.iter().find(|(port, _)| *port == p.port).map(|(_, c)| c.clone());
+    }
+    out
 }
 
 /// A copy of `file` with the last byte of its first Pre-Frame Update (0x37) changed: different
@@ -86,6 +97,8 @@ fn tweak(file: &[u8]) -> Option<Vec<u8>> {
 async fn any_client_on_real_slippi_replays() {
     let dir = PathBuf::from(std::env::var_os("AB_SLP_DIR").expect("set AB_SLP_DIR"));
     let limit: usize = std::env::var("AB_SLP_LIMIT").ok().and_then(|v| v.parse().ok()).unwrap_or(40);
+    // AB_SLP_COUNT_ALL=1: judge every file (counts only; the tweak and re-sim checks stay at the limit).
+    let count_all = std::env::var_os("AB_SLP_COUNT_ALL").is_some();
     let mut files = Vec::new();
     slp_files(&dir, &mut files);
     let checker = match (std::env::var_os("AB_ENGINE"), std::env::var_os("AB_ISO")) {
@@ -98,12 +111,13 @@ async fn any_client_on_real_slippi_replays() {
     };
 
     let (mut tried, mut agreed, mut skipped) = (0, 0, 0);
+    let (mut legal, mut by_code, mut no_codes) = (0, 0, 0);
     let mut outcome_checked = 0;
     let mut why: std::collections::BTreeMap<String, usize> = Default::default();
     let (mut verified, mut foreign) = (0, 0);
     let mut previous: Option<(PathBuf, Vec<u8>)> = None;
     for path in files {
-        if tried >= limit {
+        if tried >= limit && !count_all {
             break;
         }
         let bytes = std::fs::read(&path).unwrap();
@@ -121,28 +135,54 @@ async fn any_client_on_real_slippi_replays() {
             outcome_checked += 1;
         }
         let on = rules_for(&facts, true);
-        // Only legal, decided two-player games are what a bracket would see.
-        let pre = pre_judge([Some(&bytes), Some(&bytes)], &on);
+        // Only legal, decided two-player games are what a bracket would see. The players'
+        // codes are the file's own (as if registered); without any, the port rule applies.
+        let codes = slot_codes_of(&facts);
+        if facts.codes.is_empty() {
+            no_codes += 1;
+        }
+        let (pre, map) = pre_judge_coded([Some(&bytes), Some(&bytes)], &on, &codes);
+        if map.by_code {
+            by_code += 1;
+        }
         let Pre::NeedsResim { last_frame, .. } = pre else {
-            *why.entry(format!("{pre:?}")).or_default() += 1;
+            let key = match &pre {
+                Pre::Final(proto::Verdict::Undecided) => {
+                    // For the study only (never used to decide a game): what the end looked like.
+                    let zero = facts.finals.iter().any(|p| p.stocks == 0);
+                    let timer_hit =
+                        i64::from(facts.last_frame) + 123 >= i64::from(facts.timer_secs) * 60 - 60;
+                    format!(
+                        "Undecided: {} [a player at 0 stocks: {zero}; timer reached: {timer_hit}; tied stocks: {}]",
+                        undecided_reason(&facts, true).unwrap_or_else(|| "?".into()),
+                        facts.finals.windows(2).all(|w| w[0].stocks == w[1].stocks)
+                    )
+                }
+                other => format!("{other:?}"),
+            };
+            *why.entry(key).or_default() += 1;
             skipped += 1;
             continue;
         };
+        legal += 1;
         let Some(other) = tweak(&bytes) else {
             *why.entry("no pre-frame to tweak".into()).or_default() += 1;
             skipped += 1;
             continue;
         };
+        if tried >= limit {
+            continue;
+        }
         tried += 1;
         let off = rules_for(&facts, false);
         assert_eq!(
-            pre_judge([Some(&bytes), Some(&other)], &off),
+            pre_judge_coded([Some(&bytes), Some(&other)], &off, &codes).0,
             Pre::Final(Verdict::Conflicted),
             "{}: off, bytes must match",
             path.display()
         );
         assert!(
-            matches!(pre_judge([Some(&bytes), Some(&other)], &on), Pre::NeedsResim { .. }),
+            matches!(pre_judge_coded([Some(&bytes), Some(&other)], &on, &codes).0, Pre::NeedsResim { .. }),
             "{}: on, the outcomes agree",
             path.display()
         );
@@ -151,7 +191,7 @@ async fn any_client_on_real_slippi_replays() {
             let pf = replay::parse(pbytes).unwrap();
             if outcome(&pf) != outcome(&facts) {
                 assert_eq!(
-                    pre_judge([Some(pbytes), Some(&bytes)], &on),
+                    pre_judge_coded([Some(pbytes), Some(&bytes)], &on, &codes).0,
                     Pre::Final(Verdict::Conflicted),
                     "{} vs {}",
                     prev.display(),
@@ -173,6 +213,7 @@ async fn any_client_on_real_slippi_replays() {
         "RESULT tried {tried}, outcome-agreement {agreed}, skipped {skipped}; resim: Verified {verified}, UnverifiedForeign {foreign}{}",
         if checker.is_none() { " (no AB_ENGINE: resim not run)" } else { "" }
     );
+    println!("COUNTS legal {legal}, identified by code {by_code}, files without connect codes {no_codes}");
     println!("skipped because: {why:?}; outcome agreement checked on {outcome_checked} readable files");
     assert!(outcome_checked > 0, "no readable replays under {}", dir.display());
 }

@@ -34,6 +34,7 @@ pub fn router() -> Router<AppState> {
         .route("/assets/fonts/{file}", get(view::font))
         .route("/v1/stream", get(stream::stream))
         .route("/v1/players", post(players::register))
+        .route("/v1/players/slippi", post(players::set_slippi_code))
         .route("/v1/events", get(events::list))
         .route("/v1/events/{id}", get(events::view))
         .route("/v1/history", get(results::history))

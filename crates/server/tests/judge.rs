@@ -493,6 +493,7 @@ fn upload_evidence_describes_the_file() {
         tag: Some("Alice\u{202e}".into()),
         sha256: "ab".repeat(32),
         client_build: "b1".into(),
+        slot_codes: Default::default(),
     };
     let good = simple_game(2, T0);
     let ev = upload_evidence(1, &meta, Some(&good), &rules);
@@ -600,4 +601,118 @@ fn any_client_divergence_is_unverified_foreign_and_counts() {
         assert_eq!(finish(&ResimOutcome::Match, strict, true, true), Verdict::Verified);
     }
     assert!(Verdict::UnverifiedForeign.counts());
+}
+
+// ---- Slippi connect codes (any-client mode) ----
+
+fn coded(a: &str, b: &str, ports: (u8, u8), winner: u8) -> Vec<u8> {
+    let mut x = SlpBuilder::new()
+        .player(ports.0, 2, PlayerKind::Human)
+        .player(ports.1, 9, PlayerKind::Human)
+        .frame(-123, ports.0, 4, 0.0)
+        .frame(-123, ports.1, 4, 0.0)
+        .frame(5400, ports.0, u8::from(winner == ports.0) * 2, 10.0)
+        .frame(5400, ports.1, u8::from(winner == ports.1) * 2, 10.0)
+        .end(2, None);
+    if !a.is_empty() {
+        x = x.code(ports.0, a);
+    }
+    if !b.is_empty() {
+        x = x.code(ports.1, b);
+    }
+    x.build()
+}
+
+fn codes(a: &str, b: &str) -> [Option<String>; 2] {
+    [Some(a.into()), Some(b.into())]
+}
+
+#[test]
+fn codes_map_players_on_any_ports_and_slot_order_decides_the_winner() {
+    use autobracket_server::judge::pre_judge_coded;
+    // Slot 0 is MANG#0 on port 3, slot 1 is ZAIN#0 on port 2; port 3 wins.
+    let f = coded("zain#0", "MANG#0", (2, 3), 3);
+    let (pre, map) = pre_judge_coded([Some(&f), Some(&f)], &any_client(), &codes("MANG#0", "ZAIN#0"));
+    assert!(matches!(pre, Pre::NeedsResim { winner_port: 3, .. }), "{pre:?}");
+    assert!(map.by_code);
+    assert_eq!(map.ports, [3, 2]);
+    assert_eq!(map.slot_of(3), 0);
+    // Same file, the players the other way round in the bracket: the winner is slot 1.
+    let (_, map) = pre_judge_coded([Some(&f), Some(&f)], &any_client(), &codes("ZAIN#0", "MANG#0"));
+    assert_eq!(map.slot_of(3), 1);
+}
+
+#[test]
+fn wrong_codes_are_illegal_codes() {
+    use autobracket_server::judge::pre_judge_coded;
+    let f = coded("ABCD#1", "EFGH#2", (1, 2), 1);
+    let (pre, map) = pre_judge_coded([Some(&f), Some(&f)], &any_client(), &codes("MANG#0", "ZAIN#0"));
+    assert_eq!(pre, illegal("codes"));
+    assert!(map.note.contains("connect codes"));
+}
+
+#[test]
+fn missing_codes_fall_back_to_the_port_rule_with_a_reason() {
+    use autobracket_server::judge::pre_judge_coded;
+    // The replay has no codes: ports 1 and 2 still work.
+    let f = coded("", "", (1, 2), 2);
+    let (pre, map) = pre_judge_coded([Some(&f), Some(&f)], &any_client(), &codes("MANG#0", "ZAIN#0"));
+    assert!(matches!(pre, Pre::NeedsResim { winner_port: 2, .. }));
+    assert!(!map.by_code && map.note.contains("no connect codes"), "{map:?}");
+    // ...but ports 1 and 3 do not.
+    let f = coded("", "", (1, 3), 3);
+    let (pre, map) = pre_judge_coded([Some(&f), Some(&f)], &any_client(), &codes("MANG#0", "ZAIN#0"));
+    assert_eq!(pre, illegal("players"));
+    assert!(map.note.contains("port rule"));
+    // A slot without a registered code: the same.
+    let f = coded("MANG#0", "ZAIN#0", (1, 3), 3);
+    let (pre, map) = pre_judge_coded([Some(&f), Some(&f)], &any_client(), &[Some("MANG#0".into()), None]);
+    assert_eq!(pre, illegal("players"));
+    assert!(map.note.contains("slot 1 has no registered"), "{map:?}");
+    // Only one code in the replay: port rule.
+    let f = coded("MANG#0", "", (1, 2), 1);
+    let (_, map) = pre_judge_coded([Some(&f), Some(&f)], &any_client(), &codes("MANG#0", "ZAIN#0"));
+    assert!(!map.by_code && map.note.contains("only one"), "{map:?}");
+}
+
+#[test]
+fn codes_do_nothing_without_any_client() {
+    use autobracket_server::judge::pre_judge_coded;
+    let f = coded("MANG#0", "ZAIN#0", (1, 3), 3);
+    let (pre, _) = pre_judge_coded([Some(&f), Some(&f)], &Ruleset::default(), &codes("MANG#0", "ZAIN#0"));
+    assert_eq!(pre, illegal("players"));
+}
+
+#[test]
+fn undecided_reasons() {
+    use autobracket_server::judge::undecided_reason;
+    let f = |b: SlpBuilder| replay::parse(&b.build()).unwrap();
+    let no_end = f(base());
+    assert!(undecided_reason(&no_end, false).unwrap().contains("no Game End"));
+    assert!(undecided_reason(&f(base().end(2, None)), false).is_none());
+    assert!(undecided_reason(&f(base().end(7, None)), false).unwrap().contains("without an LRAS"));
+    assert!(undecided_reason(&f(base().end(3, None)), false).unwrap().contains("method 3"));
+    assert!(undecided_reason(&f(base().end(7, Some(2))), false).is_none());
+}
+
+#[test]
+fn method_3_counts_only_as_a_stock_out_in_any_client_events() {
+    use autobracket_server::judge::undecided_reason;
+    let f = |b: SlpBuilder| replay::parse(&b.build()).unwrap();
+    // `base()`: port 2 ends on 2 stocks, port 1 on 0.
+    let out = f(base().end(3, None));
+    assert!(undecided_reason(&out, true).is_none());
+    assert!(undecided_reason(&out, false).unwrap().contains("method 3"));
+    // Both alive at the end (a quit or cut-off file): stays undecided even in any-client.
+    let alive = f(SlpBuilder::new()
+        .player(1, 2, PlayerKind::Human)
+        .player(2, 9, PlayerKind::Human)
+        .frame(-123, 1, 4, 0.0)
+        .frame(-123, 2, 4, 0.0)
+        .frame(900, 1, 2, 10.0)
+        .frame(900, 2, 3, 30.0)
+        .end(3, None));
+    assert!(undecided_reason(&alive, true).unwrap().contains("without a stock-out"));
+    let unresolved = f(base().end(0, None));
+    assert!(undecided_reason(&unresolved, true).unwrap().contains("method 0"));
 }

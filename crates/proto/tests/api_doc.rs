@@ -130,6 +130,7 @@ fn json_examples_match_the_types() {
         match ty {
             "RegisterReq" => round_trip::<RegisterReq>(&json, p),
             "SignupReq" => round_trip::<SignupReq>(&json, p),
+            "SlippiCodeReq" => round_trip::<SlippiCodeReq>(&json, p),
             "RoomReq" => round_trip::<RoomReq>(&json, p),
             "NoShowReq" => round_trip::<NoShowReq>(&json, p),
             "EventCreateReq" => round_trip::<EventCreateReq>(&json, p),
@@ -158,6 +159,7 @@ fn json_examples_match_the_types() {
     for ty in [
         "RegisterReq",
         "SignupReq",
+        "SlippiCodeReq",
         "RoomReq",
         "NoShowReq",
         "EventCreateReq",

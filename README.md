@@ -427,18 +427,50 @@ What changes in such an event:
   `signup` sends as `engine_build` (so the organiser's `accepted_builds` must list it, or be
   empty) and what `upload` sends as `x-ab-build`.
 
-Limits that stay: port 1 is still the set's host and port 2 the guest (a replay carries no
-identity), so the players must take those ports; the room-code hand-off is for the reference
-client, and players on other clients arrange their connection themselves; a Gecko code list
-must be on `allowed_gecko` (Slippi Dolphin writes one into every replay).
+**Connect codes.** A player registers a Slippi connect code on their key (`autobracket-upload
+register --tag Mango --code MANG#0`, or later `autobracket-upload code MANG#0`; `POST
+/v1/players/slippi`, signed like every request). Codes are stored upper case, unique across the
+server (so unique within every event), and checked for shape (`ABCD#123`).
 
-Tested (`crates/server/tests/any_client_real.rs`, `#[ignore]`d, `AB_SLP_DIR=...`) on real
-Slippi Dolphin tournament replays kept outside the repository (never commit a `.slp`). On 3561
-such files (2019 tournament setups) outcome agreement held on all 3546 readable ones, but none
-would count as a bracket game: 3005 are `Illegal("players")` (the players were not on ports 1
-and 2) and 541 `Undecided` (no clear winner, e.g. quit out). So before this mode is useful
-with real Slippi players, ports must map to slots another way (the replay's connect codes or
-tags), which is still to do.
+In an `any_client` event the judge then identifies the two bracket players in a replay by the
+code in its metadata (`players.<port>.names.code`, written by Slippi Dolphin for netplay games),
+not by port, so they may sit on any two ports. Rules:
+
+- both slots have a registered code and the replay carries a code on both human ports: each
+  slot is the port with its code; if the codes are not those two players' the game is
+  `Illegal("codes")`;
+- otherwise (a player has no code registered, or the replay has none or only one, as offline
+  and console replays do) the port rule applies as before (port 1 host, port 2 guest), and the
+  evidence's `mapping` line says why. A game on other ports then stays `Illegal("players")`.
+
+Codes are written by the replay's client and not covered by the engine, so they identify, they
+do not authenticate: two colluding players can write any codes, as they can throw a match.
+
+**No result.** `Undecided` games go to the organiser; the evidence's `undecided_reason` says
+which: no frames, no Game End (file cut off), end method 0 ("unresolved") or any other method
+than TIME!, GAME! and LRAS, No Contest without an LRAS initiator, a tie. An LRAS quit (No
+Contest with a known initiator) already counts as a forfeit in every mode. One addition for any
+client: Slippi before 2.0 wrote end method 3 ("RESOLVED") for stock-outs, so a method-3 file
+counts when exactly one player ended on zero stocks; any other method-3 file stays undecided.
+
+Limits that stay: the room-code hand-off is for the reference client, and players on other
+clients arrange their connection themselves; a Gecko code list must be on `allowed_gecko`
+(Slippi Dolphin writes one into every replay).
+
+Tested (`crates/server/tests/any_client_real.rs`, `#[ignore]`d, `AB_SLP_DIR=...`,
+`AB_SLP_COUNT_ALL=1` to judge every file) on 3561 real Slippi tournament replays kept outside
+the repository (never commit a `.slp`). The 3561 files are
+2019 console (Nintendont) replays with no connect codes, so they exercise the port rule and the
+undecided analysis, not code matching. Before this change: 3005 `Illegal("players")`, 541
+`Undecided`, 0 countable. Now: 3005 `Illegal("players")` (no codes, players not on ports 1 and 2:
+correct under the port rule), 485 would count (the method-3 stock-outs; 40 of them re-simulated:
+17 `Verified`, 23 `UnverifiedForeign`), 56 stay `Undecided` (55 end method 0, cut off with both
+players alive; 1 method 3 that ended on the timer), 15 unparseable. Outcome agreement held on
+all 3546 readable files. Code matching was tested on 72 replays from our own Slippi Dolphin games: 60 carry codes
+and were all identified by code (59 countable, 1 cut off before Game End stays `Undecided`); the
+11 without codes fall back to the port rule and are `Illegal("players")` (not on ports 1 and 2).
+Re-simulating the 59 gives `UnverifiedForeign` (they
+were played with a modded game, the engine runs the vanilla disc).
 
 ## Verifier modes
 

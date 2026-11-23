@@ -785,3 +785,23 @@ fn an_upload_body_may_take_as_long_as_the_client_allows() {
         Duration::from_secs(120)
     );
 }
+
+#[tokio::test]
+async fn slippi_code_is_set_normalised_and_unique() {
+    let app = TestApp::spawn(|_| {}).await;
+    let (alice, bob) = (app.player("Alice").await, app.player("Bob").await);
+    let r = alice.post_json("/v1/players/slippi", &proto::SlippiCodeReq { code: "ab12#345".into() }).await;
+    assert_eq!(r.status(), StatusCode::NO_CONTENT);
+    let stored: String = sqlx::query_scalar("SELECT slippi_code FROM players WHERE tag = 'Alice'")
+        .fetch_one(&app.state.db)
+        .await
+        .unwrap();
+    assert_eq!(stored, "AB12#345");
+    // Changing your own is fine (also in another case); another player's is taken.
+    let r = alice.post_json("/v1/players/slippi", &proto::SlippiCodeReq { code: "AB12#345".into() }).await;
+    assert_eq!(r.status(), StatusCode::NO_CONTENT);
+    let r = bob.post_json("/v1/players/slippi", &proto::SlippiCodeReq { code: "Ab12#345".into() }).await;
+    assert_eq!(r.status(), StatusCode::CONFLICT);
+    let r = bob.post_json("/v1/players/slippi", &proto::SlippiCodeReq { code: "nonsense".into() }).await;
+    assert_eq!(r.status(), StatusCode::BAD_REQUEST);
+}
