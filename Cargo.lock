@@ -160,6 +160,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "autobracket-upload"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "autobracket-server",
+ "bracket",
+ "clap",
+ "hex",
+ "proto",
+ "rand 0.8.8",
+ "replay",
+ "reqwest",
+ "serde_json",
+ "sqlx",
+ "tempfile",
+ "tokio",
+ "toml",
+]
+
+[[package]]
 name = "autocfg"
 version = "1.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"

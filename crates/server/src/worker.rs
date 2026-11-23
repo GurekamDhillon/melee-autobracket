@@ -619,7 +619,12 @@ async fn judge_claimed(st: &AppState, game_id: i64, claim: Claim) -> anyhow::Res
                 ));
             }
             let verifier_on = st.cfg.verifier.mode != VerifierMode::Off;
-            let v: Verdict = judge::finish(&outcome, st.cfg.strict_resim, verifier_on);
+            let v: Verdict = judge::finish(
+                &outcome,
+                st.cfg.strict_resim,
+                verifier_on,
+                claim.ruleset.any_client,
+            );
             if let ResimOutcome::Unavailable(why) = &outcome {
                 warn!(
                     game_id,

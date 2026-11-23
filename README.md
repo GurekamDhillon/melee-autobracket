@@ -367,6 +367,7 @@ Every game gets one verdict. The server never takes a player's word for the winn
 | Illegal | The replay breaks the ruleset (players, teams, stage, stocks, timer, character, or Gecko codes). | No: TO queue |
 | Undecided | The replay has no clear winner. | No: TO queue |
 | Inexact | Only with `strict_resim = true`: a VerifiedInexact game is sent to a human instead of counting. | No: TO queue, quarantined |
+| UnverifiedForeign | Only in an event with `any_client` on (see "Any client mode"): both uploads agree on the outcome and are legal, but re-simulation diverged, ended early or crashed (the replay may come from another client). | Yes, quarantined for the TO |
 
 With a verifier configured (`mode` not `off`), games that counted as PeerOnly because it was
 unavailable are visible: the event view's `unverified_games` counts them, each is logged as a
@@ -382,6 +383,62 @@ is always the set's host and port 2 the guest, because a netplay replay carries 
 A game records a verifier build only when the engine actually re-simulated it. Every verdict
 records when it was applied (`judged_at`). Two players colluding can still produce any result
 they like, exactly as they could by throwing the match.
+
+## Any client mode
+
+**Off by default, per event. Slippi's terms of service are unresolved for this use** (the
+engine notes flag it); settle that before turning it on for a real event.
+
+The design's deferred mode: players on different clients (Slippi Dolphin, the reference
+client) in one bracket. It is the ruleset's `any_client` flag, so an organiser sets it per
+event when creating it:
+
+```sh
+autobracket admin event create --name "Open" --format single --ruleset rules.json
+# rules.json: {"any_client": true, "allowed_gecko": ["<sha256 of the code list players use>"]}
+```
+
+What changes in such an event:
+
+- **Agreement compares the outcome, not bytes.** Two clients need not write identical event
+  streams, so the two uploads agree when both parse and derive the same outcome: stage, each
+  port's character and final stocks, how the game ended (method and LRAS initiator), the
+  winning port and the last frame. Each upload is checked against the ruleset. A pair that
+  disagrees on any of these is `Conflicted`, as before.
+- **Re-simulation of foreign replays.** With the verifier on, a replay the engine re-simulates
+  exactly is `Verified`. One it cannot (it diverged, ended early, crashed) is
+  `UnverifiedForeign`: it counts on peer agreement and the ruleset, whatever `strict_resim`
+  says, and is quarantined, so the organiser sees each one (`autobracket admin quarantine
+  list`). It is never rejected for that alone. A verifier that is unavailable behaves as in any
+  other event.
+- **Uploading without the reference client.** `autobracket-upload` (built with the rest,
+  `target/release/autobracket-upload`; it has no Unix-only parts, so it builds on Windows too)
+  signs each request with the player's Ed25519 key exactly as `docs/api.md` section 2 says:
+
+  ```sh
+  autobracket-upload --key player.key keygen                       # once; prints the public key
+  autobracket-upload --server https://bracket.example.org --key player.key register --tag Mango
+  autobracket-upload --server https://bracket.example.org --key player.key signup 7 --build slippi
+  autobracket-upload --server https://bracket.example.org --key player.key next 7
+  autobracket-upload --server https://bracket.example.org --key player.key     upload --event 7 --set 3 --game 1 Game_20261122T200000.slp
+  ```
+
+  `--key` also takes an `autobracket-client` config (its `secret_key_hex`). `--build` is what
+  `signup` sends as `engine_build` (so the organiser's `accepted_builds` must list it, or be
+  empty) and what `upload` sends as `x-ab-build`.
+
+Limits that stay: port 1 is still the set's host and port 2 the guest (a replay carries no
+identity), so the players must take those ports; the room-code hand-off is for the reference
+client, and players on other clients arrange their connection themselves; a Gecko code list
+must be on `allowed_gecko` (Slippi Dolphin writes one into every replay).
+
+Tested (`crates/server/tests/any_client_real.rs`, `#[ignore]`d, `AB_SLP_DIR=...`) on real
+Slippi Dolphin tournament replays kept outside the repository (never commit a `.slp`). On 3561
+such files (2019 tournament setups) outcome agreement held on all 3546 readable ones, but none
+would count as a bracket game: 3005 are `Illegal("players")` (the players were not on ports 1
+and 2) and 541 `Undecided` (no clear winner, e.g. quit out). So before this mode is useful
+with real Slippi players, ports must map to slots another way (the replay's connect codes or
+tags), which is still to do.
 
 ## Verifier modes
 

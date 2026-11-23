@@ -370,7 +370,11 @@ async fn quarantine(
 ) -> Result<(), LifecycleError> {
     if matches!(
         v,
-        Verdict::VerifiedInexact | Verdict::Inexact | Verdict::Conflicted | Verdict::Single
+        Verdict::VerifiedInexact
+            | Verdict::Inexact
+            | Verdict::UnverifiedForeign
+            | Verdict::Conflicted
+            | Verdict::Single
     ) {
         sqlx::query("INSERT INTO quarantine (game_id, kind, created_at) VALUES (?, ?, ?)")
             .bind(game_id)
@@ -647,6 +651,7 @@ pub fn verdict_name(v: &Verdict) -> &'static str {
         Verdict::Undecided => "Undecided",
         Verdict::Inexact => "Inexact",
         Verdict::VerifierUnavailable => "VerifierUnavailable",
+        Verdict::UnverifiedForeign => "UnverifiedForeign",
     }
 }
 

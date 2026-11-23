@@ -15,6 +15,13 @@ pub struct Ruleset {
     /// list bytes (`replay::ReplayFacts::gecko_sha256`). A replay without a list
     /// is always allowed on this point; one with a list must match an entry exactly.
     pub allowed_gecko: Vec<String>,
+    /// "Any client" mode (README, "Any client mode"; off by default): the two uploads may come
+    /// from different clients, so peer agreement compares the derived outcome (winner, final
+    /// stocks, characters, stage, game end) instead of byte-identical `raw` elements, and a
+    /// re-simulation that diverges counts the game as `UnverifiedForeign` instead of
+    /// quarantining it as an engine fault. Left out of the encoding when off.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub any_client: bool,
 }
 
 impl Default for Ruleset {
@@ -27,6 +34,7 @@ impl Default for Ruleset {
             legal_stages: vec![2, 3, 8, 28, 31, 32],
             banned_characters: vec![],
             allowed_gecko: vec![],
+            any_client: false,
         }
     }
 }

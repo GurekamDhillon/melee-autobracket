@@ -73,6 +73,10 @@ pub enum Verdict {
     /// online, no disc, an engine that will not boot, a verifier build not accepted). Does not
     /// count; the organiser decides.
     VerifierUnavailable,
+    /// Any-client mode only: both uploads agree on the outcome and are legal, but the
+    /// re-simulation of the (foreign) replay diverged. Counts on peer agreement and the
+    /// ruleset; quarantined, so the organiser sees it.
+    UnverifiedForeign,
 }
 
 impl Verdict {
@@ -80,7 +84,10 @@ impl Verdict {
     pub fn counts(&self) -> bool {
         matches!(
             self,
-            Verdict::Verified | Verdict::VerifiedInexact | Verdict::PeerOnly
+            Verdict::Verified
+                | Verdict::VerifiedInexact
+                | Verdict::PeerOnly
+                | Verdict::UnverifiedForeign
         )
     }
 }
