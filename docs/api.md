@@ -353,6 +353,11 @@ absent. In requests, a field marked optional may be left out.
 
 <!-- checked: EventCreateReq -->
 ```json
+{"name": "Open", "format": "SingleElim", "ruleset": {"stocks": 4, "timer_secs": 480, "best_of": 3, "best_of_finals": 5, "legal_stages": [31], "banned_characters": [], "allowed_gecko": [], "any_client": true}, "best_of": null, "starts_at": null, "description": null}
+```
+
+<!-- checked: EventCreateReq -->
+```json
 {
   "name": "Weekly #12",
   "format": "DoubleElim",
@@ -389,6 +394,7 @@ request: an omitted or null field clears it, as does an empty or all-whitespace 
 | `legal_stages` | [integer] | stage ids as Game Start records them |
 | `banned_characters` | [integer] | external character ids |
 | `allowed_gecko` | [string] | permitted Gecko code lists, lowercase hex SHA-256 |
+| `any_client` | boolean | any-client mode (default false; README, "Any client mode"): uploads agree on their derived outcome instead of identical `raw` bytes, and a diverging re-simulation is `UnverifiedForeign`; left out of responses when false |
 
 In a request every field is optional (missing ones take the defaults shown here).
 
@@ -557,6 +563,7 @@ How a judged game was decided. Only `Verified`, `VerifiedInexact` and `PeerOnly`
 | `"Undecided"` | the replays determine no winner |
 | `"Inexact"` | `strict_resim` and the re-simulation diverged |
 | `"VerifierUnavailable"` | `strict_resim`, a verifier is configured, and it was unavailable; does not count |
+| `"UnverifiedForeign"` | the event has `any_client` on: both uploads agree on the outcome and are legal, but the re-simulation diverged, ended early or crashed; counts, and is quarantined for the organiser |
 
 <!-- checked: Verdict -->
 ```json
@@ -571,6 +578,11 @@ How a judged game was decided. Only `Verified`, `VerifiedInexact` and `PeerOnly`
 <!-- checked: Verdict -->
 ```json
 "VerifierUnavailable"
+```
+
+<!-- checked: Verdict -->
+```json
+"UnverifiedForeign"
 ```
 
 ### ResimOutcome
@@ -837,6 +849,25 @@ the event is complete; `seed` is the entrant's index in the event's `tags` (0 = 
    organiser's decision shows up as `Play` again (a replay of the game, same `game_no`), or as
    the set being decided. Stop a running game only when `next` offers a different set or the
    player is out of the event.
+
+### Any client: uploading without the reference client
+
+In an event whose ruleset has `any_client` on, a player on another client (Slippi Dolphin)
+takes part with nothing but their key and the requests above: `POST /v1/players`, `POST
+/v1/events/{id}/entrants`, `GET /v1/me/next` (to learn `set_id` and `game_no`) and `POST
+/v1/sets/{event}/{set}/games/{n}/replay` with the `.slp` file's bytes. Each is signed as in
+[section 2](#2-signing-a-request); nothing else is needed. `autobracket-upload` is a minimal
+client that does exactly that (a key file of 64 hex digits, or an `autobracket-client`
+config), for example:
+
+```sh
+autobracket-upload --server https://bracket.example.org --key player.key   upload --event 7 --set 3 --game 1 Game_20261122T200000.slp
+```
+
+Agreement in such an event compares each upload's derived outcome (stage; each port's
+character and final stocks; end method and LRAS initiator; winning port; last frame), not
+bytes; each upload must pass the ruleset (its Gecko code list on `allowed_gecko`). Port 1 is
+still slot 0 (the host).
 
 ## 7. Round names
 

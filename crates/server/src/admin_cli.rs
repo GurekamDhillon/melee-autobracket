@@ -85,6 +85,10 @@ enum EventCmd {
         /// What the event is about, at most 280 characters.
         #[arg(long)]
         description: Option<String>,
+        /// A JSON ruleset file (docs/api.md, Ruleset; missing fields take the defaults), e.g.
+        /// `{"any_client": true}`. Without it the server's configured ruleset applies.
+        #[arg(long, value_name = "FILE")]
+        ruleset: Option<std::path::PathBuf>,
     },
     /// Close sign-up and build the bracket.
     Start { id: i64 },
@@ -361,15 +365,27 @@ fn request(cmd: AdminCmd) -> anyhow::Result<Request> {
             best_of,
             starts_at,
             description,
+            ruleset,
         }) => {
+            let ruleset = match ruleset {
+                None => None,
+                Some(path) => {
+                    let text = std::fs::read_to_string(&path)
+                        .with_context(|| format!("reading {}", path.display()))?;
+                    Some(
+                        serde_json::from_str::<proto::Ruleset>(&text)
+                            .with_context(|| format!("{} is not a ruleset", path.display()))?,
+                    )
+                }
+            };
             let req = EventCreateReq {
                 name,
                 format: match format {
                     FormatArg::Single => Format::SingleElim,
                     FormatArg::Double => Format::DoubleElim,
                 },
-                // The server applies `best_of` to its own configured ruleset.
-                ruleset: None,
+                // Without a file, the server applies `best_of` to its own configured ruleset.
+                ruleset,
                 best_of,
                 starts_at,
                 description,
