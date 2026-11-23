@@ -296,6 +296,7 @@ const PARAMS: GameParams<'static> = GameParams {
     relay: "relay.example:7000",
     stocks: 3,
     timer_secs: 420,
+    live_url: None,
 };
 
 #[test]
@@ -553,6 +554,42 @@ fn command_engine_substitutes_arguments() {
         "3 stocks, 420 s",
     ];
     assert_eq!(argv.lines().collect::<Vec<_>>(), expected);
+}
+
+#[test]
+fn command_engine_passes_the_live_relay_to_a_host_only() {
+    let work = TempDir::new().unwrap();
+    let mut cfg = fake_config(work.path());
+    cfg.host_args = ["play", "--netplay", "host"].map(String::from).to_vec();
+    cfg.join_args = ["play", "--netplay", "join", "{code}"].map(String::from).to_vec();
+    let key = work.path().join("client.toml");
+    let mut engine = CommandEngine::new(&cfg).unwrap();
+    engine.set_relay_key(&key).unwrap();
+    let live = GameParams {
+        live_url: Some("ws://127.0.0.1:1/v1/sets/1/0/games/1/live"),
+        ..PARAMS
+    };
+
+    engine.host(&live).unwrap();
+    wait_for_exit(&mut engine);
+    let argv = std::fs::read_to_string(work.path().join("run-1").join("argv")).unwrap();
+    assert_eq!(
+        argv.lines().collect::<Vec<_>>(),
+        [
+            "play",
+            "--netplay",
+            "host",
+            "--relay-url",
+            "ws://127.0.0.1:1/v1/sets/1/0/games/1/live",
+            "--relay-key",
+            key.to_str().unwrap(),
+        ]
+    );
+
+    engine.join(&live, "AB12").unwrap();
+    wait_for_exit(&mut engine);
+    let argv = std::fs::read_to_string(work.path().join("run-2").join("argv")).unwrap();
+    assert_eq!(argv.lines().collect::<Vec<_>>(), ["play", "--netplay", "join", "AB12"]);
 }
 
 /// How the [`Proxy`] fails a request.

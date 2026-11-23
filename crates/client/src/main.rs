@@ -215,6 +215,7 @@ async fn main() -> anyhow::Result<()> {
             let build = config::engine_build(&cfg.melee)?;
             let api = api(&cfg, &build)?;
             let mut engine = CommandEngine::new(&cfg)?;
+            engine.set_relay_key(&path)?;
             // Registered before playing, so an early signal is not missed.
             let mut sigint = signal(SignalKind::interrupt()).context("catching SIGINT")?;
             let mut sigterm = signal(SignalKind::terminate()).context("catching SIGTERM")?;

@@ -636,6 +636,7 @@ async fn an_adopted_host_game_whose_code_was_not_sent_sends_it() {
             relay: "relay.example:7000",
             stocks: 4,
             timer_secs: 480,
+    live_url: None,
         },
     )
     .unwrap();

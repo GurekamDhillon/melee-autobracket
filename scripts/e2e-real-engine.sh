@@ -31,6 +31,9 @@
 #   LEGAL_STAGES ruleset.legal_stages        ([2, 3, 8, 28, 31, 32]); e.g. [31] makes the game illegal
 #   UPLOAD_TIMEOUT_SECS  server upload_timeout_secs (120)
 #   GAME_TIMEOUT_SECS    give up after this long waiting for both clients (600)
+#   LIVE         1: also check the live relay: a viewer (scripts/live-viewer.mjs, needs node)
+#                watches set 0 from the start, and its received event bytes must equal the
+#                host's .slp `raw` element byte for byte (the engine must have --relay-url)
 #   E2E_HOOK     optional command run in the background once both clients are playing, with
 #                E2E_DIR URL EVENT_ID AB C1 C2 SERVER_PID exported (C1/C2 = the client pids). Used
 #                for the failure scenarios in docs/real-engine-e2e.md; a hook that starts processes
@@ -218,6 +221,11 @@ c1=$!; pids+=($c1)
 MELEE_PAD_SCRIPT="$pad2" "$ABC" --config p2/client.toml play "$EVENT_ID" --poll-secs 1 >p2/play.log 2>&1 &
 c2=$!; pids+=($c2)
 log "clients started (pids $c1 $c2)"
+if [ "${LIVE:-}" = 1 ]; then
+  node "$here/live-viewer.mjs" watch "$URL" "$EVENT_ID" 0 "$E2E_DIR/live.bin" "$GAME_TIMEOUT_SECS" >live.log 2>&1 &
+  LIVE_PID=$!
+  pids+=($LIVE_PID)
+fi
 if [ -n "${E2E_HOOK:-}" ]; then
   ( export E2E_DIR URL EVENT_ID AB SERVER_PID C1=$c1 C2=$c2; exec bash -c "$E2E_HOOK" ) >hook.log 2>&1 &
   pids+=($!)
@@ -256,6 +264,18 @@ curl -fsS "$URL/v1/events/$EVENT_ID" >event.json || echo '{}' >event.json
 curl -fsS "$URL/" >page.html || true
 admin queue list >queue.json 2>&1 || true
 admin quarantine list >quarantine.json 2>&1 || true
+if [ "${LIVE:-}" = 1 ]; then
+  wait "$LIVE_PID"; live_rc=$?
+  log "live viewer: exit $live_rc $(grep RESULT live.log)"
+  host_slp="$(find p1/work -name '*.slp' | sort | head -1)"
+  if [ "$live_rc" = 0 ] && [ -n "$host_slp" ] && node "$here/live-viewer.mjs" compare live.bin "$host_slp" >live-compare.log 2>&1; then
+    log "live: $(cat live-compare.log) vs $host_slp"
+  else
+    log "live: FAILED $(cat live-compare.log 2>/dev/null)"
+    LIVE_FAILED=1
+  fi
+  grep -h "^live:\|live" p1/work/*/engine.log 2>/dev/null | grep -i "relay\|live" | head -5
+fi
 log "p1: $(tail -1 p1/play.log)"
 log "p2: $(tail -1 p2/play.log)"
 python3 -I - "$E2E_DIR/autobracket.sqlite" <<'PY'
@@ -286,7 +306,7 @@ PY
 counted=$(python3 -I -c 'import sqlite3,sys; print(sqlite3.connect(sys.argv[1]).execute("SELECT COUNT(*) FROM games WHERE state=\"counted\"").fetchone()[0])' "$E2E_DIR/autobracket.sqlite")
 state=$(python3 -I -c 'import json,sys; print(json.load(open(sys.argv[1])).get("summary",{}).get("state",""))' event.json)
 log "games counted: $counted; event state: $state"
-if [ "$counted" -ge 1 ] && [ "$state" = "complete" ]; then
+if [ "$counted" -ge 1 ] && [ "$state" = "complete" ] && [ -z "${LIVE_FAILED:-}" ]; then
   log "PASS"
   exit 0
 fi

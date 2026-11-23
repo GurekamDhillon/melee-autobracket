@@ -731,3 +731,16 @@ h3 { margin: 0 0 var(--sp-1); font-family: var(--font-display); font-weight: 800
   option:hover, option:focus-visible { translate: none; }
   .pill:hover, .pill:focus-visible { translate: none; }
 }
+
+/* ---- the live view (/live/{event}/{set}) ---- */
+.live-wrap { display: grid; gap: var(--sp-4); max-width: 60rem; }
+.live-stage { width: 100%; height: auto; aspect-ratio: 16 / 9; background: var(--hill); border: var(--edge) solid var(--outline); border-radius: var(--radius); box-shadow: var(--shadow); }
+.live-hud { display: flex; flex-wrap: wrap; gap: var(--sp-3); margin: 0; padding: 0; list-style: none; }
+.live-card { display: grid; grid-template-columns: auto auto; gap: 0 var(--sp-3); min-width: 11rem; padding: var(--sp-2) var(--sp-3); background: var(--surface); color: var(--on-surface); border: var(--edge) solid var(--outline); border-radius: var(--radius); box-shadow: var(--shadow); }
+.live-card.p1 { border-left: 10px solid var(--p1); }
+.live-card.p2 { border-left: 10px solid var(--p2); }
+.live-tag { font-family: var(--font-display); font-size: 1.125rem; }
+.live-char, .live-stocks { color: var(--on-surface-quiet); font-size: 0.8125rem; }
+.live-pct { grid-row: span 2; align-self: center; text-align: right; font-family: var(--font-display); font-size: 1.75rem; font-variant-numeric: tabular-nums; }
+.live-note { color: var(--on-bg-quiet); font-size: 0.875rem; max-width: 48rem; }
+a.watch { display: inline-block; margin-top: var(--sp-1); color: inherit; font-size: 0.8125rem; }

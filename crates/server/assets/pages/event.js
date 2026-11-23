@@ -168,6 +168,9 @@
     return parts.join(", ");
   }
 
+  // Sets whose host is streaming the current game to the live relay (GET /v1/live).
+  let streamed = new Set();
+
   function setCard(set, j, scores, decidedBy, tagOf) {
     if (isHidden(set)) {
       const gap = el("li", "set spacer");
@@ -193,6 +196,11 @@
     face.append(slotRow(set.slots[0], 0, set, score, decided, tagOf));
     face.append(slotRow(set.slots[1], 1, set, score, decided, tagOf));
     card.append(words, face);
+    if (live && streamed.has(set.id)) {
+      const watch = el("a", "watch", "Watch live");
+      watch.href = "/live/" + encodeURIComponent(eventId) + "/" + encodeURIComponent(set.id);
+      card.append(watch);
+    }
     return card;
   }
 
@@ -365,7 +373,7 @@
       : "");
 
     // Nothing new since the last drawing: leave the page exactly as it is.
-    const key = JSON.stringify(view);
+    const key = JSON.stringify([view, [...streamed]]);
     if (key === drawnKey) return;
     drawnKey = key;
     // The entrance plays on the first drawing of the event (and of its bracket), never on a refresh.
@@ -391,7 +399,12 @@
 
   async function refresh() {
     try {
-      const [list, view] = await Promise.all([getJson("/v1/events"), getJson("/v1/events/" + eventId)]);
+      const [list, view, live] = await Promise.all([
+        getJson("/v1/events"),
+        getJson("/v1/events/" + eventId),
+        getJson("/v1/live?event=" + encodeURIComponent(eventId)).catch(() => []),
+      ]);
+      streamed = new Set((Array.isArray(live) ? live : []).filter((g) => !g.ended).map((g) => g.set_id));
       const events = (Array.isArray(list) ? list : []).slice().sort((a, b) => b.id - a.id);
       renderPicker(events);
       renderView(view);

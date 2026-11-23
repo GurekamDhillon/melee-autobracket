@@ -63,7 +63,7 @@ Contents:
 There are no accounts or passwords. A participant is an Ed25519 key pair; the public key is
 their identity. Every route except the public ones (`GET /`, `GET /events/{id}`,
 `GET /schedule`, `GET /history`, `GET /players`, `GET /players/{tag}`, `GET /assets/fonts/{file}`, `GET /v1/events`, `GET /v1/events/{id}`, `GET /v1/history`,
-`GET /v1/players`, `GET /v1/players/{tag}`) must be signed with four headers:
+`GET /v1/players`, `GET /v1/players/{tag}`, `GET /live/{event}/{set}`, `GET /v1/live`, `GET /v1/live/{event}/{set}`) must be signed with four headers:
 
 | Header | Value |
 |---|---|
@@ -226,6 +226,7 @@ described above; the tables list the other statuses.
 |---|---|---|---|---|---|
 | GET | `/` | public | — | 200 HTML landing page (live now, next up, latest results) | — |
 | GET | `/events/{id}` | public | — | 200 HTML bracket page; `{id}` is decimal digits as written | 400 (a sign, an escape or anything else), 404 |
+| GET | `/live/{event}/{set}` | public | — | 200 HTML live view of the set's current game (display only) | 400 |
 | GET | `/stream` | public | — | 200 HTML stream page | — |
 | GET | `/schedule` | public | — | 200 HTML schedule page | — |
 | GET | `/history` | public | — | 200 HTML history page | — |
@@ -244,6 +245,9 @@ described above; the tables list the other statuses.
 | POST | `/v1/sets/{event}/{set}/room` | player, host (slot 0) of the set | `RoomReq` | 204, empty | 400 bad code, or a direct-connect code where not allowed; 403 not in the set, or not the host; 404 no such set; 409 set not `ready`, or a game of the set is uploading (with an upload) or being judged |
 | POST | `/v1/sets/{event}/{set}/no-show` | player of the set | `NoShowReq`, or empty (a `no-show` with no note) | 204, empty | 400; 403; 404; 409 set not `ready` (or already in review), a game is uploading or being judged, or (kind `no-show` only) the room code was posted less than `no_show_grace_secs` ago |
 | POST | `/v1/sets/{event}/{set}/games/{n}/replay` | player of the set | the `.slp` file's bytes; header `x-ab-build` optional | 202 stored; 200 this exact file was already stored for this slot | 400 not a readable replay, bad `x-ab-build`; 403; 404; 409 `n` is not the current game, a different file is stored for this slot, the game no longer takes uploads, the set is not in play; 413 |
+| GET | `/v1/sets/{event}/{set}/games/{n}/live` | player, host (slot 0) of the set | — (a WebSocket upgrade, signed with an empty body) | 101, the live relay ingest | 403 not the host; 404 no such set, or `live_relay` off; 409 set not `ready`, or `n` not the current game |
+| GET | `/v1/live` | public | — (`?event={id}` optional) | 200 `[LiveInfo]` | — |
+| GET | `/v1/live/{event}/{set}` | public | — (a WebSocket upgrade) | 101, the set's live messages | 404 nothing streamed for the set, or `live_relay` off; 503 too many viewers (64 per set) |
 | POST | `/v1/admin/events` | organiser | `EventCreateReq` | 201 `EventSummary` | 400 |
 | POST | `/v1/admin/events/{id}/start` | organiser | ignored (send `{}`) | 200 `EventView` | 404; 409 already started, fewer than 2 entrants |
 | POST | `/v1/admin/events/{id}/schedule` | organiser | `EventScheduleReq` | 204, empty; replaces both fields, an omitted or null field clears it | 400; 404 |
@@ -285,6 +289,19 @@ Notes on individual routes:
   not answered within 300 s is offered again.
 - **Admin CLI commands** that use these routes include `autobracket admin quarantine get ID
   SLOT --out FILE` (it downloads `GET /v1/quarantine/{id}/replay/{slot}`).
+
+- <a id="live-relay"></a>**Live relay** (display only; `docs/design/live-relay.md` is the wire
+  format). During a game the host's engine opens the ingest WebSocket at the `live_path` from
+  `Next` and streams the game's Slippi event bytes as finalised. The server checks the signature
+  and the four refusals above before switching protocols, answers `connect_request` with
+  `connect_reply` (the cursor after the last message it stored), records skipped cursors as gaps,
+  and closes an older connection when a newer one for the set arrives. Viewers (the bracket
+  page's `/live/{event}/{set}`) dial `GET /v1/live/{event}/{set}` and receive the current game's
+  head (everything before its first frame), its last 600 messages, then every message as it
+  arrives: the ingest's `start_game`, `game_event` (`payload`, base64 event bytes) and `end_game`
+  objects, each with `cursor` and `game_no`. Nothing in the live stream is ever used for a
+  verdict, a result or a dispute; it is held in memory only. `LiveInfo`: `event_id`, `set_id`,
+  `game_no`, `ended`, `started_at`, `messages`, `event_bytes`, `gaps`, `viewers`.
 
 ## 5. Types
 
@@ -511,7 +528,9 @@ What the signing player should do next in the event (`GET /v1/me/next`):
 `Play` fields: `set_id`; `opponent_tag`; `role` (`"Host"` for slot 0, `"Guest"` for slot 1);
 `relay` (the netplay relay address, `host:port`); `room_code` (null until the host posts one
 for this game); `game_no` (1-based); `wins` (**`[me, opponent]`**); `best_of`; `stocks`;
-`timer_secs`; `awaiting_verdict` (my replay of `game_no` is in and not yet judged).
+`timer_secs`; `awaiting_verdict` (my replay of `game_no` is in and not yet judged);
+`live_path` (for the host only, when the server has `live_relay` on: the path of this game's
+live relay ingest, see [Live relay](#live-relay); null otherwise; older servers leave it out).
 
 <!-- checked: Next -->
 ```json
@@ -527,7 +546,8 @@ for this game); `game_no` (1-based); `wins` (**`[me, opponent]`**); `best_of`; `
     "best_of": 3,
     "stocks": 4,
     "timer_secs": 480,
-    "awaiting_verdict": false
+    "awaiting_verdict": false,
+    "live_path": "/v1/sets/1/0/games/2/live"
   }
 }
 ```

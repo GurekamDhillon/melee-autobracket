@@ -107,6 +107,7 @@ fn serde_round_trip() {
         stocks: 4,
         timer_secs: 480,
         awaiting_verdict: true,
+        live_path: None,
     };
     let s = serde_json::to_string(&next).unwrap();
     assert_eq!(serde_json::from_str::<Next>(&s).unwrap(), next);

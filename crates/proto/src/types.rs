@@ -32,6 +32,11 @@ pub enum Next {
         timer_secs: u32,
         /// My replay for `game_no` is uploaded and not yet judged.
         awaiting_verdict: bool,
+        /// For the host, when the server takes the live relay: the path of this game's live
+        /// ingest WebSocket (`/v1/sets/{event}/{set}/games/{n}/live`), on the server's own
+        /// address. Null for the guest, or when the server has the relay off. Display only.
+        #[serde(default)]
+        live_path: Option<String>,
     },
 }
 

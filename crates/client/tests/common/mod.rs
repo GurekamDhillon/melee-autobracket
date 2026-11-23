@@ -168,6 +168,7 @@ pub fn host_play() -> Next {
         stocks: 4,
         timer_secs: 480,
         awaiting_verdict: false,
+        live_path: None,
     }
 }
 

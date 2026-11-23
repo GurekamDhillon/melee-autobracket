@@ -289,3 +289,28 @@ fn internal(e: sqlx::Error) -> Rejection {
     tracing::error!(error = %crate::logging::detail(&e), "auth: database error");
     ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, "internal error")
 }
+
+/// A registered player's signed WebSocket upgrade (`GET` with an empty body, the live relay's
+/// ingest): the same checks as every signed route, in the same order, over the request's head
+/// only, since an upgrade has no body. Returns the signer's key.
+pub async fn upgrade_player(
+    state: &AppState,
+    parts: &axum::http::request::Parts,
+) -> Result<String, Rejection> {
+    let headers = signed_headers(&parts.headers).ok_or_else(|| {
+        state.rejections.record();
+        ApiError::new(StatusCode::UNAUTHORIZED, "missing signature headers")
+    })?;
+    let now = now_unix();
+    let key = check_headers(&headers, now).map_err(|e| sign_rejection(state, e))?;
+    authorize(state, &Role::Player, &key).await?;
+    let uri = parts
+        .extensions
+        .get::<OriginalUri>()
+        .map_or(&parts.uri, |o| &o.0);
+    let path_and_query = uri.path_and_query().map_or(uri.path(), |pq| pq.as_str());
+    verify_request(&headers, parts.method.as_str(), path_and_query, now, b"")
+        .map_err(|e| sign_rejection(state, e))?;
+    record_nonce(state, &key, &headers.nonce, now).await?;
+    Ok(key)
+}

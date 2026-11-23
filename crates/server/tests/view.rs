@@ -677,7 +677,7 @@ async fn documented_routes_exist() {
         seen += 1;
     }
     // Exact: a route added to the router must be added to the table too.
-    assert_eq!(seen, 33, "routes in the table");
+    assert_eq!(seen, 37, "routes in the table");
 }
 
 /// The final-review fixes that live in page scripts, pinned as text.

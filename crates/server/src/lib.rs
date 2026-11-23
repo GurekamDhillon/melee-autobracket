@@ -22,6 +22,7 @@ pub mod config;
 pub mod db;
 pub mod judge;
 pub mod lifecycle;
+pub mod live;
 pub mod logging;
 pub mod net;
 pub mod resim;
@@ -81,6 +82,7 @@ pub async fn build_app(cfg: Config, resim: Arc<dyn Resim>) -> anyhow::Result<(Ro
         rejections: Arc::default(),
         started_at: db::now_unix(),
         peer_only_alarm: Arc::default(),
+        live: Arc::default(),
     };
 
     if state.cfg.worker_enabled {
@@ -144,6 +146,8 @@ pub async fn serve(listener: TcpListener, app: Router, max_connections: usize) {
                 .timer(TokioTimer::new())
                 .header_read_timeout(HEADER_READ_TIMEOUT)
                 .serve_connection(TokioIo::new(stream), TowerToHyperService::new(service))
+                // the live relay's WebSockets
+                .with_upgrades()
                 .await;
             if let Err(e) = served {
                 tracing::debug!(error = %logging::detail(&e), "connection ended with an error");
