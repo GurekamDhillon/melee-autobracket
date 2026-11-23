@@ -433,7 +433,12 @@ client, and players on other clients arrange their connection themselves; a Geck
 must be on `allowed_gecko` (Slippi Dolphin writes one into every replay).
 
 Tested (`crates/server/tests/any_client_real.rs`, `#[ignore]`d, `AB_SLP_DIR=...`) on real
-Slippi Dolphin tournament replays kept outside the repository: never commit a `.slp`.
+Slippi Dolphin tournament replays kept outside the repository (never commit a `.slp`). On 3561
+such files (2019 tournament setups) outcome agreement held on all 3546 readable ones, but none
+would count as a bracket game: 3005 are `Illegal("players")` (the players were not on ports 1
+and 2) and 541 `Undecided` (no clear winner, e.g. quit out). So before this mode is useful
+with real Slippi players, ports must map to slots another way (the replay's connect codes or
+tags), which is still to do.
 
 ## Verifier modes
 
