@@ -27,6 +27,8 @@ pub struct AppState {
     /// been logged at error level: that happens once per process, every such game after it
     /// only gets its own warning.
     pub peer_only_alarm: Arc<AtomicBool>,
+    /// The live relay's streams (display only; never read for results).
+    pub live: Arc<crate::live::LiveHub>,
 }
 
 /// Abort handles of spawned background tasks, so an embedder (e.g. a test) can stop them.

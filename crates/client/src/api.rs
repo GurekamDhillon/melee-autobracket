@@ -148,6 +148,19 @@ pub struct Api {
 impl Api {
     /// `server` is the base URL, e.g. `http://127.0.0.1:8080`; `engine_build` is sent at
     /// sign-up and with each replay. Uses the default [`Timeouts`].
+    /// The WebSocket URL of a server path: `http` becomes `ws`, `https` becomes `wss`.
+    pub fn ws_url(&self, path: &str) -> String {
+        let base = self.base.trim_end_matches('/');
+        let ws = if let Some(rest) = base.strip_prefix("https://") {
+            format!("wss://{rest}")
+        } else if let Some(rest) = base.strip_prefix("http://") {
+            format!("ws://{rest}")
+        } else {
+            base.to_owned()
+        };
+        format!("{ws}{path}")
+    }
+
     pub fn new(server: &str, sk: SigningKey, engine_build: &str) -> Self {
         Self::with_timeouts(server, sk, engine_build, Timeouts::default())
     }

@@ -112,6 +112,7 @@ async fn next_roles() {
             stocks: 4,
             timer_secs: 480,
             awaiting_verdict: false,
+            live_path: Some(format!("/v1/sets/{event}/0/games/1/live")),
         }
     );
     assert_eq!(
@@ -128,6 +129,7 @@ async fn next_roles() {
             stocks: 4,
             timer_secs: 480,
             awaiting_verdict: false,
+            live_path: None,
         }
     );
 }

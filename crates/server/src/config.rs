@@ -75,6 +75,14 @@ pub struct Config {
     /// a MediaMTX WebRTC viewer). Only its origin ([`Config::stream_origin`]) may be framed.
     #[serde(default)]
     pub stream_url: Option<String>,
+    /// The live relay (docs/design/live-relay.md): hosts stream their games here for the
+    /// bracket page's live view. Display only. On by default.
+    #[serde(default = "default_true")]
+    pub live_relay: bool,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 #[derive(Deserialize, Clone, Debug)]
@@ -147,6 +155,7 @@ impl Config {
             no_show_grace_secs: default_no_show_grace_secs(),
             allow_direct_connect: false,
             stream_url: None,
+            live_relay: true,
         }
     }
 

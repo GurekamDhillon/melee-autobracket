@@ -13,6 +13,7 @@ use crate::state::AppState;
 
 mod admin;
 mod events;
+mod live;
 mod players;
 mod quarantine;
 mod results;
@@ -47,6 +48,10 @@ pub fn router() -> Router<AppState> {
             delete(admin::remove_entrant),
         )
         .route("/v1/admin/invites", post(admin::create_invite))
+        .route("/v1/live", get(live::list))
+        .route("/v1/live/{event}/{set}", get(live::watch))
+        .route("/live/{event}/{set}", get(view::live))
+        .route("/v1/sets/{event}/{set}/games/{n}/live", get(live::ingest))
         .route("/v1/me/next", get(sets::next))
         .route("/v1/sets/{event}/{set}/room", post(sets::room))
         .route("/v1/sets/{event}/{set}/no-show", post(sets::no_show))

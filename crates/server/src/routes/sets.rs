@@ -116,6 +116,9 @@ pub async fn next(
             stocks: ruleset.stocks,
             timer_secs: ruleset.timer_secs,
             awaiting_verdict: awaiting,
+            live_path: (slot == 0 && state.cfg.live_relay).then(|| {
+                format!("/v1/sets/{event}/{}/games/{}/live", set.id, game.game_no)
+            }),
         }));
     }
 
@@ -693,4 +696,35 @@ fn corrupt(e: impl Display) -> ApiError {
 /// Narrows a stored integer, treating an out-of-range value as corrupt data.
 fn narrow<T: TryFrom<i64>>(v: i64) -> Result<T, ApiError> {
     T::try_from(v).map_err(|_| corrupt(format_args!("stored integer {v} out of range")))
+}
+
+/// The live relay's ingest checks (docs/design/live-relay.md section 2), after the signature:
+/// 404 for an unknown set, 403 unless `key` is the set's host (slot 0), 409 unless `n` is the
+/// set's current game and the set is in play.
+pub(crate) async fn live_ingest_check(
+    state: &AppState,
+    event: i64,
+    set: i64,
+    n: i64,
+    key: &str,
+) -> Result<(), ApiError> {
+    let mut tx = state.db.begin().await?;
+    let seat = seat(&mut tx, event, set, key).await?;
+    if seat.slot != 0 {
+        return Err(ApiError::new(
+            StatusCode::FORBIDDEN,
+            "only the host streams the game live",
+        ));
+    }
+    if seat.set_state != "ready" {
+        return Err(ApiError::new(StatusCode::CONFLICT, "set is not in play"));
+    }
+    let game = current_game(&mut tx, event, set).await?;
+    if n != game.game_no {
+        return Err(ApiError::new(
+            StatusCode::CONFLICT,
+            format!("the current game is {}", game.game_no),
+        ));
+    }
+    Ok(())
 }

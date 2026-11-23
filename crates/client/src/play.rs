@@ -877,6 +877,7 @@ async fn play(
         stocks,
         timer_secs,
         awaiting_verdict,
+        live_path,
         ..
     } = next
     else {
@@ -897,10 +898,12 @@ async fn play(
     {
         l.later = None;
     }
+    let live_url = live_path.as_deref().map(|p| api.ws_url(p));
     let params = GameParams {
         relay,
         stocks: *stocks,
         timer_secs: *timer_secs,
+        live_url: live_url.as_deref(),
     };
     let this_game = Launch {
         event,

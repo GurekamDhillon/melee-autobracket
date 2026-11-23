@@ -42,6 +42,12 @@ const SOURCES: &[(&str, &str, &str, &str)] = &[
         include_str!("../../assets/pages/stream.js"),
     ),
     (
+        "live",
+        "Live",
+        include_str!("../../assets/pages/live.html"),
+        include_str!("../../assets/pages/live.js"),
+    ),
+    (
         "schedule",
         "Schedule",
         include_str!("../../assets/pages/schedule.html"),
@@ -163,6 +169,12 @@ pub async fn stream(State(state): State<AppState>) -> Response {
         Some(origin) => page_with_csp("stream", |p| p.csp_with(&format!("frame-src {origin}"))),
         None => page("stream"),
     }
+}
+
+/// `GET /live/{event}/{set}`: the live view of a set's current game (the page reads the ids
+/// back from the address bar and dials `/v1/live/{event}/{set}`).
+pub async fn live(Path((_event, _set)): Path<(u64, u64)>) -> Response {
+    page("live")
 }
 
 /// `GET /schedule`: what is running and what is coming up.

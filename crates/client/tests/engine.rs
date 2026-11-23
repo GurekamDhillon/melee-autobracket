@@ -12,6 +12,7 @@ const PARAMS: GameParams<'static> = GameParams {
     relay: "relay.example:7000",
     stocks: 3,
     timer_secs: 420,
+    live_url: None,
 };
 
 fn fake_melee() -> PathBuf {

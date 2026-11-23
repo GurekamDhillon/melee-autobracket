@@ -38,6 +38,10 @@ pub struct GameParams<'a> {
     pub relay: &'a str,
     pub stocks: u8,
     pub timer_secs: u32,
+    /// The host's live relay URL (`ws://` or `wss://`), from the server's `live_path`: the
+    /// engine gets `--relay-url` and `--relay-key` (the client config, which holds the key).
+    /// Display only; `None` for the guest or when the server has the relay off.
+    pub live_url: Option<&'a str>,
 }
 
 /// The line an engine with `--np-join-wait` prints when it was hosting and no guest joined
@@ -142,6 +146,8 @@ pub struct CommandEngine {
     work_dir: PathBuf,
     host_args: Vec<String>,
     join_args: Vec<String>,
+    /// The file `--relay-key` names: the client config (its `secret_key_hex`).
+    relay_key: Option<PathBuf>,
     code_regex: Regex,
     output: Output,
     run: Option<Run>,
@@ -204,12 +210,20 @@ impl CommandEngine {
             work_dir: crate::config::resolve_work_dir(&cfg.work_dir)?,
             host_args: cfg.host_args.clone(),
             join_args: cfg.join_args.clone(),
+            relay_key: None,
             code_regex,
             output: Arc::new(|line: &str| eprintln!("{line}")),
             run: None,
             last_exit: None,
             last_run: None,
         })
+    }
+
+    /// The key file a hosted game's live relay signs with (`--relay-key`): the client config.
+    /// Without one, no live relay flags are passed.
+    pub fn set_relay_key(&mut self, path: &Path) -> anyhow::Result<()> {
+        self.relay_key = Some(absolute(path)?);
+        Ok(())
     }
 
     /// Sends the game's output lines to `sink` instead of the client's stderr.
@@ -232,7 +246,7 @@ impl CommandEngine {
             &self.join_args
         };
         self.last_run = Some((dir.clone(), template.clone()));
-        let args: Vec<String> = template
+        let mut args: Vec<String> = template
             .iter()
             .map(|a| {
                 a.replace("{iso}", &self.iso)
@@ -243,6 +257,15 @@ impl CommandEngine {
                     .replace("{timer_secs}", &timer_secs)
             })
             .collect();
+        // The live relay (display only): the host streams finalised frames to the server.
+        if let (true, Some(url), Some(key)) = (host, p.live_url, &self.relay_key) {
+            args.extend([
+                "--relay-url".to_owned(),
+                url.to_owned(),
+                "--relay-key".to_owned(),
+                utf8(key)?.to_owned(),
+            ]);
+        }
 
         // The game writes its output to a file in its run directory, not to a pipe into
         // this process, and runs in its own process group: if the client exits or is
