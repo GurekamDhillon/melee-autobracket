@@ -98,6 +98,7 @@ async fn any_client_on_real_slippi_replays() {
     };
 
     let (mut tried, mut agreed, mut skipped) = (0, 0, 0);
+    let mut why: std::collections::BTreeMap<String, usize> = Default::default();
     let (mut verified, mut foreign) = (0, 0);
     let mut previous: Option<(PathBuf, Vec<u8>)> = None;
     for path in files {
@@ -106,16 +107,20 @@ async fn any_client_on_real_slippi_replays() {
         }
         let bytes = std::fs::read(&path).unwrap();
         let Ok(facts) = replay::parse(&bytes) else {
+            *why.entry("unparseable".into()).or_default() += 1;
             skipped += 1;
             continue;
         };
         let on = rules_for(&facts, true);
         // Only legal, decided two-player games are what a bracket would see.
-        let Pre::NeedsResim { last_frame, .. } = pre_judge([Some(&bytes), Some(&bytes)], &on) else {
+        let pre = pre_judge([Some(&bytes), Some(&bytes)], &on);
+        let Pre::NeedsResim { last_frame, .. } = pre else {
+            *why.entry(format!("{pre:?}")).or_default() += 1;
             skipped += 1;
             continue;
         };
         let Some(other) = tweak(&bytes) else {
+            *why.entry("no pre-frame to tweak".into()).or_default() += 1;
             skipped += 1;
             continue;
         };
@@ -159,5 +164,6 @@ async fn any_client_on_real_slippi_replays() {
         "RESULT tried {tried}, outcome-agreement {agreed}, skipped {skipped}; resim: Verified {verified}, UnverifiedForeign {foreign}{}",
         if checker.is_none() { " (no AB_ENGINE: resim not run)" } else { "" }
     );
+    println!("skipped because: {why:?}");
     assert!(tried > 0, "no usable replays under {}", dir.display());
 }
