@@ -462,17 +462,17 @@ fn finish_table() {
         (ResimOutcome::Skipped, Verdict::PeerOnly, Verdict::PeerOnly),
     ];
     for (outcome, strict, lenient) in cases {
-        assert_eq!(finish(&outcome, true, true), strict, "{outcome:?} strict");
+        assert_eq!(finish(&outcome, true, true, false), strict, "{outcome:?} strict");
         assert_eq!(
-            finish(&outcome, false, true),
+            finish(&outcome, false, true, false),
             lenient,
             "{outcome:?} lenient"
         );
     }
     for strict in [true, false] {
-        assert_eq!(finish(&unavailable, strict, false), Verdict::PeerOnly);
+        assert_eq!(finish(&unavailable, strict, false, false), Verdict::PeerOnly);
         assert_eq!(
-            finish(&ResimOutcome::Skipped, strict, false),
+            finish(&ResimOutcome::Skipped, strict, false, false),
             Verdict::PeerOnly
         );
     }
@@ -516,4 +516,88 @@ fn upload_evidence_describes_the_file() {
     assert!(ev.get("winner_port").is_none());
     let ev = upload_evidence(0, &meta, None, &rules);
     assert_eq!(ev["parse"], "stored file unreadable");
+}
+
+fn any_client() -> Ruleset {
+    Ruleset {
+        any_client: true,
+        ..Ruleset::default()
+    }
+}
+
+#[test]
+fn any_client_pair_agrees_on_outcome_not_bytes() {
+    // Same result, different bytes (one client recorded a frame's percent differently).
+    let a = base().end(2, None).build();
+    let b = base().frame(5400, 2, 2, 64.0).end(2, None).build();
+    assert_eq!(
+        pre_judge([Some(&a), Some(&b)], &Ruleset::default()),
+        Pre::Final(Verdict::Conflicted),
+        "off: byte-identical raw required"
+    );
+    assert_eq!(
+        pre_judge([Some(&a), Some(&b)], &any_client()),
+        Pre::NeedsResim {
+            winner_port: 2,
+            last_frame: 5400
+        }
+    );
+}
+
+#[test]
+fn any_client_pair_with_another_outcome_is_conflicted() {
+    let a = base().end(2, None).build();
+    // Port 1 ends with a stock left: another winner.
+    let b = base().frame(5400, 1, 3, 0.0).end(2, None).build();
+    assert_eq!(
+        pre_judge([Some(&a), Some(&b)], &any_client()),
+        Pre::Final(Verdict::Conflicted)
+    );
+    // Another stage.
+    let c = base().stage(3).end(2, None).build();
+    assert_eq!(
+        pre_judge([Some(&a), Some(&c)], &any_client()),
+        Pre::Final(Verdict::Conflicted)
+    );
+    // Another game end.
+    let d = base().end(7, Some(1)).build();
+    assert_eq!(
+        pre_judge([Some(&a), Some(&d)], &any_client()),
+        Pre::Final(Verdict::Conflicted)
+    );
+    // An unreadable file against a readable one.
+    assert_eq!(
+        pre_judge([Some(&a), Some(b"not a replay")], &any_client()),
+        Pre::Final(Verdict::Conflicted)
+    );
+}
+
+#[test]
+fn any_client_checks_legality_of_both() {
+    let a = base().end(2, None).build();
+    let b = base().gecko(true).end(2, None).build();
+    assert_eq!(
+        pre_judge([Some(&a), Some(&b)], &any_client()),
+        illegal("gecko")
+    );
+}
+
+#[test]
+fn any_client_divergence_is_unverified_foreign_and_counts() {
+    let diverged = ResimOutcome::Diverged {
+        frame: 10,
+        port: 1,
+        field: "pos_x".into(),
+        engine_value: "1".into(),
+        replay_value: "2".into(),
+    };
+    for strict in [true, false] {
+        assert_eq!(finish(&diverged, strict, true, true), Verdict::UnverifiedForeign);
+        assert_eq!(
+            finish(&ResimOutcome::EarlyEnd { engine_last: 1, replay_last: 2 }, strict, true, true),
+            Verdict::UnverifiedForeign
+        );
+        assert_eq!(finish(&ResimOutcome::Match, strict, true, true), Verdict::Verified);
+    }
+    assert!(Verdict::UnverifiedForeign.counts());
 }

@@ -65,13 +65,29 @@ pub fn pre_judge(uploads: [Option<&[u8]>; 2], rules: &Ruleset) -> Pre {
     let [Some(a), Some(b)] = uploads else {
         return Pre::Final(Verdict::Single);
     };
-    match (replay::raw_element(a), replay::raw_element(b)) {
-        (Ok(ra), Ok(rb)) if ra == rb => {}
-        _ => return Pre::Final(Verdict::Conflicted),
-    }
-    // Identical raw streams parse identically, so one parse speaks for both.
-    let Ok(facts) = replay::parse(a) else {
-        return Pre::Final(Verdict::Undecided);
+    let facts = if rules.any_client {
+        // Different clients need not write byte-identical streams: the pair agrees when both
+        // parse and derive the same outcome. Legality is then checked on each.
+        match (replay::parse(a), replay::parse(b)) {
+            (Ok(fa), Ok(fb)) if outcome(&fa) == outcome(&fb) => {
+                if let Err(word) = legality(&fb, rules) {
+                    return Pre::Final(Verdict::Illegal(word.to_string()));
+                }
+                fa
+            }
+            (Err(_), Err(_)) => return Pre::Final(Verdict::Undecided),
+            _ => return Pre::Final(Verdict::Conflicted),
+        }
+    } else {
+        match (replay::raw_element(a), replay::raw_element(b)) {
+            (Ok(ra), Ok(rb)) if ra == rb => {}
+            _ => return Pre::Final(Verdict::Conflicted),
+        }
+        // Identical raw streams parse identically, so one parse speaks for both.
+        let Ok(facts) = replay::parse(a) else {
+            return Pre::Final(Verdict::Undecided);
+        };
+        facts
     };
     if let Err(word) = legality(&facts, rules) {
         return Pre::Final(Verdict::Illegal(word.to_string()));
@@ -101,13 +117,57 @@ pub fn pre_judge(uploads: [Option<&[u8]>; 2], rules: &Ruleset) -> Pre {
     }
 }
 
+/// What two uploads must agree on in any-client mode: the derived result of the game, not its
+/// bytes. Stage; each player's port, character and final stocks; how the game ended (method
+/// and LRAS initiator); the winning port; and the last frame.
+#[derive(Debug, PartialEq, Eq)]
+pub struct Outcome {
+    pub stage: u16,
+    pub players: Vec<(u8, u8, Option<u8>)>,
+    pub end: Option<(u8, Option<u8>)>,
+    pub winner_port: Option<u8>,
+    pub last_frame: i32,
+}
+
+/// The derived outcome of one parsed replay.
+pub fn outcome(f: &ReplayFacts) -> Outcome {
+    Outcome {
+        stage: f.stage,
+        players: f
+            .players
+            .iter()
+            .map(|p| {
+                let last = f.finals.iter().find(|x| x.port == p.port);
+                (p.port, p.character, last.map(|x| x.stocks))
+            })
+            .collect(),
+        end: f.end.as_ref().map(|e| (e.method, e.lras_initiator)),
+        winner_port: replay::winner_port(f),
+        last_frame: f.last_frame,
+    }
+}
+
 /// Turns a resim outcome into the final verdict for a game that needed one. `verifier_on` is
 /// whether the server is configured to re-simulate (`verifier.mode` not `off`): then a game
 /// the verifier could not check (`Unavailable`) does not count under `strict_resim`
 /// (`VerifierUnavailable`), and counts on peer agreement alone (`PeerOnly`) otherwise.
-pub fn finish(resim: &ResimOutcome, strict_resim: bool, verifier_on: bool) -> Verdict {
+///
+/// In any-client mode (`any_client`) a re-simulation that diverged, ended early or crashed is
+/// `UnverifiedForeign` (the replay may come from another client): it counts on peer agreement
+/// and the ruleset, and is quarantined for the organiser, whatever `strict_resim` says.
+pub fn finish(
+    resim: &ResimOutcome,
+    strict_resim: bool,
+    verifier_on: bool,
+    any_client: bool,
+) -> Verdict {
     match resim {
         ResimOutcome::Match => Verdict::Verified,
+        ResimOutcome::Diverged { .. } | ResimOutcome::EarlyEnd { .. } | ResimOutcome::Crashed(_)
+            if any_client =>
+        {
+            Verdict::UnverifiedForeign
+        }
         ResimOutcome::Diverged { .. }
         | ResimOutcome::EarlyEnd { .. }
         | ResimOutcome::Crashed(_) => {

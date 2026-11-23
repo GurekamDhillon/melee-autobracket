@@ -438,7 +438,7 @@ async fn pre_judge_then_finish_is_verified() {
         };
         assert_eq!(last_frame, facts.last_frame);
         let outcome = checker.check(host, last_frame).await;
-        let verdict = finish(&outcome, false, true);
+        let verdict = finish(&outcome, false, true, false);
         println!(
             "{}: winner p{winner_port}, last_frame {last_frame}, {} -> {verdict:?}",
             host.display(),
@@ -669,18 +669,18 @@ async fn missing_disc_is_unavailable() {
     println!(
         "disc gone after start-up: {} -> {:?}",
         outcome_word(&outcome),
-        finish(&outcome, false, true)
+        finish(&outcome, false, true, false)
     );
     match &outcome {
         ResimOutcome::Unavailable(why) => assert!(why.starts_with("boot-error"), "{why}"),
         other => panic!(
             "a missing disc image gave {other:?}, which `finish` turns into {:?}",
-            finish(other, false, true)
+            finish(other, false, true, false)
         ),
     }
-    assert_eq!(finish(&outcome, false, true), Verdict::PeerOnly);
+    assert_eq!(finish(&outcome, false, true, false), Verdict::PeerOnly);
     // Under strict_resim the game would go to the organiser instead.
-    assert_eq!(finish(&outcome, true, true), Verdict::VerifierUnavailable);
+    assert_eq!(finish(&outcome, true, true, false), Verdict::VerifierUnavailable);
 }
 
 #[test]
