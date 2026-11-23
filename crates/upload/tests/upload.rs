@@ -102,7 +102,7 @@ async fn foreign_uploads_agreeing_on_the_outcome_count() {
     let q: serde_json::Value = app.as_to().get("/v1/quarantine").await.json().await.unwrap();
     assert_eq!(q[0]["kind"], "UnverifiedForeign");
     let next = guest.next(event).await.unwrap();
-    assert_eq!(next.body, "\"Eliminated\"");
+    assert_eq!(next.body, "\"Champion\"", "port 2, the guest, won");
 }
 
 #[tokio::test]
